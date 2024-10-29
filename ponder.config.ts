@@ -1,21 +1,30 @@
 import { createConfig } from "@ponder/core";
 import { http } from "viem";
 
-import { ExampleContractAbi } from "./abis/ExampleContractAbi";
+import { CorePoolAbi } from "./abis/CorePoolAbi";
+import { OracleAbi } from "./abis/OracleAbi";
 
 export default createConfig({
-  networks: {
-    mainnet: {
-      chainId: 1,
-      transport: http(process.env.PONDER_RPC_URL_1),
+    networks: {
+        hyperEvmTestnet: {
+            chainId: 998,
+            transport: http(process.env.PONDER_RPC_URL_998),
+        },
     },
-  },
-  contracts: {
-    ExampleContract: {
-      network: "mainnet",
-      abi: ExampleContractAbi,
-      address: "0x0000000000000000000000000000000000000000",
-      startBlock: 1234567,
+    contracts: {
+        CorePool: {
+            network: "hyperEvmTestnet",
+            abi: CorePoolAbi,
+            address: [
+                "0x1e85CCDf0D098a9f55b82F3E35013Eda235C8BD8", //main pool
+            ],
+            startBlock: 9610948,
+        },
+        Oracle: {
+            network: "hyperEvmTestnet",
+            abi: OracleAbi,
+            address: "0xecbD8482C698B7b2706807A32d7FDf4E9a55C6A1", //main pool oracle
+            startBlock: 9610948,
+        }
     },
-  },
 });
