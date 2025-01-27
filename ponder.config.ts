@@ -1,4 +1,4 @@
-import { createConfig } from "@ponder/core";
+import { createConfig } from "ponder";
 import { http } from "viem";
 
 import { CorePoolAbi } from "./abis/CorePoolAbi";
@@ -25,6 +25,12 @@ export default createConfig({
             abi: OracleAbi,
             address: "0xecbD8482C698B7b2706807A32d7FDf4E9a55C6A1", //main pool oracle
             startBlock: 16650240,
+        },
+        IsolatedPair_WETH_MBTC: {
+            network: "hyperEvmTestnet",
+            abi: OracleAbi,
+            address: "0x0B37927864EFcEf9829B62cca4C9dC9453C51EA2",
+            startBlock: 16955197,
         }
     },
 });
