@@ -15,10 +15,17 @@ import {
     MintUnbacked, 
     BackUnbacked, 
     RebalanceStableBorrowRate, 
-    IsolationModeTotalDebtUpdated 
+    IsolationModeTotalDebtUpdated,
+    BorrowAssetIsolated,
+    RepayAssetIsolated,
+    AddCollateralIsolated,
+    RemoveCollateralIsolated,
+    LiquidateIsolated,
+    DepositIsolated,
+    WithdrawIsolated
 } from "ponder:schema";
 
-import { getOraclePrice } from "./helpers/getPrice";
+import { getOraclePrice, getIsolatedOraclePrice } from "./helpers/getPrice";
 
 // Borrow Event Handler
 ponder.on("CorePool:Borrow", async ({ event, context }) => {
@@ -279,5 +286,166 @@ ponder.on("CorePool:IsolationModeTotalDebtUpdated", async ({ event, context }) =
         asset: event.args.asset,
         totalDebt: event.args.totalDebt,
         timestamp: Number(event.block.timestamp),
+    });
+});
+
+/// ISOLATED PAIRS
+
+ponder.on("IsolatedPair:BorrowAsset", async ({ event, context }) => {
+    let price = null;
+
+    try {
+        //note: event.transaction.to can never be null
+        price = await getIsolatedOraclePrice(context, event.transaction.to || "0xNEW");
+    } catch (e: any) {
+        console.error(`Error fetching reserve price: ${e.message}`);
+    }
+
+    await context.db.insert(BorrowAssetIsolated).values({
+        id: event.log.id,
+        txHash: event.transaction.hash,
+        pair: event.transaction.to || "0xNEW",
+        borrower: event.args._borrower,
+        receiver: event.args._receiver,
+        borrowAmount: event.args._borrowAmount,
+        sharesAdded: event.args._sharesAdded,
+        timestamp: Number(event.block.timestamp),
+        price: price
+    });
+});
+
+ponder.on("IsolatedPair:RepayAsset", async ({ event, context }) => {
+    let price = null;
+
+    try {
+        price = await getIsolatedOraclePrice(context, event.transaction.to || "0xNEW");
+    } catch (e: any) {
+        console.error(`Error fetching reserve price: ${e.message}`);
+    }
+
+    await context.db.insert(RepayAssetIsolated).values({
+        id: event.log.id,
+        txHash: event.transaction.hash,
+        pair: event.transaction.to || "0xNEW",
+        borrower: event.args.borrower,
+        payer: event.args.payer,
+        amountToRepay: event.args.amountToRepay,
+        shares: event.args.shares,
+        timestamp: Number(event.block.timestamp),
+        price: price,
+    });
+});
+
+ponder.on("IsolatedPair:AddCollateral", async ({ event, context }) => {
+    let price = null;
+
+    try {
+        price = await getIsolatedOraclePrice(context, event.transaction.to || "0xNEW");
+    } catch (e: any) {
+        console.error(`Error fetching reserve price: ${e.message}`);
+    }
+
+    await context.db.insert(AddCollateralIsolated).values({
+        id: event.log.id,
+        txHash: event.transaction.hash,
+        pair: event.transaction.to || "0xNEW",
+        borrower: event.args.borrower,
+        sender: event.args.sender,
+        collateralAmount: event.args.collateralAmount,
+        timestamp: Number(event.block.timestamp),
+        price: price,
+    });
+});
+
+ponder.on("IsolatedPair:RemoveCollateral", async ({ event, context }) => {
+    let price = null;
+
+    try {
+        price = await getIsolatedOraclePrice(context, event.transaction.to || "0xNEW");
+    } catch (e: any) {
+        console.error(`Error fetching reserve price: ${e.message}`);
+    }
+
+    await context.db.insert(RemoveCollateralIsolated).values({
+        id: event.log.id,
+        txHash: event.transaction.hash,
+        pair: event.transaction.to || "0xNEW",
+        receiver: event.args._receiver,
+        sender: event.args._sender,
+        borrower: event.args._borrower,
+        collateralAmount: event.args._collateralAmount,
+        timestamp: Number(event.block.timestamp),
+        price: price,
+    });
+});
+
+ponder.on("IsolatedPair:Liquidate", async ({ event, context }) => {
+    let price = null;
+
+    try {
+        price = await getIsolatedOraclePrice(context, event.transaction.to || "0xNEW");
+    } catch (e: any) {
+        console.error(`Error fetching reserve price: ${e.message}`);
+    }
+
+    await context.db.insert(LiquidateIsolated).values({
+        id: event.log.id,
+        txHash: event.transaction.hash,
+        pair: event.transaction.to || "0xNEW",
+        borrower: event.args._borrower,
+        liquidator: event.transaction.from,
+        collateralForLiquidator: event.args._collateralForLiquidator,
+        sharesToLiquidate: event.args._sharesToLiquidate,
+        amountLiquidatorToRepay: event.args._amountLiquidatorToRepay,
+        feesAmount: event.args._feesAmount,
+        sharesToAdjust: event.args._sharesToAdjust,
+        amountToAdjust: event.args._amountToAdjust,
+        timestamp: Number(event.block.timestamp),
+        price: price,
+    });
+});
+
+ponder.on("IsolatedPair:Deposit", async ({ event, context }) => {
+    let price = null;
+
+    try {
+        price = await getIsolatedOraclePrice(context, event.transaction.to || "0xNEW");
+    } catch (e: any) {
+        console.error(`Error fetching reserve price: ${e.message}`);
+    }
+
+    await context.db.insert(DepositIsolated).values({
+        id: event.log.id,
+        txHash: event.transaction.hash,
+        pair: event.transaction.to || "0xNEW",
+        caller: event.args.caller,
+        owner: event.args.owner,
+        assets: event.args.assets,
+        shares: event.args.shares,
+        timestamp: Number(event.block.timestamp),
+        price: price,
+    });
+});
+
+ponder.on("IsolatedPair:Withdraw", async ({ event, context }) => {
+    let price = null;
+
+    try {
+        price = await getIsolatedOraclePrice(context, event.transaction.to || "0xNEW");
+    } catch (e: any) {
+        console.error(`Error fetching reserve price: ${e.message}`);
+    }
+
+    await context.db.insert(WithdrawIsolated).values({
+        id: event.log.id,
+        txHash: event.transaction.hash,
+        pair: event.transaction.to || "0xNEW",
+        caller: event.args.caller,
+        owner: event.args.owner,
+        receiver: event.args.receiver,
+        assets: event.args.assets,
+        shares: event.args.shares,
+        timestamp: Number(event.block.timestamp),
+        price: price,
     });
 });

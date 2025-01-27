@@ -1,4 +1,6 @@
 import { OracleAbi } from "../../abis/OracleAbi";
+import { IsolatedAbi } from "../../abis/IsolatedAbi";
+
 import config from "../../ponder.config";
 
 export async function getOraclePrice(context: any, reserve: string){
@@ -10,4 +12,15 @@ export async function getOraclePrice(context: any, reserve: string){
     });
 
     return priceData;
+}
+
+export async function getIsolatedOraclePrice(context: any, pair: string){
+    const priceData = await context.client.readContract({
+        abi: IsolatedAbi,
+        address: pair,
+        functionName: "exchangeRateInfo",
+        args: []
+    });
+
+    return priceData.highExchangeRate;
 }

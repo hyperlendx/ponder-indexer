@@ -194,3 +194,144 @@ export const IsolationModeTotalDebtUpdated = onchainTable("isolation_mode_total_
     totalDebt: t.bigint(),
     timestamp: t.integer(),
 }));
+
+/// ISOLATED POOLS
+
+export const BorrowAssetIsolated = onchainTable(
+    "borrow_asset_isolated",
+    (t) => ({
+        id: t.text().primaryKey(),
+        txHash: t.hex(),
+        pair: t.hex(),
+        borrower: t.hex(),
+        receiver: t.hex(),
+        borrowAmount: t.bigint(),
+        sharesAdded: t.bigint(),
+        timestamp: t.integer(),
+        price: t.bigint(),
+    }),
+    (table) => ({
+        borrowerIdx: index().on(table.borrower),
+        receiverIdx: index().on(table.receiver),
+    })
+);
+
+export const RepayAssetIsolated = onchainTable(
+    "repay_asset_isolated",
+    (t) => ({
+        id: t.text().primaryKey(),
+        txHash: t.hex(),
+        pair: t.hex(),
+        borrower: t.hex(),
+        payer: t.hex(),
+        amountToRepay: t.bigint(),
+        shares: t.bigint(),
+        timestamp: t.integer(),
+        price: t.bigint(),
+    }),
+    (table) => ({
+        borrowerIdx: index().on(table.borrower),
+        payerIdx: index().on(table.payer),
+    })
+);
+
+export const AddCollateralIsolated = onchainTable(
+    "add_collateral_isolated",
+    (t) => ({
+        id: t.text().primaryKey(),
+        txHash: t.hex(),
+        pair: t.hex(),
+        borrower: t.hex(),
+        sender: t.hex(),
+        collateralAmount: t.bigint(),
+        timestamp: t.integer(),
+        price: t.bigint(),
+    }),
+    (table) => ({
+        borrowerIdx: index().on(table.borrower),
+        senderIdx: index().on(table.sender),
+    })
+);
+
+export const RemoveCollateralIsolated = onchainTable(
+    "remove_collateral_isolated",
+    (t) => ({
+        id: t.text().primaryKey(),
+        txHash: t.hex(),
+        pair: t.hex(),
+        receiver: t.hex(),
+        sender: t.hex(),
+        borrower: t.hex(),
+        collateralAmount: t.bigint(),
+        timestamp: t.integer(),
+        price: t.bigint(),
+    }),
+    (table) => ({
+        receiverIdx: index().on(table.receiver),
+        senderIdx: index().on(table.sender),
+        borrowerIdx: index().on(table.borrower),
+    })
+);
+
+export const LiquidateIsolated = onchainTable(
+    "liquidate_isolated",
+    (t) => ({
+        id: t.text().primaryKey(),
+        txHash: t.hex(),
+        pair: t.hex(),
+        borrower: t.hex(),
+        liquidator: t.hex(),
+        collateralForLiquidator: t.bigint(),
+        sharesToLiquidate: t.bigint(),
+        amountLiquidatorToRepay: t.bigint(),
+        feesAmount: t.bigint(),
+        sharesToAdjust: t.bigint(),
+        amountToAdjust: t.bigint(),
+        timestamp: t.integer(),
+        price: t.bigint(),
+    }),
+    (table) => ({
+        liquidatorIdx: index().on(table.liquidator),
+        borrowerIdx: index().on(table.borrower),
+    })
+);
+
+export const DepositIsolated = onchainTable(
+    "deposit_isolated",
+    (t) => ({
+        id: t.text().primaryKey(),
+        txHash: t.hex(),
+        pair: t.hex(),
+        caller: t.hex(),
+        owner: t.hex(),
+        assets: t.bigint(),
+        shares: t.bigint(),
+        timestamp: t.integer(),
+        price: t.bigint(),
+    }),
+    (table) => ({
+        callerIdx: index().on(table.caller),
+        ownerIdx: index().on(table.owner),
+    })
+); 
+
+export const WithdrawIsolated = onchainTable(
+    "withdraw_isolated",
+    (t) => ({
+        id: t.text().primaryKey(),
+        txHash: t.hex(),
+        pair: t.hex(),
+        caller: t.hex(),
+        owner: t.hex(),
+        receiver: t.hex(),
+        assets: t.bigint(),
+        shares: t.bigint(),
+        timestamp: t.integer(),
+        price: t.bigint(),
+    }),
+    (table) => ({
+        callerIdx: index().on(table.caller),
+        ownerIdx: index().on(table.owner),
+        receiverIdx: index().on(table.receiver),
+    })
+); 

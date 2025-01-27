@@ -1,8 +1,9 @@
-import { createConfig } from "ponder";
-import { http } from "viem";
+import { createConfig, factory } from "ponder";
+import { http, parseAbiItem } from "viem";
 
 import { CorePoolAbi } from "./abis/CorePoolAbi";
 import { OracleAbi } from "./abis/OracleAbi";
+import { IsolatedAbi } from "./abis/IsolatedAbi";
 
 export default createConfig({
     networks: {
@@ -18,19 +19,26 @@ export default createConfig({
             address: [
                 "0x1e85CCDf0D098a9f55b82F3E35013Eda235C8BD8", //main pool
             ],
-            startBlock: 16650240,
+            startBlock: 16956624,
         },
         Oracle: {
             network: "hyperEvmTestnet",
             abi: OracleAbi,
             address: "0xecbD8482C698B7b2706807A32d7FDf4E9a55C6A1", //main pool oracle
-            startBlock: 16650240,
+            startBlock: 16956624,
         },
-        IsolatedPair_WETH_MBTC: {
+        IsolatedPair: {
+            abi: IsolatedAbi,
             network: "hyperEvmTestnet",
-            abi: OracleAbi,
-            address: "0x0B37927864EFcEf9829B62cca4C9dC9453C51EA2",
-            startBlock: 16955197,
+            address: factory({
+              // The address of the factory contract that creates instances of this child contract.
+              address: "0x274396Ec36D17dAbC018d9437D5a4C0D0fD503D0",
+              // The event emitted by the factory that announces a new instance of this child contract.
+              event: parseAbiItem("event AddPair(address pairAddress)"),
+              // The name of the parameter that contains the address of the new child contract.
+              parameter: "pairAddress",
+            }),
+            startBlock: 16956624,
         }
     },
 });
