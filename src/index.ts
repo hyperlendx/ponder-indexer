@@ -22,13 +22,17 @@ import {
     RemoveCollateralIsolated,
     LiquidateIsolated,
     DepositIsolated,
-    WithdrawIsolated
+    WithdrawIsolated,
+    UserCore, 
+    UserReserveCore, 
 } from "ponder:schema";
 
 import { getOraclePrice, getIsolatedOraclePrice } from "./helpers/getPrice";
 
 // Borrow Event Handler
 ponder.on("CorePool:Borrow", async ({ event, context }) => {
+    const { db, network, client, contracts } = context;
+
     let reservePrice = null;
     try {
         reservePrice = await getOraclePrice(context, event.args.reserve);
@@ -36,7 +40,7 @@ ponder.on("CorePool:Borrow", async ({ event, context }) => {
         console.error(`Error fetching reserve price: ${e.message}`);
     }
 
-    await context.db.insert(Borrow).values({
+    await db.insert(Borrow).values({
         id: event.log.id,
         txHash: event.transaction.hash,
         pool: event.log.address,
@@ -50,6 +54,47 @@ ponder.on("CorePool:Borrow", async ({ event, context }) => {
         timestamp: Number(event.block.timestamp),
         price: reservePrice,
     });
+
+    // Update User table
+    const existingUser = await db.find(UserCore, { id: event.args.onBehalfOf });
+    if (existingUser) {
+        await db
+            .update(UserCore, { id: event.args.onBehalfOf })
+            .set({ totalBorrows: existingUser.totalBorrows || 0n + BigInt(event.args.amount) });
+    } else {
+        await db.insert(UserCore).values({
+            id: event.args.onBehalfOf,
+            totalDeposits: 0n,
+            totalBorrows: BigInt(event.args.amount),
+            totalRepayments: 0n,
+            totalWithdrawals: 0n,
+            liquidationCount: 0,
+        });
+    }
+
+    // Update UserReserve table
+    const userReserveId = `${event.args.onBehalfOf}_${event.args.reserve}`;
+    const existingUserReserve = await db.find(UserReserveCore, { "id": userReserveId });
+    if (existingUserReserve) {
+        await db
+            .update(UserReserveCore, { "id": userReserveId })
+            .set({ 
+                currentDebt: existingUserReserve.currentDebt || 0n + BigInt(event.args.amount),
+                totalBorrows: existingUserReserve.totalBorrows || 0n + BigInt(event.args.amount),
+            })
+    } else {
+        await db.insert(UserReserveCore).values({
+            id: userReserveId,
+            user: event.args.onBehalfOf,
+            reserve: event.args.reserve,
+            currentATokenBalance: 0n,
+            currentDebt: BigInt(event.args.amount),
+            totalDeposits: 0n,
+            totalBorrows: BigInt(event.args.amount),
+            totalRepayments: 0n,
+            totalWithdrawals: 0n,
+        });
+    }
 });
 
 // Repay Event Handler

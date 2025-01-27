@@ -1,5 +1,26 @@
 import { onchainTable, index } from "ponder";
 
+export const UserCore = onchainTable("user", (t) => ({
+    id: t.text().primaryKey(), // User address
+    totalDeposits: t.bigint().default(0n), // Cumulative deposits across all reserves
+    totalBorrows: t.bigint().default(0n), // Cumulative borrows across all reserves
+    totalRepayments: t.bigint().default(0n), // Cumulative repayments across all reserves
+    totalWithdrawals: t.bigint().default(0n), // Cumulative withdrawals across all reserves
+    liquidationCount: t.integer().default(0), // Number of liquidations
+}));
+
+export const UserReserveCore = onchainTable("user_reserve", (t) => ({
+    id: t.text().primaryKey(), // Unique ID combining user and reserve (e.g., `${user}_${reserve}`)
+    user: t.hex(), // User address
+    reserve: t.hex(), // Reserve address
+    currentATokenBalance: t.bigint().default(0n), // Current balance of aTokens for the user in this reserve
+    currentDebt: t.bigint().default(0n), // Current debt of the user in this reserve
+    totalDeposits: t.bigint().default(0n), // Cumulative deposits in this reserve
+    totalBorrows: t.bigint().default(0n), // Cumulative borrows in this reserve
+    totalRepayments: t.bigint().default(0n), // Cumulative repayments in this reserve
+    totalWithdrawals: t.bigint().default(0n), // Cumulative withdrawals in this reserve
+}));
+
 // New schema configuration
 export const Borrow = onchainTable(
     "borrow",
