@@ -4,6 +4,7 @@ import { http, parseAbiItem } from "viem";
 import { CorePoolAbi } from "./abis/CorePoolAbi";
 import { OracleAbi } from "./abis/OracleAbi";
 import { IsolatedAbi } from "./abis/IsolatedAbi";
+import { HTokenAbi } from "./abis/HTokenAbi";
 
 export default createConfig({
     networks: {
@@ -17,15 +18,28 @@ export default createConfig({
             network: "hyperEvm",
             abi: CorePoolAbi,
             address: [
-                "0x036Ad31A37b747e39322878eD851711507f13b1b", //main pool
+                "0x00A89d7a5A02160f20150EbEA7a2b5E4879A1A8b", //main pool
             ],
-            startBlock: 249000,
+            startBlock: 787000,
         },
         Oracle: {
             network: "hyperEvm",
             abi: OracleAbi,
-            address: "0x6C6188e608809E328274f1B57C0112A41e83Cd55", //main pool oracle
-            startBlock: 249000,
+            address: "0xC9Fb4fbE842d57EAc1dF3e641a281827493A630e", //main pool oracle
+            startBlock: 787000,
+        },
+        HTokens: {
+            abi: HTokenAbi,
+            network: "hyperEvm",
+            address: factory({
+              // The address of the factory contract that creates instances of this child contract.
+              address: "0x8CB4310dD38F6fD59388C9DE225f328092bdC379",
+              // The event emitted by the factory that announces a new instance of this child contract.
+              event: parseAbiItem("event ReserveInitialized(address asset, address aToken, address stableDebtToken, address variableDebtToken, address interestRateStrategyAddress)"),
+              // The name of the parameter that contains the address of the new child contract.
+              parameter: "aToken",
+            }),
+            startBlock: 787000,
         },
         IsolatedPair: {
             abi: IsolatedAbi,

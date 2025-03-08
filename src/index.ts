@@ -23,8 +23,8 @@ import {
     LiquidateIsolated,
     DepositIsolated,
     WithdrawIsolated,
-    UserCore, 
-    UserReserveCore, 
+    // UserCore, 
+    // UserReserveCore, 
 } from "ponder:schema";
 
 import { getOraclePrice, getIsolatedOraclePrice } from "./helpers/getPrice";
@@ -55,46 +55,46 @@ ponder.on("CorePool:Borrow", async ({ event, context }) => {
         price: reservePrice,
     });
 
-    // Update User table
-    const existingUser = await db.find(UserCore, { id: event.args.onBehalfOf });
-    if (existingUser) {
-        await db
-            .update(UserCore, { id: event.args.onBehalfOf })
-            .set({ totalBorrows: existingUser.totalBorrows || 0n + BigInt(event.args.amount) });
-    } else {
-        await db.insert(UserCore).values({
-            id: event.args.onBehalfOf,
-            totalDeposits: 0n,
-            totalBorrows: BigInt(event.args.amount),
-            totalRepayments: 0n,
-            totalWithdrawals: 0n,
-            liquidationCount: 0,
-        });
-    }
+    // // Update User table
+    // const existingUser = await db.find(UserCore, { id: event.args.onBehalfOf });
+    // if (existingUser) {
+    //     await db
+    //         .update(UserCore, { id: event.args.onBehalfOf })
+    //         .set({ totalBorrows: existingUser.totalBorrows || 0n + BigInt(event.args.amount) });
+    // } else {
+    //     await db.insert(UserCore).values({
+    //         id: event.args.onBehalfOf,
+    //         totalDeposits: 0n,
+    //         totalBorrows: BigInt(event.args.amount),
+    //         totalRepayments: 0n,
+    //         totalWithdrawals: 0n,
+    //         liquidationCount: 0,
+    //     });
+    // }
 
-    // Update UserReserve table
-    const userReserveId = `${event.args.onBehalfOf}_${event.args.reserve}`;
-    const existingUserReserve = await db.find(UserReserveCore, { "id": userReserveId });
-    if (existingUserReserve) {
-        await db
-            .update(UserReserveCore, { "id": userReserveId })
-            .set({ 
-                currentDebt: existingUserReserve.currentDebt || 0n + BigInt(event.args.amount),
-                totalBorrows: existingUserReserve.totalBorrows || 0n + BigInt(event.args.amount),
-            })
-    } else {
-        await db.insert(UserReserveCore).values({
-            id: userReserveId,
-            user: event.args.onBehalfOf,
-            reserve: event.args.reserve,
-            currentATokenBalance: 0n,
-            currentDebt: BigInt(event.args.amount),
-            totalDeposits: 0n,
-            totalBorrows: BigInt(event.args.amount),
-            totalRepayments: 0n,
-            totalWithdrawals: 0n,
-        });
-    }
+    // // Update UserReserve table
+    // const userReserveId = `${event.args.onBehalfOf}_${event.args.reserve}`;
+    // const existingUserReserve = await db.find(UserReserveCore, { "id": userReserveId });
+    // if (existingUserReserve) {
+    //     await db
+    //         .update(UserReserveCore, { "id": userReserveId })
+    //         .set({ 
+    //             currentDebt: existingUserReserve.currentDebt || 0n + BigInt(event.args.amount),
+    //             totalBorrows: existingUserReserve.totalBorrows || 0n + BigInt(event.args.amount),
+    //         })
+    // } else {
+    //     await db.insert(UserReserveCore).values({
+    //         id: userReserveId,
+    //         user: event.args.onBehalfOf,
+    //         reserve: event.args.reserve,
+    //         currentATokenBalance: 0n,
+    //         currentDebt: BigInt(event.args.amount),
+    //         totalDeposits: 0n,
+    //         totalBorrows: BigInt(event.args.amount),
+    //         totalRepayments: 0n,
+    //         totalWithdrawals: 0n,
+    //     });
+    // }
 });
 
 // Repay Event Handler
