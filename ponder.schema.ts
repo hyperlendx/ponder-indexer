@@ -216,6 +216,18 @@ export const IsolationModeTotalDebtUpdated = onchainTable("isolation_mode_total_
     timestamp: t.integer(),
 }));
 
+/// hTOKENS
+
+export const HTokenTransfer = onchainTable("hToken_transfer", (t) => ({
+    id: t.text().primaryKey(),
+    txHash: t.hex(),
+    reserve: t.hex(),
+    from: t.hex(),
+    to: t.hex(),
+    value: t.bigint(),
+    index: t.bigint()
+}));
+
 /// ISOLATED POOLS
 
 export const BorrowAssetIsolated = onchainTable(

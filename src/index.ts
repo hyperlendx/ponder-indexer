@@ -25,9 +25,23 @@ import {
     WithdrawIsolated,
     // UserCore, 
     // UserReserveCore, 
+    HTokenTransfer
 } from "ponder:schema";
 
 import { getOraclePrice, getIsolatedOraclePrice } from "./helpers/getPrice";
+
+// HToken Transfer Event Handler
+ponder.on("HTokens:BalanceTransfer", async ({ event, context }) => {
+    await context.db.insert(HTokenTransfer).values({
+        id: event.log.id,
+        txHash: event.transaction.hash,
+        reserve: event.log.address,
+        from: event.args.from,
+        to: event.args.to,
+        value: event.args.value,
+        index: event.args.index
+    });
+});
 
 // Borrow Event Handler
 ponder.on("CorePool:Borrow", async ({ event, context }) => {
