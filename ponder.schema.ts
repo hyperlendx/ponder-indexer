@@ -370,8 +370,8 @@ export const WithdrawIsolated = onchainTable(
 ); 
 
 
-export const LoopingManagers = onchainTable(
-    "looping_managers",
+export const StrategyDeployed = onchainTable(
+    "strategy_deployed",
     (t) => ({
         id: t.text().primaryKey(),
         txHash: t.hex(),

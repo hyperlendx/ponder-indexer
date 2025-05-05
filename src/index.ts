@@ -26,7 +26,7 @@ import {
     // UserCore, 
     // UserReserveCore, 
     HTokenTransfer,
-    LoopingManagers
+    StrategyDeployed
 } from "ponder:schema";
 
 import { getOraclePrice, getIsolatedOraclePrice } from "./helpers/getPrice";
@@ -511,7 +511,7 @@ ponder.on("IsolatedPair:Withdraw", async ({ event, context }) => {
 });
 
 ponder.on("LoopingStrategyManagerFactory:StrategyDeployed", async ({ event, context }) => {
-    await context.db.insert(LoopingManagers).values({
+    await context.db.insert(StrategyDeployed).values({
         id: event.log.id,
         txHash: event.transaction.hash,
         owner: event.args.owner,
