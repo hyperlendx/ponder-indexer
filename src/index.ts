@@ -25,7 +25,8 @@ import {
     WithdrawIsolated,
     // UserCore, 
     // UserReserveCore, 
-    HTokenTransfer
+    HTokenTransfer,
+    LoopingManagers
 } from "ponder:schema";
 
 import { getOraclePrice, getIsolatedOraclePrice } from "./helpers/getPrice";
@@ -506,5 +507,17 @@ ponder.on("IsolatedPair:Withdraw", async ({ event, context }) => {
         shares: event.args.shares,
         timestamp: Number(event.block.timestamp),
         price: price,
+    });
+});
+
+ponder.on("LoopingStrategyManagerFactory:StrategyDeployed", async ({ event, context }) => {
+    await context.db.insert(LoopingManagers).values({
+        id: event.log.id,
+        txHash: event.transaction.hash,
+        owner: event.args.owner,
+        stratManager: event.args.stratManager,
+        pool: event.args.pool,
+        yieldAsset: event.args.yieldAsset,
+        debtAsset: event.args.debtAsset,
     });
 });

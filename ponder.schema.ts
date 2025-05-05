@@ -368,3 +368,21 @@ export const WithdrawIsolated = onchainTable(
         receiverIdx: index().on(table.receiver),
     })
 ); 
+
+
+export const LoopingManagers = onchainTable(
+    "looping_managers",
+    (t) => ({
+        id: t.text().primaryKey(),
+        txHash: t.hex(),
+        owner: t.hex(),
+        stratManager: t.hex(),
+        pool: t.hex(),
+        yieldAsset: t.hex(),
+        debtAsset: t.hex(),
+    }),
+    (table) => ({
+        ownerIdx: index().on(table.owner),
+        stratManagerIdx: index().on(table.stratManager),
+    })
+); 

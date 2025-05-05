@@ -5,6 +5,7 @@ import { CorePoolAbi } from "./abis/CorePoolAbi";
 import { OracleAbi } from "./abis/OracleAbi";
 import { IsolatedAbi } from "./abis/IsolatedAbi";
 import { HTokenAbi } from "./abis/HTokenAbi";
+import { LoopingStrategyManagerFactoryAbi } from "./abis/LoopingStrategyManagerFactory";
 
 export default createConfig({
     networks: {
@@ -53,6 +54,12 @@ export default createConfig({
               parameter: "pairAddress",
             }),
             startBlock: 249000,
+        },
+        LoopingStrategyManagerFactory: {
+            abi: LoopingStrategyManagerFactoryAbi,
+            network: "hyperEvm",
+            address: "0xc3Ed646181Ca80562e96d9e6CF4AF317d22F34b0",
+            startBlock: 3414683,
         }
     },
 });
