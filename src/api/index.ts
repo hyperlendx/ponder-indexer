@@ -4,7 +4,7 @@ import schema from "ponder:schema";
 import { Hono } from "hono";
 import { eq, graphql, and, desc, lte } from "ponder";
 import { getUserPosition, getUserPositions } from "../helpers/userPositionManager";
-import { getUserMonthlyInterestSummary } from "../helpers/monthlyInterestCalculator";
+import { calculateUserMonthlyYield } from "../helpers/monthlyInterestCalculator";
 import { calculateLiquidityIndexAtTimestamp, formatRayValue } from "../helpers/interestCalculations";
 
 const app = new Hono();
@@ -477,6 +477,85 @@ app.get("/api/reserves/:reserveAddress/liquidity-index", async (c) => {
             code: "CALCULATION_ERROR",
             reserveAddress
         }, 500);
+    }
+});
+
+// Get monthly yield data for a specific user and month
+app.get("/user/:address/monthly-yield/:year/:month", async (c) => {
+    const userAddress = c.req.param("address");
+    const yearParam = c.req.param("year");
+    const monthParam = c.req.param("month");
+
+    if (!userAddress || !yearParam || !monthParam) {
+        return c.json({ error: "User address, year, and month are required" }, 400);
+    }
+
+    // Validate hex address format
+    if (!/^0x[a-fA-F0-9]{40}$/.test(userAddress)) {
+        return c.json({ error: "Invalid user address format" }, 400);
+    }
+
+    const year = parseInt(yearParam);
+    const month = parseInt(monthParam);
+
+    // Validate year and month
+    if (isNaN(year) || isNaN(month) || year < 2020 || year > 2030 || month < 1 || month > 12) {
+        return c.json({ error: "Invalid year (2020-2030) or month (1-12)" }, 400);
+    }
+
+    try {
+        const context = { db };
+
+        // Calculate monthly yield data
+        const yieldData = await calculateUserMonthlyYield(context, userAddress, year, month);
+
+        if (yieldData.length === 0) {
+            return c.json({
+                user: userAddress,
+                year,
+                month,
+                monthlyYields: [],
+                message: "No positions found for this user and month"
+            });
+        }
+
+        // Format the response data
+        const formattedYields = yieldData.map(data => ({
+            user: data.user,
+            asset: data.asset,
+            year: data.year,
+            month: data.month,
+            monthlyYield: data.monthlyYield.toString(),
+            startScaledBalance: data.startScaledBalance.toString(),
+            endScaledBalance: data.endScaledBalance.toString(),
+            startActualBalance: data.startActualBalance.toString(),
+            endActualBalance: data.endActualBalance.toString(),
+            startLiquidityIndex: data.startLiquidityIndex.toString(),
+            endLiquidityIndex: data.endLiquidityIndex.toString(),
+            netDeposits: data.netDeposits.toString(),
+            startTimestamp: data.startTimestamp,
+            endTimestamp: data.endTimestamp,
+            // Add formatted values for easier reading
+            monthlyYieldFormatted: formatRayValue(data.monthlyYield),
+            startActualBalanceFormatted: formatRayValue(data.startActualBalance),
+            endActualBalanceFormatted: formatRayValue(data.endActualBalance),
+            netDepositsFormatted: formatRayValue(data.netDeposits),
+            startDate: new Date(data.startTimestamp * 1000).toISOString(),
+            endDate: new Date(data.endTimestamp * 1000).toISOString()
+        }));
+
+        return c.json({
+            user: userAddress,
+            year,
+            month,
+            monthlyYields: formattedYields,
+            totalAssets: formattedYields.length,
+            calculatedAt: Math.floor(Date.now() / 1000)
+        });
+
+    } catch (error) {
+        console.error("Error calculating monthly yield:", error);
+        return c.json({ error: "Failed to calculate monthly yield data" }, 500);
     }
 });
 

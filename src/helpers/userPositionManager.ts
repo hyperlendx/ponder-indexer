@@ -17,7 +17,9 @@ async function checkForDuplicateEvents(
 
     try {
         // Look for existing events in the same transaction for the same user/asset
-        const existingEvents = await db.sql
+        // Handle both indexing context (db.sql) and API context (db)
+        const dbQuery = db.sql || db;
+        const existingEvents = await dbQuery
             .select()
             .from(UserBalanceEvent)
             .where(
@@ -30,6 +32,7 @@ async function checkForDuplicateEvents(
             );
 
         // Check if we have an event with the same scaled balance delta
+        // @ts-ignore
         const duplicate = existingEvents.find(event =>
             event.scaledBalance === scaledBalanceDelta
         );
@@ -89,7 +92,9 @@ export async function updateUserPosition(
     );
 
     // Get existing position using Ponder's SQL select method
-    const existingPositions = await db.sql
+    // Handle both indexing context (db.sql) and API context (db)
+    const dbQuery = db.sql || db;
+    const existingPositions = await dbQuery
         .select()
         .from(UserPosition)
         .where(eq(UserPosition.id, positionId));
@@ -173,7 +178,8 @@ export async function updateUserPosition(
     if (newScaledBalance === 0n) {
         // Remove position if balance is zero
         if (existingPosition) {
-            await db.sql
+            const dbQuery = db.sql || db;
+            await dbQuery
                 .delete(UserPosition)
                 .where(eq(UserPosition.id, positionId));
         }
@@ -192,7 +198,8 @@ export async function updateUserPosition(
         };
 
         if (existingPosition) {
-            await db.sql
+            const dbQuery = db.sql || db;
+            await dbQuery
                 .update(UserPosition)
                 .set(positionData)
                 .where(eq(UserPosition.id, positionId));
@@ -220,7 +227,9 @@ export async function getUserPosition(
     const { db } = context;
     const positionId = `${user}_${asset}`;
 
-    const positions = await db.sql
+    // Handle both indexing context (db.sql) and API context (db)
+    const dbQuery = db.sql || db;
+    const positions = await dbQuery
         .select()
         .from(UserPosition)
         .where(eq(UserPosition.id, positionId));
@@ -354,7 +363,9 @@ export async function calculateNetDeposits(
 ): Promise<bigint> {
     const { db } = context;
 
-    const events = await db.sql
+    // Handle both indexing context (db.sql) and API context (db)
+    const dbQuery = db.sql || db;
+    const events = await dbQuery
         .select()
         .from(UserBalanceEvent)
         .where(

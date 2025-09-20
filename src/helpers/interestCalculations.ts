@@ -22,21 +22,38 @@ export class RayMath {
     static rayDiv(a: bigint, b: bigint): bigint {
         return (a * RAY + b / 2n) / b;
     }
+}
 
-    /**
-     * Convert a percentage rate to ray format
-     * @param rate - Rate in basis points (e.g., 500 = 5%)
-     */
-    static percentToRay(rate: number): bigint {
-        return BigInt(rate) * RAY / 10000n;
+/**
+ * Calculate new liquidity index using linear interest formula
+ * Formula: newIndex = previousIndex * (1 + (rate * timeElapsed) / SECONDS_PER_YEAR)
+ *
+ * @param previousIndex - The previous liquidity index (in ray precision)
+ * @param liquidityRate - The liquidity rate (in ray precision)
+ * @param timeElapsed - Time elapsed in seconds
+ * @returns The new liquidity index (in ray precision)
+ */
+export function calculateLinearInterest(
+    previousIndex: bigint,
+    liquidityRate: bigint,
+    timeElapsed: bigint
+): bigint {
+    // If no time has elapsed, return the previous index
+    if (timeElapsed === 0n) {
+        return previousIndex;
     }
 
-    /**
-     * Convert ray to percentage
-     */
-    static rayToPercent(ray: bigint): number {
-        return Number(ray * 10000n / RAY);
-    }
+    // Calculate the interest factor: (liquidityRate * timeElapsed) / SECONDS_PER_YEAR
+    const interestFactor = RayMath.rayDiv(
+        RayMath.rayMul(liquidityRate, timeElapsed),
+        SECONDS_PER_YEAR
+    );
+
+    // Calculate the growth factor: 1 + interestFactor (where 1 = RAY)
+    const growthFactor = RAY + interestFactor;
+
+    // Calculate the new index: previousIndex * growthFactor
+    return RayMath.rayMul(previousIndex, growthFactor);
 }
 
 /**
@@ -136,26 +153,17 @@ export async function calculateLiquidityIndexAtTimestamp(
         // Calculate the time elapsed since the closest event
         const timeElapsed = BigInt(targetTimestamp - closestEvent.timestamp);
         console.log("timeElapsed", timeElapsed);
-        // If no time has elapsed, return the base index
-        if (timeElapsed === 0n) {
-            return baseLiquidityIndex;
-        }
 
         // Get the liquidity rate from the event (in ray precision)
         const liquidityRate = BigInt(closestEvent.liquidityRate);
         console.log("liquidityRate", liquidityRate);
-        // Calculate the interest factor: (liquidityRate * timeElapsed) / SECONDS_PER_YEAR
-        // Using RayMath for precise calculations
-        const interestFactor = RayMath.rayDiv(
-            RayMath.rayMul(liquidityRate, timeElapsed),
-            SECONDS_PER_YEAR
+
+        // Use the linear interest formula to calculate the new index
+        const newLiquidityIndex = calculateLinearInterest(
+            baseLiquidityIndex,
+            liquidityRate,
+            timeElapsed
         );
-        console.log("interestFactor", interestFactor);
-        // Calculate the new index: baseLiquidityIndex * (1 + interestFactor)
-        // Where (1 + interestFactor) = RAY + interestFactor
-        const growthFactor = RAY + interestFactor;
-        console.log("growthFactor", growthFactor);
-        const newLiquidityIndex = RayMath.rayMul(baseLiquidityIndex, growthFactor);
         console.log("newLiquidityIndex", newLiquidityIndex);
         // Validate the calculated index
         if (!validateLiquidityIndex(newLiquidityIndex)) {
@@ -257,20 +265,6 @@ export function getYearMonthFromTimestamp(timestamp: number): {
         year: date.getFullYear(),
         month: date.getMonth() + 1 // Convert to 1-12 range
     };
-}
-
-/**
- * Calculate compound interest rate for a given period
- * This is useful for APY calculations
- */
-export function calculateCompoundRate(
-    rate: bigint,
-    timeElapsed: bigint,
-    compoundingFrequency: bigint = SECONDS_PER_YEAR
-): bigint {
-    // For simplicity, using linear approximation for now
-    // In production, you might want to implement proper compound interest
-    return RayMath.rayMul(rate, RayMath.rayDiv(timeElapsed, compoundingFrequency));
 }
 
 /**
