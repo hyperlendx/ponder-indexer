@@ -21,6 +21,29 @@ import { onchainTable, index } from "ponder";
 //     totalWithdrawals: t.bigint().default(0n), // Cumulative withdrawals in this reserve
 // }));
 
+// User entities for tracking current deposit balances
+export const User = onchainTable("user", (t) => ({
+    id: t.hex().primaryKey(), // User address
+    totalDepositCount: t.integer().default(0), // Number of different tokens deposited
+    lastUpdated: t.integer(), // Timestamp of last balance update
+}));
+
+export const UserDeposit = onchainTable(
+    "user_deposit",
+    (t) => ({
+        id: t.text().primaryKey(), // Composite key: `${userAddress}_${tokenAddress}`
+        user: t.hex(), // User address
+        token: t.hex(), // Token/reserve address
+        currentBalance: t.bigint(), // Current net deposit balance (deposits - withdrawals)
+        lastUpdated: t.integer(), // Timestamp of last update
+    }),
+    (table) => ({
+        userIdx: index().on(table.user),
+        tokenIdx: index().on(table.token),
+        balanceIdx: index().on(table.currentBalance),
+    })
+);
+
 // New schema configuration
 export const Borrow = onchainTable(
     "borrow",
@@ -385,4 +408,96 @@ export const StrategyDeployed = onchainTable(
         ownerIdx: index().on(table.owner),
         stratManagerIdx: index().on(table.stratManager),
     })
-); 
+);
+
+// Enhanced Interest Tracking Schema
+
+// Store reserve data events for liquidityIndex tracking
+export const ReserveDataEvent = onchainTable(
+    "reserve_data_event",
+    (t) => ({
+        id: t.text().primaryKey(),
+        txHash: t.hex(),
+        reserve: t.hex(),
+        liquidityIndex: t.bigint(),
+        liquidityRate: t.bigint(),
+        timestamp: t.integer(),
+        blockNumber: t.bigint(),
+    }),
+    (table) => ({
+        reserveIdx: index().on(table.reserve),
+        timestampIdx: index().on(table.timestamp),
+        reserveTimestampIdx: index().on(table.reserve, table.timestamp),
+    })
+);
+
+// Store user balance events for scaled balance tracking
+export const UserBalanceEvent = onchainTable(
+    "user_balance_event",
+    (t) => ({
+        id: t.text().primaryKey(),
+        txHash: t.hex(),
+        user: t.hex(),
+        asset: t.hex(),
+        scaledBalance: t.bigint(),
+        eventType: t.text(), // 'deposit', 'withdraw', 'transfer_in', 'transfer_out'
+        timestamp: t.integer(),
+        blockNumber: t.bigint(),
+        liquidityIndex: t.bigint(),
+    }),
+    (table) => ({
+        userIdx: index().on(table.user),
+        assetIdx: index().on(table.asset),
+        userAssetIdx: index().on(table.user, table.asset),
+        timestampIdx: index().on(table.timestamp),
+        eventTypeIdx: index().on(table.eventType),
+    })
+);
+
+// Store current user positions with scaled and actual balances
+export const UserPosition = onchainTable(
+    "user_position",
+    (t) => ({
+        id: t.text().primaryKey(), // ${user}_${asset}
+        user: t.hex(),
+        asset: t.hex(),
+        scaledBalance: t.bigint(),
+        actualBalance: t.bigint(),
+        totalDeposits: t.bigint(), // Cumulative deposits in underlying asset
+        totalWithdrawals: t.bigint(), // Cumulative withdrawals in underlying asset
+        lastUpdated: t.integer(),
+        lastLiquidityIndex: t.bigint(),
+    }),
+    (table) => ({
+        userIdx: index().on(table.user),
+        assetIdx: index().on(table.asset),
+        userAssetIdx: index().on(table.user, table.asset),
+        lastUpdatedIdx: index().on(table.lastUpdated),
+    })
+);
+
+// Store pre-calculated monthly interest earnings
+export const UserMonthlyInterest = onchainTable(
+    "user_monthly_interest",
+    (t) => ({
+        id: t.text().primaryKey(), // ${user}_${asset}_${year}_${month}
+        user: t.hex(),
+        asset: t.hex(),
+        year: t.integer(),
+        month: t.integer(), // 1-12
+        interestEarned: t.bigint(), // Interest earned in underlying asset
+        startScaledBalance: t.bigint(),
+        endScaledBalance: t.bigint(),
+        startLiquidityIndex: t.bigint(),
+        endLiquidityIndex: t.bigint(),
+        netDeposits: t.bigint(), // Net deposits during the month
+        calculatedAt: t.integer(), // Timestamp when calculation was performed
+    }),
+    (table) => ({
+        userIdx: index().on(table.user),
+        assetIdx: index().on(table.asset),
+        userAssetIdx: index().on(table.user, table.asset),
+        yearMonthIdx: index().on(table.year, table.month),
+        userYearMonthIdx: index().on(table.user, table.year, table.month),
+    })
+);

@@ -8,18 +8,24 @@
     "start": "ponder start",
     "codegen": "ponder codegen",
     "lint": "eslint .",
-    "typecheck": "tsc"
+    "typecheck": "tsc",
+    "test": "vitest",
+    "test:watch": "vitest --watch",
+    "test:coverage": "vitest --coverage"
   },
   "dependencies": {
+    "drizzle-orm": "^0.44.5",
     "hono": "^4.5.0",
-    "ponder": "^0.8.32",
+    "ponder": "^0.12.0",
     "viem": "^2.21.3"
   },
   "devDependencies": {
     "@types/node": "^20.9.0",
+    "@vitest/coverage-v8": "^1.0.0",
     "eslint": "^8.53.0",
     "eslint-config-ponder": "^0.6.22",
-    "typescript": "^5.2.2"
+    "typescript": "^5.2.2",
+    "vitest": "^1.0.0"
   },
   "engines": {
     "node": ">=18.14"
