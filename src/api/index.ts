@@ -1,9 +1,9 @@
 import { db } from "ponder:api";
-import { UserDeposit, UserPosition, UserMonthlyInterest, ReserveDataEvent } from "ponder:schema";
+import { UserDeposit, ReserveDataEvent } from "ponder:schema";
 import schema from "ponder:schema";
 import { Hono } from "hono";
 import { eq, graphql, and, desc, lte } from "ponder";
-import { getUserPosition, getUserPositions } from "../helpers/userPositionManager";
+import { getUserPositions } from "../helpers/userPositionManager";
 import { calculateUserMonthlyYield } from "../helpers/monthlyInterestCalculator";
 import { calculateLiquidityIndexAtTimestamp, formatRayValue } from "../helpers/interestCalculations";
 
@@ -107,205 +107,6 @@ app.get("/user/:address/positions", async (c) => {
     }
 });
 
-// Get user's interest for a specific asset and period
-// app.get("/user/:address/interest/:asset/:period", async (c) => {
-//     const userAddress = c.req.param("address");
-//     const asset = c.req.param("asset");
-//     const period = c.req.param("period");
-//
-//     if (!userAddress || !asset || !period) {
-//         return c.json({ error: "User address, asset, and period are required" }, 400);
-//     }
-//
-//     try {
-//         const context = { db };
-//
-//         // Parse period (format: YYYY-MM or "current")
-//         if (period === "current") {
-//             // Get current position and yield
-//             const position = await getUserPosition(context, userAddress, asset);
-//
-//             if (!position) {
-//                 return c.json({
-//                     user: userAddress,
-//                     asset,
-//                     period: "current",
-//                     interestEarned: "0",
-//                     message: "No position found"
-//                 });
-//             }
-//
-//             return c.json({
-//                 user: userAddress,
-//                 asset,
-//                 period: "current",
-//                 interestEarned: position.currentYield.toString(),
-//                 interestEarnedFormatted: formatRayValue(position.currentYield),
-//                 actualBalance: position.actualBalance.toString(),
-//                 actualBalanceFormatted: formatRayValue(position.actualBalance),
-//                 totalDeposits: position.totalDeposits.toString(),
-//                 totalWithdrawals: position.totalWithdrawals.toString(),
-//                 lastUpdated: position.lastUpdated
-//             });
-//         } else {
-//             // Parse YYYY-MM format
-//             const [yearStr, monthStr] = period.split("-");
-//             const year = parseInt(yearStr);
-//             const month = parseInt(monthStr);
-//
-//             if (isNaN(year) || isNaN(month) || month < 1 || month > 12) {
-//                 return c.json({ error: "Invalid period format. Use YYYY-MM or 'current'" }, 400);
-//             }
-//
-//             // Get monthly interest data
-//             const monthlyData = await getUserMonthlyInterestSummary(context, userAddress, year, month);
-//             const assetData = monthlyData.find(d => d.asset.toLowerCase() === asset.toLowerCase());
-//
-//             if (!assetData) {
-//                 return c.json({
-//                     user: userAddress,
-//                     asset,
-//                     period,
-//                     year,
-//                     month,
-//                     interestEarned: "0",
-//                     message: "No interest data found for this period"
-//                 });
-//             }
-//
-//             return c.json({
-//                 user: userAddress,
-//                 asset,
-//                 period,
-//                 year,
-//                 month,
-//                 interestEarned: assetData.interestEarned.toString(),
-//                 interestEarnedFormatted: formatRayValue(assetData.interestEarned),
-//                 netDeposits: assetData.netDeposits.toString(),
-//                 netDepositsFormatted: formatRayValue(assetData.netDeposits),
-//                 calculatedAt: assetData.calculatedAt
-//             });
-//         }
-//     } catch (error) {
-//         console.error("Error fetching user interest:", error);
-//         return c.json({ error: "Failed to fetch user interest" }, 500);
-//     }
-// });
-//
-// // Get reserve liquidity index at a specific timestamp
-// app.get("/reserve/:asset/index/:timestamp", async (c) => {
-//     const asset = c.req.param("asset");
-//     const timestampStr = c.req.param("timestamp");
-//
-//     if (!asset || !timestampStr) {
-//         return c.json({ error: "Asset and timestamp are required" }, 400);
-//     }
-//
-//     const timestamp = parseInt(timestampStr);
-//     if (isNaN(timestamp)) {
-//         return c.json({ error: "Invalid timestamp" }, 400);
-//     }
-//
-//     try {
-//         const context = { db };
-//         const liquidityIndex = await calculateLiquidityIndexAtTimestamp(context, asset, timestamp);
-//
-//         return c.json({
-//             asset,
-//             timestamp,
-//             liquidityIndex: liquidityIndex.toString(),
-//             liquidityIndexFormatted: formatRayValue(liquidityIndex),
-//             calculatedAt: Math.floor(Date.now() / 1000)
-//         });
-//     } catch (error) {
-//         console.error("Error calculating liquidity index:", error);
-//         return c.json({ error: "Failed to calculate liquidity index" }, 500);
-//     }
-// });
-//
-// // Get user's monthly interest summary
-// app.get("/user/:address/monthly-interest", async (c) => {
-//     const userAddress = c.req.param("address");
-//     const yearParam = c.req.query("year");
-//     const monthParam = c.req.query("month");
-//
-//     if (!userAddress) {
-//         return c.json({ error: "User address is required" }, 400);
-//     }
-//
-//     try {
-//         const context = { db };
-//         let year: number | undefined;
-//         let month: number | undefined;
-//
-//         if (yearParam) {
-//             year = parseInt(yearParam);
-//             if (isNaN(year)) {
-//                 return c.json({ error: "Invalid year parameter" }, 400);
-//             }
-//         }
-//
-//         if (monthParam) {
-//             month = parseInt(monthParam);
-//             if (isNaN(month) || month < 1 || month > 12) {
-//                 return c.json({ error: "Invalid month parameter (1-12)" }, 400);
-//             }
-//         }
-//
-//         const monthlyData = await getUserMonthlyInterestSummary(context, userAddress, year, month);
-//
-//         // Group by month and calculate totals
-//         const groupedData: Record<string, any> = {};
-//         let totalInterest = 0n;
-//
-//         monthlyData.forEach(record => {
-//             const monthKey = `${record.year}-${record.month.toString().padStart(2, '0')}`;
-//
-//             if (!groupedData[monthKey]) {
-//                 groupedData[monthKey] = {
-//                     year: record.year,
-//                     month: record.month,
-//                     assets: {},
-//                     totalInterest: 0n,
-//                     totalNetDeposits: 0n
-//                 };
-//             }
-//
-//             groupedData[monthKey].assets[record.asset] = {
-//                 interestEarned: record.interestEarned.toString(),
-//                 interestEarnedFormatted: formatRayValue(record.interestEarned),
-//                 netDeposits: record.netDeposits.toString(),
-//                 netDepositsFormatted: formatRayValue(record.netDeposits),
-//                 calculatedAt: record.calculatedAt
-//             };
-//
-//             groupedData[monthKey].totalInterest += record.interestEarned;
-//             groupedData[monthKey].totalNetDeposits += record.netDeposits;
-//             totalInterest += record.interestEarned;
-//         });
-//
-//         // Format totals
-//         Object.values(groupedData).forEach((monthData: any) => {
-//             monthData.totalInterest = monthData.totalInterest.toString();
-//             monthData.totalInterestFormatted = formatRayValue(monthData.totalInterest);
-//             monthData.totalNetDeposits = monthData.totalNetDeposits.toString();
-//             monthData.totalNetDepositsFormatted = formatRayValue(monthData.totalNetDeposits);
-//         });
-//
-//         return c.json({
-//             user: userAddress,
-//             monthlyInterest: groupedData,
-//             totalInterestEarned: totalInterest.toString(),
-//             totalInterestEarnedFormatted: formatRayValue(totalInterest),
-//             filters: { year, month },
-//             timestamp: Math.floor(Date.now() / 1000)
-//         });
-//     } catch (error) {
-//         console.error("Error fetching monthly interest summary:", error);
-//         return c.json({ error: "Failed to fetch monthly interest summary" }, 500);
-//     }
-// });
-//
 // Get reserve data events for a specific asset
 app.get("/reserve/:asset/events", async (c) => {
     const asset = c.req.param("asset");
@@ -332,16 +133,18 @@ app.get("/reserve/:asset/events", async (c) => {
             .limit(limit)
             .offset(offset);
 
+
         const formattedEvents = events.map(event => ({
             id: event.id,
             txHash: event.txHash,
             reserve: event.reserve,
-            liquidityIndex: event.liquidityIndex.toString(),
-            liquidityIndexFormatted: formatRayValue(event.liquidityIndex),
-            liquidityRate: event.liquidityRate.toString(),
-            liquidityRateFormatted: formatRayValue(event.liquidityRate),
+            liquidityIndex: event.liquidityIndex?.toString(),
+            liquidityIndexFormatted: formatRayValue(event.liquidityIndex || 0n),
+            liquidityRate: event.liquidityRate?.toString(),
+            liquidityRateFormatted: formatRayValue(event.liquidityRate || 0n),
             timestamp: event.timestamp,
-            blockNumber: event.blockNumber.toString(),
+            blockNumber: event.blockNumber?.toString(),
+            // @ts-ignore
             date: new Date(event.timestamp * 1000).toISOString()
         }));
 
@@ -359,68 +162,6 @@ app.get("/reserve/:asset/events", async (c) => {
         return c.json({ error: "Failed to fetch reserve events" }, 500);
     }
 });
-//
-// // Get user balance events for tracking deposit/withdrawal history
-// app.get("/user/:address/balance-events/:asset", async (c) => {
-//     const userAddress = c.req.param("address");
-//     const asset = c.req.param("asset");
-//     const limitParam = c.req.query("limit") || "50";
-//     const offsetParam = c.req.query("offset") || "0";
-//
-//     if (!userAddress || !asset) {
-//         return c.json({ error: "User address and asset are required" }, 400);
-//     }
-//
-//     const limit = parseInt(limitParam);
-//     const offset = parseInt(offsetParam);
-//
-//     if (isNaN(limit) || isNaN(offset) || limit < 1 || limit > 1000) {
-//         return c.json({ error: "Invalid limit (1-1000) or offset" }, 400);
-//     }
-//
-//     try {
-//         const events = await db
-//             .select()
-//             .from(UserBalanceEvent)
-//             .where(
-//                 and(
-//                     eq(UserBalanceEvent.user, userAddress as `0x${string}`),
-//                     eq(UserBalanceEvent.asset, asset as `0x${string}`)
-//                 )
-//             )
-//             .orderBy(desc(UserBalanceEvent.timestamp))
-//             .limit(limit)
-//             .offset(offset);
-//
-//         const formattedEvents = events.map(event => ({
-//             id: event.id,
-//             txHash: event.txHash,
-//             user: event.user,
-//             asset: event.asset,
-//             scaledBalance: event.scaledBalance.toString(),
-//             eventType: event.eventType,
-//             timestamp: event.timestamp,
-//             blockNumber: event.blockNumber.toString(),
-//             liquidityIndex: event.liquidityIndex.toString(),
-//             liquidityIndexFormatted: formatRayValue(event.liquidityIndex),
-//             date: new Date(event.timestamp * 1000).toISOString()
-//         }));
-//
-//         return c.json({
-//             user: userAddress,
-//             asset,
-//             events: formattedEvents,
-//             pagination: {
-//                 limit,
-//                 offset,
-//                 count: formattedEvents.length
-//             }
-//         });
-//     } catch (error) {
-//         console.error("Error fetching user balance events:", error);
-//         return c.json({ error: "Failed to fetch user balance events" }, 500);
-//     }
-// });
 
 // Get reserve liquidity index at a specific timestamp
 app.get("/api/reserves/:reserveAddress/liquidity-index", async (c) => {
@@ -535,13 +276,39 @@ app.get("/user/:address/monthly-yield/:year/:month", async (c) => {
             netDeposits: data.netDeposits.toString(),
             startTimestamp: data.startTimestamp,
             endTimestamp: data.endTimestamp,
+            // Add context fields for better understanding
+            hadPositionDuringMonth: data.hadPositionDuringMonth || false,
+            maxBalanceDuringMonth: data.maxBalanceDuringMonth?.toString() || "0",
+            transactionCount: data.transactionCount || 0,
             // Add formatted values for easier reading
             monthlyYieldFormatted: formatRayValue(data.monthlyYield),
             startActualBalanceFormatted: formatRayValue(data.startActualBalance),
             endActualBalanceFormatted: formatRayValue(data.endActualBalance),
             netDepositsFormatted: formatRayValue(data.netDeposits),
+            maxBalanceDuringMonthFormatted: formatRayValue(data.maxBalanceDuringMonth || 0n),
             startDate: new Date(data.startTimestamp * 1000).toISOString(),
-            endDate: new Date(data.endTimestamp * 1000).toISOString()
+            endDate: new Date(data.endTimestamp * 1000).toISOString(),
+            // Add explanation for confusing cases
+            explanation: getYieldExplanation(data),
+            // Add detailed segment information for transparency
+            segments: data.segments?.map(segment => ({
+                startTime: segment.startTime,
+                endTime: segment.endTime,
+                startDate: segment.startDate,
+                endDate: segment.endDate,
+                scaledBalance: segment.scaledBalance.toString(),
+                actualBalance: segment.actualBalance.toString(),
+                startLiquidityIndex: segment.startLiquidityIndex.toString(),
+                endLiquidityIndex: segment.endLiquidityIndex.toString(),
+                segmentYield: segment.segmentYield.toString(),
+                durationDays: segment.durationDays,
+                // Formatted values for readability
+                scaledBalanceFormatted: formatRayValue(segment.scaledBalance),
+                actualBalanceFormatted: formatRayValue(segment.actualBalance),
+                segmentYieldFormatted: formatRayValue(segment.segmentYield),
+                startLiquidityIndexFormatted: formatRayValue(segment.startLiquidityIndex),
+                endLiquidityIndexFormatted: formatRayValue(segment.endLiquidityIndex)
+            })) || []
         }));
 
         return c.json({
@@ -558,6 +325,50 @@ app.get("/user/:address/monthly-yield/:year/:month", async (c) => {
         return c.json({ error: "Failed to calculate monthly yield data" }, 500);
     }
 });
+
+/**
+ * Generate explanation for yield calculations to help users understand the data
+ */
+function getYieldExplanation(data: any): string {
+    const startBalance = BigInt(data.startScaledBalance || 0);
+    const endBalance = BigInt(data.endScaledBalance || 0);
+    const monthlyYield = BigInt(data.monthlyYield || 0);
+    const netDeposits = BigInt(data.netDeposits || 0);
+    const hadPosition = data.hadPositionDuringMonth;
+    const transactionCount = data.transactionCount || 0;
+
+    // Case 1: Normal ongoing position
+    if (startBalance > 0n && endBalance > 0n) {
+        return "User held position throughout the month and earned interest";
+    }
+
+    // Case 2: New position opened during month
+    if (startBalance === 0n && endBalance > 0n && netDeposits > 0n) {
+        return "User opened new position during the month and earned interest";
+    }
+
+    // Case 3: Position closed during month (the confusing case!)
+    if (startBalance > 0n && endBalance === 0n && monthlyYield > 0n) {
+        return "User closed position during month but earned interest while position was active";
+    }
+
+    // Case 4: Temporary position (opened and closed same month)
+    if (startBalance === 0n && endBalance === 0n && monthlyYield > 0n && hadPosition) {
+        return "User had temporary position during month and earned interest while active";
+    }
+
+    // Case 5: No activity
+    if (monthlyYield === 0n && !hadPosition) {
+        return "No position or activity during this month";
+    }
+
+    // Case 6: Zero yield asset
+    if (monthlyYield === 0n && (startBalance > 0n || endBalance > 0n)) {
+        return "Position held but asset has 0% interest rate";
+    }
+
+    return "Standard yield calculation";
+}
 
 // Custom health check endpoint
 app.get("/custom-health", async (c) => {

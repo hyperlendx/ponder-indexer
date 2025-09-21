@@ -439,7 +439,8 @@ export const UserBalanceEvent = onchainTable(
         txHash: t.hex(),
         user: t.hex(),
         asset: t.hex(),
-        scaledBalance: t.bigint(),
+        scaledBalance: t.bigint(), // Total balance after transaction
+        transactionAmount: t.bigint(), // Actual transaction amount (scaled)
         eventType: t.text(), // 'deposit', 'withdraw', 'transfer_in', 'transfer_out'
         timestamp: t.integer(),
         blockNumber: t.bigint(),

@@ -15,7 +15,8 @@ vi.mock('ponder:schema', () => ({
         user: 'user',
         asset: 'asset',
         timestamp: 'timestamp',
-        scaledBalance: 'scaledBalance'
+        scaledBalance: 'scaledBalance',
+        transactionAmount: 'transactionAmount'
     }
 }));
 

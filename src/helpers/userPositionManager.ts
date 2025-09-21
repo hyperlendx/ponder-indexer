@@ -168,7 +168,8 @@ export async function updateUserPosition(
         txHash: txHash as `0x${string}`,
         user: user as `0x${string}`,
         asset: asset as `0x${string}`,
-        scaledBalance: newScaledBalance,
+        scaledBalance: newScaledBalance, // Total balance after transaction
+        transactionAmount: scaledBalanceDelta, // Actual transaction amount (scaled)
         eventType,
         timestamp,
         blockNumber,
@@ -335,24 +336,8 @@ export async function getUserPositions(
 }
 
 /**
- * Update user position when liquidity index changes (for existing positions)
- * This should be called when ReserveDataUpdated events are processed
- */
-export async function updatePositionsForReserveUpdate(
-    context: any,
-    reserve: string,
-    newLiquidityIndex: bigint,
-    timestamp: number
-): Promise<void> {
-    const { db } = context;
-
-    // Note: Bulk position updates are not implemented in this version
-    // Individual position updates are handled in the balance change handlers
-    // This function is called but doesn't perform bulk updates for now
-}
-
-/**
  * Calculate net deposits for a user in a specific time period
+ * Fixed to use transactionAmount instead of scaledBalance (cumulative balance)
  */
 export async function calculateNetDeposits(
     context: any,
@@ -380,15 +365,15 @@ export async function calculateNetDeposits(
     let netDeposits = 0n;
 
     for (const event of events) {
-        const actualAmount = calculateActualBalance(
-            event.scaledBalance,
-            event.liquidityIndex
-        );
+        // Convert transaction amount to actual amount using liquidity index
+        // transactionAmount should always be positive (represents the amount of the transaction)
+        const actualAmount = calculateActualBalance(event.transactionAmount, event.liquidityIndex);
 
+        // Apply correct sign based on event type
         if (event.eventType === 'deposit' || event.eventType === 'transfer_in') {
-            netDeposits += actualAmount;
+            netDeposits += actualAmount; // Deposits increase net deposits
         } else if (event.eventType === 'withdraw' || event.eventType === 'transfer_out') {
-            netDeposits -= actualAmount;
+            netDeposits -= actualAmount; // Withdrawals decrease net deposits
         }
     }
 

@@ -1,25 +1,11 @@
-import { UserMonthlyInterest, UserBalanceEvent, UserPosition } from "ponder:schema";
+import { UserBalanceEvent, UserPosition } from "ponder:schema";
 import {
-    calculateUserInterestEarnings,
     getMonthTimestamps,
-    getYearMonthFromTimestamp,
     calculateLiquidityIndexAtTimestamp,
     calculateActualBalance
 } from "./interestCalculations";
 import { calculateNetDeposits } from "./userPositionManager";
 import { eq, and, lte, desc, gte } from "ponder";
-
-export async function calculateMonthlyInterest(
-    context: any,
-    user: string,
-    asset: string,
-    year: number,
-    month: number
-): Promise<void> {
-    // Temporarily disabled due to database API compatibility issues
-    console.log(`Monthly interest calculation temporarily disabled for ${user} ${asset} ${year}-${month}`);
-    return;
-}
 
 /**
  * Get scaled balance at a specific timestamp by looking at balance events
@@ -162,27 +148,11 @@ async function getAssetsWithBalanceAtTimestamp(
             .from(UserPosition)
             .where(eq(UserPosition.user, user as `0x${string}`));
 
-        console.log(`📊 Found ${currentPositions.length} positions in UserPosition table`);
-        currentPositions.forEach((pos: any, index: number) => {
-            console.log(`📊 Position ${index}:`, {
-                id: pos.id,
-                user: pos.user,
-                asset: pos.asset,
-                scaledBalance: pos.scaledBalance?.toString(),
-                lastUpdated: pos.lastUpdated
-            });
-        });
-
         // Combine unique asset addresses from both sources
         const assetsFromEvents = new Set(allUserEvents.map((event: any) => event.asset));
         const assetsFromPositions = new Set(currentPositions.map((position: any) => position.asset));
 
         const uniqueAssets = [...new Set([...assetsFromEvents, ...assetsFromPositions])];
-
-        console.log(`🔍 User has interacted with ${uniqueAssets.length} unique assets:`);
-        console.log(`   - From UserBalanceEvent: ${assetsFromEvents.size} assets`);
-        console.log(`   - From UserPosition: ${assetsFromPositions.size} assets`);
-        console.log(`   - Assets: [${uniqueAssets.join(', ')}]`);
 
         // For each asset, check if user had non-zero balance at the timestamp
         for (const asset of uniqueAssets) {
@@ -220,7 +190,21 @@ async function calculateSegmentedMonthlyYield(
     asset: string,
     startTimestamp: number,
     endTimestamp: number
-): Promise<bigint> {
+): Promise<{
+    totalYield: bigint;
+    segments: Array<{
+        startTime: number;
+        endTime: number;
+        startDate: string;
+        endDate: string;
+        scaledBalance: bigint;
+        actualBalance: bigint;
+        startLiquidityIndex: bigint;
+        endLiquidityIndex: bigint;
+        segmentYield: bigint;
+        durationDays: number;
+    }>;
+}> {
     console.log(`🔧 Enhanced yield calculation for ${asset}`);
 
     // Get all balance events during the month, ordered chronologically
@@ -245,23 +229,46 @@ async function calculateSegmentedMonthlyYield(
 
     console.log(`📊 Created ${segments.length} time segments`);
 
-    // Calculate interest for each segment and sum them up
+    // Calculate interest for each segment and collect detailed information
     let totalInterest = 0n;
+    const detailedSegments = [];
 
     for (let i = 0; i < segments.length; i++) {
         const segment = segments[i];
-        // @ts-ignore
+        if (!segment) continue; // Skip if segment is undefined
+
         const segmentInterest = await calculateSegmentInterest(context, asset, segment);
         totalInterest += segmentInterest;
 
-        // @ts-ignore
+        // Get liquidity indices for this segment
+        const startLiquidityIndex = await calculateLiquidityIndexAtTimestamp(context, asset, segment.startTime);
+        const endLiquidityIndex = await calculateLiquidityIndexAtTimestamp(context, asset, segment.endTime);
+
+        const actualBalance = calculateActualBalance(segment.scaledBalance, startLiquidityIndex);
+        const durationDays = (segment.endTime - segment.startTime) / (24 * 60 * 60);
+
+        detailedSegments.push({
+            startTime: segment.startTime,
+            endTime: segment.endTime,
+            startDate: new Date(segment.startTime * 1000).toISOString(),
+            endDate: new Date(segment.endTime * 1000).toISOString(),
+            scaledBalance: segment.scaledBalance,
+            actualBalance,
+            startLiquidityIndex,
+            endLiquidityIndex,
+            segmentYield: segmentInterest,
+            durationDays: Math.round(durationDays * 100) / 100 // Round to 2 decimal places
+        });
+
         console.log(`📊 Segment ${i + 1}: ${new Date(segment.startTime * 1000).toISOString()} to ${new Date(segment.endTime * 1000).toISOString()}`);
-        // @ts-ignore
         console.log(`   Balance: ${segment.scaledBalance.toString()}, Interest: ${segmentInterest.toString()}`);
     }
 
     console.log(`💰 Total segmented interest: ${totalInterest.toString()}`);
-    return totalInterest;
+    return {
+        totalYield: totalInterest,
+        segments: detailedSegments
+    };
 }
 
 /**
@@ -312,6 +319,46 @@ async function createTimeSegments(
     }
 
     return segments;
+}
+
+/**
+ * Get the maximum scaled balance the user had during the month
+ * This helps explain yield when start/end balances are 0
+ */
+async function getMaxBalanceDuringMonth(
+    context: any,
+    user: string,
+    asset: string,
+    startTimestamp: number,
+    endTimestamp: number
+): Promise<bigint> {
+    const { db } = context;
+
+    try {
+        const dbQuery = db.sql || db;
+        const events = await dbQuery
+            .select()
+            .from(UserBalanceEvent)
+            .where(
+                and(
+                    eq(UserBalanceEvent.user, user as `0x${string}`),
+                    eq(UserBalanceEvent.asset, asset as `0x${string}`),
+                    gte(UserBalanceEvent.timestamp, startTimestamp),
+                    lte(UserBalanceEvent.timestamp, endTimestamp)
+                )
+            );
+
+        // Include start balance
+        const startBalance = await getScaledBalanceAtTimestamp(context, user, asset, startTimestamp);
+        // @ts-ignore
+        const allBalances = [startBalance, ...events.map(e => BigInt(e.scaledBalance))];
+
+        return allBalances.reduce((max, current) => current > max ? current : max, 0n);
+
+    } catch (error) {
+        console.error(`Error getting max balance during month:`, error);
+        return 0n;
+    }
 }
 
 /**
@@ -368,6 +415,21 @@ export async function calculateUserMonthlyYield(
     netDeposits: bigint;
     startTimestamp: number;
     endTimestamp: number;
+    hadPositionDuringMonth: boolean;
+    maxBalanceDuringMonth: bigint;
+    transactionCount: number;
+    segments?: Array<{
+        startTime: number;
+        endTime: number;
+        startDate: string;
+        endDate: string;
+        scaledBalance: bigint;
+        actualBalance: bigint;
+        startLiquidityIndex: bigint;
+        endLiquidityIndex: bigint;
+        segmentYield: bigint;
+        durationDays: number;
+    }>;
 }>> {
     try {
         // Get month boundaries
@@ -398,11 +460,25 @@ export async function calculateUserMonthlyYield(
                 const startActualBalance = calculateActualBalance(startScaledBalance, startLiquidityIndex);
                 const endActualBalance = calculateActualBalance(endScaledBalance, endLiquidityIndex);
 
+                // Get monthly events for this asset to calculate additional metrics
+                const dbQuery = context.db.sql || context.db;
+                const monthlyEvents = await dbQuery
+                    .select()
+                    .from(UserBalanceEvent)
+                    .where(
+                        and(
+                            eq(UserBalanceEvent.user, user as `0x${string}`),
+                            eq(UserBalanceEvent.asset, asset as `0x${string}`),
+                            gte(UserBalanceEvent.timestamp, startTimestamp),
+                            lte(UserBalanceEvent.timestamp, endTimestamp)
+                        )
+                    );
+
                 // Calculate net deposits during the month
                 const netDeposits = await calculateNetDeposits(context, user, asset, startTimestamp, endTimestamp);
 
                 // Enhanced calculation: Handle intra-month positions
-                const monthlyYield = await calculateSegmentedMonthlyYield(
+                const segmentedResult = await calculateSegmentedMonthlyYield(
                     context,
                     user,
                     asset,
@@ -410,17 +486,12 @@ export async function calculateUserMonthlyYield(
                     endTimestamp
                 );
 
-                // For comparison, calculate the old simple method
-                const simpleYield = endActualBalance - startActualBalance - netDeposits;
+                const monthlyYield = segmentedResult.totalYield;
+                const segments = segmentedResult.segments;
 
-                console.log(`💰 Asset ${asset} yield calculation:`, {
-                    startActualBalance: startActualBalance.toString(),
-                    endActualBalance: endActualBalance.toString(),
-                    netDeposits: netDeposits.toString(),
-                    enhancedYield: monthlyYield.toString(),
-                    simpleYield: simpleYield.toString(),
-                    difference: (monthlyYield - simpleYield).toString()
-                });
+                // Calculate additional metrics for better understanding
+                const hadPositionDuringMonth = monthlyEvents.length > 0 || startScaledBalance > 0n;
+                const maxBalanceDuringMonth = await getMaxBalanceDuringMonth(context, user, asset, startTimestamp, endTimestamp);
 
                 results.push({
                     user,
@@ -436,7 +507,13 @@ export async function calculateUserMonthlyYield(
                     endLiquidityIndex,
                     netDeposits,
                     startTimestamp,
-                    endTimestamp
+                    endTimestamp,
+                    // Additional context fields
+                    hadPositionDuringMonth,
+                    maxBalanceDuringMonth,
+                    transactionCount: monthlyEvents.length,
+                    // Detailed segment information
+                    segments
                 });
 
             } catch (error) {
