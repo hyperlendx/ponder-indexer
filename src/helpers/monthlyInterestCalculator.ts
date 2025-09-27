@@ -362,6 +362,193 @@ async function getMaxBalanceDuringMonth(
 }
 
 /**
+ * Get all assets a user had positions in during a custom time period
+ * Similar to getUserAssetsForMonth but for arbitrary date ranges
+ */
+async function getUserAssetsForPeriod(
+    context: any,
+    user: string,
+    startTimestamp: number,
+    endTimestamp: number
+): Promise<string[]> {
+    const { db } = context;
+
+    try {
+        const assetsWithPositions = new Set<string>();
+
+        console.log(`🔍 Finding assets for ${user} during custom period:`);
+        console.log(`📅 Period: ${new Date(startTimestamp * 1000).toISOString()} to ${new Date(endTimestamp * 1000).toISOString()}`);
+
+        // 1. Find all assets where user had non-zero scaled balance at the START of the period
+        // This catches existing positions that were already open
+        const startOfPeriodAssets = await getAssetsWithBalanceAtTimestamp(context, user, startTimestamp);
+        startOfPeriodAssets.forEach(asset => {
+            assetsWithPositions.add(asset);
+            console.log(`✅ Found existing position at period start: ${asset}`);
+        });
+
+        // 2. Find all assets where user had balance events DURING the period
+        // This catches new positions opened during the period
+        const dbQuery = db.sql || db;
+        const eventsThisPeriod = await dbQuery
+            .select()
+            .from(UserBalanceEvent)
+            .where(
+                and(
+                    eq(UserBalanceEvent.user, user as `0x${string}`),
+                    gte(UserBalanceEvent.timestamp, startTimestamp),
+                    lte(UserBalanceEvent.timestamp, endTimestamp)
+                )
+            );
+
+        eventsThisPeriod.forEach((event: any) => {
+            assetsWithPositions.add(event.asset);
+            console.log(`✅ Found activity during period: ${event.asset}`);
+        });
+
+        console.log(`📊 Total unique assets found: ${assetsWithPositions.size}`);
+        console.log(`📊 Assets: [${Array.from(assetsWithPositions).join(', ')}]`);
+
+        return Array.from(assetsWithPositions);
+
+    } catch (error) {
+        console.error(`❌ Error getting user assets for custom period:`, error);
+        return [];
+    }
+}
+
+/**
+ * Enhanced custom period yield calculation that handles intra-period positions
+ * Adapts the monthly segmented calculation for arbitrary date ranges
+ */
+async function calculateSegmentedCustomPeriodYield(
+    context: any,
+    user: string,
+    asset: string,
+    startTimestamp: number,
+    endTimestamp: number
+): Promise<{
+    totalYield: bigint;
+    segments: Array<{
+        startTime: number;
+        endTime: number;
+        startDate: string;
+        endDate: string;
+        scaledBalance: bigint;
+        actualBalance: bigint;
+        startLiquidityIndex: bigint;
+        endLiquidityIndex: bigint;
+        segmentYield: bigint;
+        durationDays: number;
+    }>;
+}> {
+    console.log(`🔧 Enhanced yield calculation for ${asset} over custom period`);
+
+    // Get all balance events during the period, ordered chronologically
+    const dbQuery = context.db.sql || context.db;
+    const periodEvents = await dbQuery
+        .select()
+        .from(UserBalanceEvent)
+        .where(
+            and(
+                eq(UserBalanceEvent.user, user as `0x${string}`),
+                eq(UserBalanceEvent.asset, asset as `0x${string}`),
+                gte(UserBalanceEvent.timestamp, startTimestamp),
+                lte(UserBalanceEvent.timestamp, endTimestamp)
+            )
+        )
+        .orderBy(UserBalanceEvent.timestamp);
+
+    console.log(`📊 Found ${periodEvents.length} balance events during custom period`);
+
+    // Create time segments for interest calculation
+    const segments = await createTimeSegments(context, user, asset, startTimestamp, endTimestamp, periodEvents);
+
+    console.log(`📊 Created ${segments.length} time segments`);
+
+    // Calculate interest for each segment and collect detailed information
+    let totalInterest = 0n;
+    const detailedSegments = [];
+
+    for (let i = 0; i < segments.length; i++) {
+        const segment = segments[i];
+        if (!segment) continue; // Skip if segment is undefined
+
+        const segmentInterest = await calculateSegmentInterest(context, asset, segment);
+        totalInterest += segmentInterest;
+
+        // Get liquidity indices for this segment
+        const startLiquidityIndex = await calculateLiquidityIndexAtTimestamp(context, asset, segment.startTime);
+        const endLiquidityIndex = await calculateLiquidityIndexAtTimestamp(context, asset, segment.endTime);
+
+        const actualBalance = calculateActualBalance(segment.scaledBalance, startLiquidityIndex);
+        const durationDays = (segment.endTime - segment.startTime) / (24 * 60 * 60);
+
+        detailedSegments.push({
+            startTime: segment.startTime,
+            endTime: segment.endTime,
+            startDate: new Date(segment.startTime * 1000).toISOString(),
+            endDate: new Date(segment.endTime * 1000).toISOString(),
+            scaledBalance: segment.scaledBalance,
+            actualBalance,
+            startLiquidityIndex,
+            endLiquidityIndex,
+            segmentYield: segmentInterest,
+            durationDays: Math.round(durationDays * 100) / 100 // Round to 2 decimal places
+        });
+
+        console.log(`📊 Segment ${i + 1}: ${new Date(segment.startTime * 1000).toISOString()} to ${new Date(segment.endTime * 1000).toISOString()}`);
+        console.log(`   Balance: ${segment.scaledBalance.toString()}, Interest: ${segmentInterest.toString()}`);
+    }
+
+    console.log(`💰 Total segmented interest: ${totalInterest.toString()}`);
+    return {
+        totalYield: totalInterest,
+        segments: detailedSegments
+    };
+}
+
+/**
+ * Get maximum balance during a custom period
+ * Adapts the monthly version for arbitrary date ranges
+ */
+async function getMaxBalanceDuringPeriod(
+    context: any,
+    user: string,
+    asset: string,
+    startTimestamp: number,
+    endTimestamp: number
+): Promise<bigint> {
+    const { db } = context;
+
+    try {
+        const dbQuery = db.sql || db;
+        const events = await dbQuery
+            .select()
+            .from(UserBalanceEvent)
+            .where(
+                and(
+                    eq(UserBalanceEvent.user, user as `0x${string}`),
+                    eq(UserBalanceEvent.asset, asset as `0x${string}`),
+                    gte(UserBalanceEvent.timestamp, startTimestamp),
+                    lte(UserBalanceEvent.timestamp, endTimestamp)
+                )
+            );
+
+        // Include start balance
+        const startBalance = await getScaledBalanceAtTimestamp(context, user, asset, startTimestamp);
+        // @ts-ignore
+        const allBalances = [startBalance, ...events.map(e => BigInt(e.scaledBalance))];
+
+        return allBalances.reduce((max, current) => current > max ? current : max, 0n);
+
+    } catch (error) {
+        console.error(`Error getting max balance during custom period:`, error);
+        return 0n;
+    }
+}
+
+/**
  * Calculate interest earned in a specific time segment
  */
 async function calculateSegmentInterest(
@@ -389,6 +576,143 @@ async function calculateSegmentInterest(
     const interest = endActualBalance - startActualBalance;
 
     return interest;
+}
+
+/**
+ * Calculate yield data for a specific user over a custom time period
+ * Returns yield data for all assets the user had positions in during that period
+ * Uses the same calculation logic as monthly yield but for arbitrary date ranges
+ */
+export async function calculateUserCustomPeriodYield(
+    context: any,
+    user: string,
+    startTimestamp: number,
+    endTimestamp: number
+): Promise<Array<{
+    user: string;
+    asset: string;
+    periodYield: bigint;
+    startScaledBalance: bigint;
+    endScaledBalance: bigint;
+    startActualBalance: bigint;
+    endActualBalance: bigint;
+    startLiquidityIndex: bigint;
+    endLiquidityIndex: bigint;
+    netDeposits: bigint;
+    startTimestamp: number;
+    endTimestamp: number;
+    hadPositionDuringPeriod: boolean;
+    maxBalanceDuringPeriod: bigint;
+    transactionCount: number;
+    segments?: Array<{
+        startTime: number;
+        endTime: number;
+        startDate: string;
+        endDate: string;
+        scaledBalance: bigint;
+        actualBalance: bigint;
+        startLiquidityIndex: bigint;
+        endLiquidityIndex: bigint;
+        segmentYield: bigint;
+        durationDays: number;
+    }>;
+}>> {
+    try {
+        console.log(`📅 Calculating custom period yield for ${user} from ${startTimestamp} to ${endTimestamp}`);
+
+        // Get all assets user had positions in during this period
+        const assets = await getUserAssetsForPeriod(context, user, startTimestamp, endTimestamp);
+        console.log(`🎯 Found ${assets.length} assets for user ${user} in custom period:`, assets);
+
+        if (assets.length === 0) {
+            return [];
+        }
+
+        const results = [];
+
+        for (const asset of assets) {
+            try {
+                // Get scaled balances at period boundaries
+                const startScaledBalance = await getScaledBalanceAtTimestamp(context, user, asset, startTimestamp);
+                const endScaledBalance = await getScaledBalanceAtTimestamp(context, user, asset, endTimestamp);
+
+                // Get liquidity indices at period boundaries
+                const startLiquidityIndex = await calculateLiquidityIndexAtTimestamp(context, asset, startTimestamp);
+                const endLiquidityIndex = await calculateLiquidityIndexAtTimestamp(context, asset, endTimestamp);
+
+                // Calculate actual balances
+                const startActualBalance = calculateActualBalance(startScaledBalance, startLiquidityIndex);
+                const endActualBalance = calculateActualBalance(endScaledBalance, endLiquidityIndex);
+
+                // Get period events for this asset to calculate additional metrics
+                const dbQuery = context.db.sql || context.db;
+                const periodEvents = await dbQuery
+                    .select()
+                    .from(UserBalanceEvent)
+                    .where(
+                        and(
+                            eq(UserBalanceEvent.user, user as `0x${string}`),
+                            eq(UserBalanceEvent.asset, asset as `0x${string}`),
+                            gte(UserBalanceEvent.timestamp, startTimestamp),
+                            lte(UserBalanceEvent.timestamp, endTimestamp)
+                        )
+                    );
+
+                // Calculate net deposits during the period
+                const netDeposits = await calculateNetDeposits(context, user, asset, startTimestamp, endTimestamp);
+
+                // Enhanced calculation: Handle intra-period positions
+                const segmentedResult = await calculateSegmentedCustomPeriodYield(
+                    context,
+                    user,
+                    asset,
+                    startTimestamp,
+                    endTimestamp
+                );
+
+                const periodYield = segmentedResult.totalYield;
+                const segments = segmentedResult.segments;
+
+                // Calculate additional metrics for better understanding
+                const hadPositionDuringPeriod = periodEvents.length > 0 || startScaledBalance > 0n;
+                const maxBalanceDuringPeriod = await getMaxBalanceDuringPeriod(context, user, asset, startTimestamp, endTimestamp);
+
+                results.push({
+                    user,
+                    asset,
+                    periodYield,
+                    startScaledBalance,
+                    endScaledBalance,
+                    startActualBalance,
+                    endActualBalance,
+                    startLiquidityIndex,
+                    endLiquidityIndex,
+                    netDeposits,
+                    startTimestamp,
+                    endTimestamp,
+                    // Additional context fields
+                    hadPositionDuringPeriod,
+                    maxBalanceDuringPeriod,
+                    transactionCount: periodEvents.length,
+                    // Detailed segment information
+                    segments
+                });
+
+                console.log(`✅ Calculated yield for ${asset}: ${periodYield.toString()}`);
+
+            } catch (error) {
+                console.error(`❌ Error calculating yield for asset ${asset}:`, error);
+                // Continue with other assets even if one fails
+            }
+        }
+
+        console.log(`📊 Completed custom period yield calculation for ${user}. Found ${results.length} assets with data.`);
+        return results;
+
+    } catch (error) {
+        console.error(`❌ Error in calculateUserCustomPeriodYield for user ${user}:`, error);
+        throw error;
+    }
 }
 
 /**

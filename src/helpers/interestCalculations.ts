@@ -472,20 +472,18 @@ export function validateLiquidityIndex(index: bigint): boolean {
 
 /**
  * Format ray value for display (convert to decimal with reasonable precision)
+ * Simple approach using direct division for accurate decimal representation
  *
  * @param value - The ray value to format (1e27 precision)
- * @param decimals - Number of decimal places to show (default: 10 for better readability)
- * @returns Formatted string with specified decimal places
+ * @param maxDecimals - Maximum number of decimal places to show (default: 12)
+ * @returns Formatted string with appropriate decimal places
  */
-export function formatRayValue(value: bigint, decimals: number = 10): string {
-    const divisor = 10n ** BigInt(decimals);
-    const scaled = value / (RAY / divisor);
-    const integer = scaled / divisor;
-    const fraction = scaled % divisor;
+export function formatRayValue(value: bigint, maxDecimals: number = 12): string {
+    if (value === 0n) return "0.000000";
 
-    // Remove trailing zeros for cleaner display
-    const fractionStr = fraction.toString().padStart(decimals, '0').replace(/0+$/, '');
-    const finalFraction = fractionStr === '' ? '0' : fractionStr;
+    // Simple division: value / RAY gives the correct decimal representation
+    const result = Number(value) / Number(RAY);
 
-    return `${integer}.${finalFraction.padEnd(Math.min(6, decimals), '0')}`;
+    // Format with specified decimal places and remove trailing zeros
+    return result.toFixed(maxDecimals).replace(/0+$/, '').replace(/\.$/, '') || "0.000000";
 }

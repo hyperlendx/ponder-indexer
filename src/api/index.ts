@@ -1,24 +1,24 @@
-import { db } from "ponder:api";
-import { UserDeposit, ReserveDataEvent } from "ponder:schema";
+import {db} from "ponder:api";
+import {UserDeposit, ReserveDataEvent} from "ponder:schema";
 import schema from "ponder:schema";
-import { Hono } from "hono";
-import { eq, graphql, and, desc, lte } from "ponder";
-import { getUserPositions } from "../helpers/userPositionManager";
-import { calculateUserMonthlyYield } from "../helpers/monthlyInterestCalculator";
-import { calculateLiquidityIndexAtTimestamp, formatRayValue } from "../helpers/interestCalculations";
+import {Hono} from "hono";
+import {eq, graphql, and, desc, lte} from "ponder";
+import {getUserPositions} from "../helpers/userPositionManager";
+import {calculateUserMonthlyYield, calculateUserCustomPeriodYield} from "../helpers/monthlyInterestCalculator";
+import {calculateLiquidityIndexAtTimestamp, formatRayValue} from "../helpers/interestCalculations";
 
 const app = new Hono();
 
 // Add GraphQL endpoint
-app.use("/", graphql({ db, schema }));
-app.use("/graphql", graphql({ db, schema }));
+app.use("/", graphql({db, schema}));
+app.use("/graphql", graphql({db, schema}));
 
 // Custom API endpoint to get user's current deposits
 app.get("/user/:address/deposits", async (c) => {
     const userAddress = c.req.param("address");
 
     if (!userAddress) {
-        return c.json({ error: "User address is required" }, 400);
+        return c.json({error: "User address is required"}, 400);
     }
 
     try {
@@ -35,7 +35,7 @@ app.get("/user/:address/deposits", async (c) => {
         deposits.forEach(deposit => {
             const tokenAddress = deposit.token;
 
-            if(!tokenAddress) return;
+            if (!tokenAddress) return;
 
             uniqueTokens.add(tokenAddress);
 
@@ -61,12 +61,11 @@ app.get("/user/:address/deposits", async (c) => {
         });
     } catch (error) {
         console.error("Error fetching user deposits:", error);
-        return c.json({ error: "Failed to fetch user deposits" }, 500);
+        return c.json({error: "Failed to fetch user deposits"}, 500);
     }
 });
 
 // Enhanced Interest Tracking API Endpoints
-
 
 
 // Get user's current positions with interest tracking
@@ -74,12 +73,12 @@ app.get("/user/:address/positions", async (c) => {
     const userAddress = c.req.param("address");
 
     if (!userAddress) {
-        return c.json({ error: "User address is required" }, 400);
+        return c.json({error: "User address is required"}, 400);
     }
 
     try {
         // Create a mock context for helper functions
-        const context = { db };
+        const context = {db};
         const positions = await getUserPositions(context, userAddress);
         console.log("positions", positions);
         const formattedPositions = positions.map(pos => ({
@@ -103,7 +102,7 @@ app.get("/user/:address/positions", async (c) => {
         });
     } catch (error) {
         console.error("Error fetching user positions123:", userAddress);
-        return c.json({ error: "Failed to fetch user positions" }, 500);
+        return c.json({error: "Failed to fetch user positions"}, 500);
     }
 });
 
@@ -114,14 +113,14 @@ app.get("/reserve/:asset/events", async (c) => {
     const offsetParam = c.req.query("offset") || "0";
 
     if (!asset) {
-        return c.json({ error: "Asset address is required" }, 400);
+        return c.json({error: "Asset address is required"}, 400);
     }
 
     const limit = parseInt(limitParam);
     const offset = parseInt(offsetParam);
 
     if (isNaN(limit) || isNaN(offset) || limit < 1 || limit > 1000) {
-        return c.json({ error: "Invalid limit (1-1000) or offset" }, 400);
+        return c.json({error: "Invalid limit (1-1000) or offset"}, 400);
     }
 
     try {
@@ -159,7 +158,7 @@ app.get("/reserve/:asset/events", async (c) => {
         });
     } catch (error) {
         console.error("Error fetching reserve events:", error);
-        return c.json({ error: "Failed to fetch reserve events" }, 500);
+        return c.json({error: "Failed to fetch reserve events"}, 500);
     }
 });
 
@@ -169,7 +168,7 @@ app.get("/api/reserves/:reserveAddress/liquidity-index", async (c) => {
     const timestampParam = c.req.query("timestamp");
 
     if (!reserveAddress) {
-        return c.json({ error: "Reserve address is required" }, 400);
+        return c.json({error: "Reserve address is required"}, 400);
     }
 
     // Validate reserve address format (basic hex address validation)
@@ -196,7 +195,7 @@ app.get("/api/reserves/:reserveAddress/liquidity-index", async (c) => {
             timestamp = Math.floor(Date.now() / 1000);
         }
 
-        const context = { db };
+        const context = {db};
         const liquidityIndex = await calculateLiquidityIndexAtTimestamp(
             context,
             reserveAddress,
@@ -228,12 +227,12 @@ app.get("/user/:address/monthly-yield/:year/:month", async (c) => {
     const monthParam = c.req.param("month");
 
     if (!userAddress || !yearParam || !monthParam) {
-        return c.json({ error: "User address, year, and month are required" }, 400);
+        return c.json({error: "User address, year, and month are required"}, 400);
     }
 
     // Validate hex address format
     if (!/^0x[a-fA-F0-9]{40}$/.test(userAddress)) {
-        return c.json({ error: "Invalid user address format" }, 400);
+        return c.json({error: "Invalid user address format"}, 400);
     }
 
     const year = parseInt(yearParam);
@@ -241,11 +240,11 @@ app.get("/user/:address/monthly-yield/:year/:month", async (c) => {
 
     // Validate year and month
     if (isNaN(year) || isNaN(month) || year < 2020 || year > 2030 || month < 1 || month > 12) {
-        return c.json({ error: "Invalid year (2020-2030) or month (1-12)" }, 400);
+        return c.json({error: "Invalid year (2020-2030) or month (1-12)"}, 400);
     }
 
     try {
-        const context = { db };
+        const context = {db};
 
         // Calculate monthly yield data
         const yieldData = await calculateUserMonthlyYield(context, userAddress, year, month);
@@ -267,31 +266,20 @@ app.get("/user/:address/monthly-yield/:year/:month", async (c) => {
             year: data.year,
             month: data.month,
             monthlyYield: data.monthlyYield.toString(),
-            startScaledBalance: data.startScaledBalance.toString(),
-            endScaledBalance: data.endScaledBalance.toString(),
-            startActualBalance: data.startActualBalance.toString(),
-            endActualBalance: data.endActualBalance.toString(),
-            startLiquidityIndex: data.startLiquidityIndex.toString(),
-            endLiquidityIndex: data.endLiquidityIndex.toString(),
             netDeposits: data.netDeposits.toString(),
-            startTimestamp: data.startTimestamp,
-            endTimestamp: data.endTimestamp,
             // Add context fields for better understanding
             hadPositionDuringMonth: data.hadPositionDuringMonth || false,
             maxBalanceDuringMonth: data.maxBalanceDuringMonth?.toString() || "0",
-            transactionCount: data.transactionCount || 0,
             // Add formatted values for easier reading
             monthlyYieldFormatted: formatRayValue(data.monthlyYield),
-            startActualBalanceFormatted: formatRayValue(data.startActualBalance),
-            endActualBalanceFormatted: formatRayValue(data.endActualBalance),
             netDepositsFormatted: formatRayValue(data.netDeposits),
             maxBalanceDuringMonthFormatted: formatRayValue(data.maxBalanceDuringMonth || 0n),
             startDate: new Date(data.startTimestamp * 1000).toISOString(),
             endDate: new Date(data.endTimestamp * 1000).toISOString(),
             // Add explanation for confusing cases
             explanation: getYieldExplanation(data),
-            // Add detailed segment information for transparency
-            segments: data.segments?.map(segment => ({
+            // Add detailed segment information for transparency (filter out empty segments)
+            segments: data.segments?.filter(segment => segment.segmentYield !== 0n).map(segment => ({
                 startTime: segment.startTime,
                 endTime: segment.endTime,
                 startDate: segment.startDate,
@@ -322,7 +310,7 @@ app.get("/user/:address/monthly-yield/:year/:month", async (c) => {
 
     } catch (error) {
         console.error("Error calculating monthly yield:", error);
-        return c.json({ error: "Failed to calculate monthly yield data" }, 500);
+        return c.json({error: "Failed to calculate monthly yield data"}, 500);
     }
 });
 
@@ -335,7 +323,6 @@ function getYieldExplanation(data: any): string {
     const monthlyYield = BigInt(data.monthlyYield || 0);
     const netDeposits = BigInt(data.netDeposits || 0);
     const hadPosition = data.hadPositionDuringMonth;
-    const transactionCount = data.transactionCount || 0;
 
     // Case 1: Normal ongoing position
     if (startBalance > 0n && endBalance > 0n) {
@@ -370,9 +357,173 @@ function getYieldExplanation(data: any): string {
     return "Standard yield calculation";
 }
 
+/**
+ * Generate explanation for custom period yield calculations
+ */
+function getCustomPeriodYieldExplanation(data: any): string {
+    const startBalance = BigInt(data.startScaledBalance || 0);
+    const endBalance = BigInt(data.endScaledBalance || 0);
+    const periodYield = BigInt(data.periodYield || 0);
+    const netDeposits = BigInt(data.netDeposits || 0);
+    const hadPosition = data.hadPositionDuringPeriod;
+
+    // Case 1: Normal ongoing position
+    if (startBalance > 0n && endBalance > 0n) {
+        return "User held position throughout the period and earned interest";
+    }
+
+    // Case 2: New position opened during period
+    if (startBalance === 0n && endBalance > 0n && netDeposits > 0n) {
+        return "User opened new position during the period and earned interest";
+    }
+
+    // Case 3: Position closed during period
+    if (startBalance > 0n && endBalance === 0n && periodYield > 0n) {
+        return "User closed position during period but earned interest while position was active";
+    }
+
+    // Case 4: Temporary position (opened and closed same period)
+    if (startBalance === 0n && endBalance === 0n && periodYield > 0n && hadPosition) {
+        return "User had temporary position during period and earned interest while active";
+    }
+
+    // Case 5: No activity
+    if (periodYield === 0n && !hadPosition) {
+        return "No position or activity during this period";
+    }
+
+    // Case 6: Zero yield asset
+    if (periodYield === 0n && (startBalance > 0n || endBalance > 0n)) {
+        return "Position held but asset has 0% interest rate";
+    }
+
+    return "Standard yield calculation";
+}
+
+// Get custom period yield data for a specific user and time range
+app.get("/user/:address/custom-period-yield", async (c) => {
+    const userAddress = c.req.param("address");
+    const fromTimestampParam = c.req.query("fromTimestamp");
+    const toTimestampParam = c.req.query("toTimestamp");
+
+    if (!userAddress || !fromTimestampParam || !toTimestampParam) {
+        return c.json({error: "User address, fromTimestamp, and toTimestamp are required"}, 400);
+    }
+
+    // Validate hex address format
+    if (!/^0x[a-fA-F0-9]{40}$/.test(userAddress)) {
+        return c.json({error: "Invalid user address format"}, 400);
+    }
+
+    const fromTimestamp = parseInt(fromTimestampParam);
+    const toTimestamp = parseInt(toTimestampParam);
+
+    // Validate timestamps
+    if (isNaN(fromTimestamp) || isNaN(toTimestamp)) {
+        return c.json({error: "Invalid timestamp format. Must be Unix timestamps in seconds"}, 400);
+    }
+
+    if (fromTimestamp < 0 || toTimestamp < 0) {
+        return c.json({error: "Timestamps must be positive values"}, 400);
+    }
+
+    if (toTimestamp <= fromTimestamp) {
+        return c.json({error: "toTimestamp must be greater than fromTimestamp"}, 400);
+    }
+
+    // Validate reasonable time range (not more than 2 years)
+    const maxPeriodSeconds = 2 * 365 * 24 * 60 * 60; // 2 years
+    if (toTimestamp - fromTimestamp > maxPeriodSeconds) {
+        return c.json({error: "Time period cannot exceed 2 years"}, 400);
+    }
+
+    // Validate timestamps are not in the future (with 1 hour buffer for clock differences)
+    const currentTimestamp = Math.floor(Date.now() / 1000);
+    const futureBuffer = 3600; // 1 hour
+    if (toTimestamp > currentTimestamp + futureBuffer) {
+        return c.json({error: "toTimestamp cannot be in the future"}, 400);
+    }
+
+    try {
+        const context = {db};
+
+        // Calculate custom period yield data
+        const yieldData = await calculateUserCustomPeriodYield(context, userAddress, fromTimestamp, toTimestamp);
+
+        if (yieldData.length === 0) {
+            return c.json({
+                user: userAddress,
+                fromTimestamp,
+                toTimestamp,
+                fromDate: new Date(fromTimestamp * 1000).toISOString(),
+                toDate: new Date(toTimestamp * 1000).toISOString(),
+                periodYields: [],
+                message: "No positions found for this user during the specified period"
+            });
+        }
+
+        // Format the response data
+        const formattedYields = yieldData.map(data => ({
+            user: data.user,
+            asset: data.asset,
+            yield: data.periodYield.toString(),
+            netDeposits: data.netDeposits.toString(),
+            // Add context fields for better understanding
+            hadPositionDuringPeriod: data.hadPositionDuringPeriod || false,
+            maxBalanceDuringPeriod: data.maxBalanceDuringPeriod?.toString() || "0",
+            // Add formatted values for easier reading
+            yieldFormatted: formatRayValue(data.periodYield),
+            netDepositsFormatted: formatRayValue(data.netDeposits),
+            maxBalanceDuringPeriodFormatted: formatRayValue(data.maxBalanceDuringPeriod || 0n),
+            startDate: new Date(data.startTimestamp * 1000).toISOString(),
+            endDate: new Date(data.endTimestamp * 1000).toISOString(),
+            // Add explanation for confusing cases
+            explanation: getCustomPeriodYieldExplanation(data),
+            // Add detailed segment information for transparency (filter out empty segments)
+            segments: data.segments?.filter(segment => segment.segmentYield !== 0n).map(segment => ({
+                startTime: segment.startTime,
+                endTime: segment.endTime,
+                startDate: segment.startDate,
+                endDate: segment.endDate,
+                scaledBalance: segment.scaledBalance.toString(),
+                actualBalance: segment.actualBalance.toString(),
+                startLiquidityIndex: segment.startLiquidityIndex.toString(),
+                endLiquidityIndex: segment.endLiquidityIndex.toString(),
+                yield: segment.segmentYield.toString(),
+                durationDays: segment.durationDays,
+                // Formatted values for readability
+                scaledBalanceFormatted: formatRayValue(segment.scaledBalance),
+                actualBalanceFormatted: formatRayValue(segment.actualBalance),
+                segmentYieldFormatted: formatRayValue(segment.segmentYield),
+                startLiquidityIndexFormatted: formatRayValue(segment.startLiquidityIndex),
+                endLiquidityIndexFormatted: formatRayValue(segment.endLiquidityIndex)
+            })) || []
+        }));
+
+        // Filter out assets with zero yield for cleaner response (as per user preference)
+        const filteredYields = formattedYields.filter(data => data.periodYield !== '0');
+
+        return c.json({
+            user: userAddress,
+            fromTimestamp,
+            toTimestamp,
+            fromDate: new Date(fromTimestamp * 1000).toISOString(),
+            toDate: new Date(toTimestamp * 1000).toISOString(),
+            days: Math.round((toTimestamp - fromTimestamp) / (24 * 60 * 60) * 100) / 100,
+            assets: filteredYields,
+            totalAssets: filteredYields.length,
+            calculatedAt: Math.floor(Date.now() / 1000)
+        });
+
+    } catch (error) {
+        console.error("Error calculating custom period yield:", error);
+        return c.json({error: "Failed to calculate custom period yield data"}, 500);
+    }
+});
+
 // Custom health check endpoint
 app.get("/custom-health", async (c) => {
-    return c.json({ status: "ok", timestamp: Date.now() });
+    return c.json({status: "ok", timestamp: Date.now()});
 });
 
 export default app;
