@@ -30,13 +30,13 @@ export default createConfig({
             address: [
                 "0x00A89d7a5A02160f20150EbEA7a2b5E4879A1A8b", //main pool
             ],
-            startBlock: 11464850,
+            startBlock: 787000,
         },
         Oracle: {
             chain: "hyperEvm",
             abi: OracleAbi,
             address: "0xC9Fb4fbE842d57EAc1dF3e641a281827493A630e", //main pool oracle
-            startBlock: 13203581,
+            startBlock: 787000,
         },
         HTokens: {
             abi: HTokenAbi,
@@ -49,7 +49,7 @@ export default createConfig({
                 // The name of the parameter that contains the address of the new child contract.
                 parameter: "aToken",
             }),
-            startBlock: 784292,
+            startBlock: 787000,
         },
         IsolatedPair: {
             abi: IsolatedAbi,
@@ -62,7 +62,7 @@ export default createConfig({
                 // The name of the parameter that contains the address of the new child contract.
                 parameter: "pairAddress",
             }),
-            startBlock: 32015,
+            startBlock: 249000,
         },
         LoopingStrategyManagerFactory: {
             abi: LoopingStrategyManagerFactoryAbi,
