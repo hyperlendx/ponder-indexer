@@ -887,8 +887,9 @@ export async function calculateUserDailyYieldBreakdown(
         segments: Array<{
             startTime: number;
             endTime: number;
-            scaledBalance: bigint;
-            segmentYield: bigint;
+            scaledBalance: string; // String for JSON serialization
+            segmentYield: string;  // String for JSON serialization
+            segmentYieldFormatted: string;
             durationHours: number;
         }>;
     }>;
@@ -924,9 +925,14 @@ export async function calculateUserDailyYieldBreakdown(
 
         // Initialize daily buckets
         const startDate = new Date(startTimestamp * 1000);
-        const endDate = new Date(endTimestamp * 1000);
 
-        for (let currentDate = new Date(startDate); currentDate <= endDate; currentDate.setDate(currentDate.getDate() + 1)) {
+        // Calculate number of days to iterate (add 1 to include both start and end dates)
+        const totalDays = Math.ceil((endTimestamp - startTimestamp) / (24 * 60 * 60)) + 1;
+
+        for (let dayOffset = 0; dayOffset < totalDays; dayOffset++) {
+            const currentDate = new Date(startDate);
+            currentDate.setDate(startDate.getDate() + dayOffset);
+
             const dateStr = currentDate.toISOString().split('T')[0]; // YYYY-MM-DD format
             const dayStartTimestamp = Math.floor(new Date(currentDate.getFullYear(), currentDate.getMonth(), currentDate.getDate()).getTime() / 1000);
 
@@ -1000,46 +1006,75 @@ export async function calculateUserDailyYieldBreakdown(
                             });
                         }
                     } else {
-                        // Segment spans multiple days - need to proportionally distribute yield
-                        const totalSegmentDuration = segment.endTime - segment.startTime;
+                        // Segment spans multiple days - calculate accurate yield for each day
+                        // by computing liquidity index at day boundaries
+                        console.log(`📊 Multi-day segment detected, calculating accurate daily yields using liquidity indices`);
 
-                        // Iterate through each day the segment spans
-                        for (let currentDate = new Date(segmentStartDate); currentDate <= segmentEndDate; currentDate.setDate(currentDate.getDate() + 1)) {
+                        // OPTIMIZATION: Collect all unique timestamps first, then batch calculate indices
+                        const timestampsNeeded = new Set<number>();
+                        const segmentDays = Math.ceil((segmentEndDate.getTime() - segmentStartDate.getTime()) / (24 * 60 * 60 * 1000)) + 1;
+
+                        // First pass: collect all timestamps we need
+                        const dayOverlaps: Array<{dateStr: string, overlapStart: number, overlapEnd: number}> = [];
+                        for (let dayOffset = 0; dayOffset < segmentDays; dayOffset++) {
+                            const currentDate = new Date(segmentStartDate);
+                            currentDate.setDate(segmentStartDate.getDate() + dayOffset);
                             const currentDateStr = currentDate.toISOString().split('T')[0];
                             const dayData = dailyResults.get(currentDateStr);
                             if (!dayData) continue;
 
-                            // Calculate the portion of the segment that falls within this day
                             const dayStart = Math.floor(new Date(currentDate.getFullYear(), currentDate.getMonth(), currentDate.getDate()).getTime() / 1000);
-                            const dayEnd = dayStart + 24 * 60 * 60 - 1; // End of day
-
+                            const dayEnd = dayStart + 24 * 60 * 60 - 1;
                             const overlapStart = Math.max(segment.startTime, dayStart);
                             const overlapEnd = Math.min(segment.endTime, dayEnd);
 
                             if (overlapEnd > overlapStart) {
-                                const overlapDuration = overlapEnd - overlapStart;
-                                const proportionalYield = (segment.segmentYield * BigInt(overlapDuration)) / BigInt(totalSegmentDuration);
+                                timestampsNeeded.add(overlapStart);
+                                timestampsNeeded.add(overlapEnd);
+                                dayOverlaps.push({dateStr: currentDateStr, overlapStart, overlapEnd});
+                            }
+                        }
 
-                                dayData.dailyYield += proportionalYield;
+                        // Batch calculate all liquidity indices at once
+                        const indexCache = new Map<number, bigint>();
+                        console.log(`  Batch calculating ${timestampsNeeded.size} liquidity indices...`);
+                        for (const timestamp of timestampsNeeded) {
+                            const index = await calculateLiquidityIndexAtTimestamp(context, asset, timestamp);
+                            indexCache.set(timestamp, index);
+                        }
 
-                                if (!dayData.assets.has(asset)) {
-                                    dayData.assets.set(asset, {
-                                        asset,
-                                        dailyYield: 0n,
-                                        segments: []
-                                    });
-                                }
+                        // Second pass: use cached indices to calculate yields
+                        for (const {dateStr, overlapStart, overlapEnd} of dayOverlaps) {
+                            const dayData = dailyResults.get(dateStr)!;
+                            const startIndex = indexCache.get(overlapStart)!;
+                            const endIndex = indexCache.get(overlapEnd)!;
 
-                                const assetData = dayData.assets.get(asset)!;
-                                assetData.dailyYield += proportionalYield;
-                                assetData.segments.push({
-                                    startTime: overlapStart,
-                                    endTime: overlapEnd,
-                                    scaledBalance: segment.scaledBalance,
-                                    segmentYield: proportionalYield,
-                                    durationHours: overlapDuration / 3600
+                            // Calculate actual yield for this specific time period
+                            const startBalance = calculateActualBalance(segment.scaledBalance, startIndex);
+                            const endBalance = calculateActualBalance(segment.scaledBalance, endIndex);
+                            const actualYield = endBalance - startBalance;
+
+                            console.log(`  Day ${dateStr}: ${overlapStart} → ${overlapEnd}, yield: ${actualYield.toString()}`);
+
+                            dayData.dailyYield += actualYield;
+
+                            if (!dayData.assets.has(asset)) {
+                                dayData.assets.set(asset, {
+                                    asset,
+                                    dailyYield: 0n,
+                                    segments: []
                                 });
                             }
+
+                            const assetData = dayData.assets.get(asset)!;
+                            assetData.dailyYield += actualYield;
+                            assetData.segments.push({
+                                startTime: overlapStart,
+                                endTime: overlapEnd,
+                                scaledBalance: segment.scaledBalance,
+                                segmentYield: actualYield,
+                                durationHours: (overlapEnd - overlapStart) / 3600
+                            });
                         }
                     }
                 }
@@ -1063,7 +1098,15 @@ export async function calculateUserDailyYieldBreakdown(
                 assets: Array.from(dayData.assets.values()).map(assetData => ({
                     asset: assetData.asset,
                     dailyYield: assetData.dailyYield,
-                    dailyYieldFormatted: formatRayValue(assetData.dailyYield)
+                    dailyYieldFormatted: formatRayValue(assetData.dailyYield),
+                    segments: (assetData.segments || []).map(seg => ({
+                        startTime: seg.startTime,
+                        endTime: seg.endTime,
+                        scaledBalance: seg.scaledBalance.toString(), // Convert BigInt to string for JSON serialization
+                        segmentYield: seg.segmentYield.toString(),   // Convert BigInt to string for JSON serialization
+                        segmentYieldFormatted: formatRayValue(seg.segmentYield), // Add formatted value
+                        durationHours: seg.durationHours
+                    }))
                 }))
             }))
             .sort((a, b) => a.timestamp - b.timestamp); // Sort chronologically

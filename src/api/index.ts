@@ -585,10 +585,13 @@ app.get("/user/:address/daily-yield-breakdown", async (c) => {
     }
 
     try {
+        console.log(`🚀 Starting daily yield breakdown calculation for ${userAddress}`);
         const context = {db};
 
         // Calculate daily yield breakdown
+        console.log(`📞 Calling calculateUserDailyYieldBreakdown...`);
         const dailyYieldData = await calculateUserDailyYieldBreakdown(context, userAddress, fromTimestamp, toTimestamp);
+        console.log(`✅ Got daily yield data, length: ${dailyYieldData.length}`);
 
         // Note: dailyYieldData now includes all days in the period (including zero-yield days)
         // Only return empty response if no data could be calculated at all (e.g., no assets found)
@@ -626,6 +629,20 @@ app.get("/user/:address/daily-yield-breakdown", async (c) => {
         const maxDailyYield = dailyYieldData.reduce((max, day) => day.dailyYield > max ? day.dailyYield : max, 0n);
         const minDailyYield = dailyYieldData.reduce((min, day) => day.dailyYield < min ? day.dailyYield : min, dailyYieldData[0]?.dailyYield || 0n);
 
+        // Convert all BigInt values to strings for JSON serialization
+        const serializedDailyBreakdown = dailyYieldData.map(day => ({
+            date: day.date,
+            timestamp: day.timestamp,
+            dailyYield: day.dailyYield.toString(),
+            dailyYieldFormatted: day.dailyYieldFormatted,
+            assets: day.assets.map(asset => ({
+                asset: asset.asset,
+                dailyYield: asset.dailyYield.toString(),
+                dailyYieldFormatted: asset.dailyYieldFormatted,
+                segments: asset.segments // Already converted to strings in the helper function
+            }))
+        }));
+
         return c.json({
             user: userAddress,
             fromTimestamp,
@@ -633,7 +650,7 @@ app.get("/user/:address/daily-yield-breakdown", async (c) => {
             fromDate: new Date(fromTimestamp * 1000).toISOString(),
             toDate: new Date(toTimestamp * 1000).toISOString(),
             days: Math.round((toTimestamp - fromTimestamp) / (24 * 60 * 60) * 100) / 100,
-            dailyBreakdown: dailyYieldData,
+            dailyBreakdown: serializedDailyBreakdown,
             summary: {
                 totalYield: totalYield.toString(),
                 totalYieldFormatted: formatRayValue(totalYield),
@@ -650,7 +667,9 @@ app.get("/user/:address/daily-yield-breakdown", async (c) => {
         });
 
     } catch (error) {
-        console.error("Error calculating daily yield breakdown:", error);
+        console.error("❌ Error calculating daily yield breakdown:", error);
+        console.error("Error stack:", error instanceof Error ? error.stack : 'No stack trace');
+        console.error("Error message:", error instanceof Error ? error.message : String(error));
         return c.json({error: "Failed to calculate daily yield breakdown"}, 500);
     }
 });
