@@ -4,7 +4,7 @@ import schema from "ponder:schema";
 import {Hono} from "hono";
 import {eq, graphql, and, desc, lte} from "ponder";
 import {getUserPositions} from "../helpers/userPositionManager";
-import {calculateUserMonthlyYield, calculateUserCustomPeriodYield} from "../helpers/monthlyInterestCalculator";
+import {calculateUserMonthlyYield, calculateUserCustomPeriodYield, calculateUserDailyYieldBreakdown} from "../helpers/monthlyInterestCalculator";
 import {calculateLiquidityIndexAtTimestamp, formatRayValue} from "../helpers/interestCalculations";
 
 const app = new Hono();
@@ -457,7 +457,14 @@ app.get("/user/:address/custom-period-yield", async (c) => {
                 toTimestamp,
                 fromDate: new Date(fromTimestamp * 1000).toISOString(),
                 toDate: new Date(toTimestamp * 1000).toISOString(),
-                periodYields: [],
+                days: Math.round((toTimestamp - fromTimestamp) / (24 * 60 * 60) * 100) / 100,
+                totalSupplied: "0",
+                totalBorrowed: "0",
+                totalSuppliedFormatted: "0.000000",
+                totalBorrowedFormatted: "0.000000",
+                assets: [],
+                totalAssets: 0,
+                calculatedAt: Math.floor(Date.now() / 1000),
                 message: "No positions found for this user during the specified period"
             });
         }
@@ -468,12 +475,16 @@ app.get("/user/:address/custom-period-yield", async (c) => {
             asset: data.asset,
             yield: data.periodYield.toString(),
             netDeposits: data.netDeposits.toString(),
+            suppliedAmount: data.suppliedAmount.toString(),
+            borrowedAmount: data.borrowedAmount.toString(),
             // Add context fields for better understanding
             hadPositionDuringPeriod: data.hadPositionDuringPeriod || false,
             maxBalanceDuringPeriod: data.maxBalanceDuringPeriod?.toString() || "0",
             // Add formatted values for easier reading
             yieldFormatted: formatRayValue(data.periodYield),
             netDepositsFormatted: formatRayValue(data.netDeposits),
+            suppliedAmountFormatted: formatRayValue(data.suppliedAmount),
+            borrowedAmountFormatted: formatRayValue(data.borrowedAmount),
             maxBalanceDuringPeriodFormatted: formatRayValue(data.maxBalanceDuringPeriod || 0n),
             startDate: new Date(data.startTimestamp * 1000).toISOString(),
             endDate: new Date(data.endTimestamp * 1000).toISOString(),
@@ -501,7 +512,11 @@ app.get("/user/:address/custom-period-yield", async (c) => {
         }));
 
         // Filter out assets with zero yield for cleaner response (as per user preference)
-        const filteredYields = formattedYields.filter(data => data.periodYield !== '0');
+        const filteredYields = formattedYields.filter(data => data.yield !== '0');
+
+        // Calculate totals across all assets
+        const totalSupplied = filteredYields.reduce((sum, asset) => sum + BigInt(asset.suppliedAmount), 0n);
+        const totalBorrowed = filteredYields.reduce((sum, asset) => sum + BigInt(asset.borrowedAmount), 0n);
 
         return c.json({
             user: userAddress,
@@ -510,6 +525,10 @@ app.get("/user/:address/custom-period-yield", async (c) => {
             fromDate: new Date(fromTimestamp * 1000).toISOString(),
             toDate: new Date(toTimestamp * 1000).toISOString(),
             days: Math.round((toTimestamp - fromTimestamp) / (24 * 60 * 60) * 100) / 100,
+            totalSupplied: totalSupplied.toString(),
+            totalBorrowed: totalBorrowed.toString(),
+            totalSuppliedFormatted: formatRayValue(totalSupplied),
+            totalBorrowedFormatted: formatRayValue(totalBorrowed),
             assets: filteredYields,
             totalAssets: filteredYields.length,
             calculatedAt: Math.floor(Date.now() / 1000)
@@ -518,6 +537,121 @@ app.get("/user/:address/custom-period-yield", async (c) => {
     } catch (error) {
         console.error("Error calculating custom period yield:", error);
         return c.json({error: "Failed to calculate custom period yield data"}, 500);
+    }
+});
+
+// Get daily yield breakdown for a specific user over a custom time period
+app.get("/user/:address/daily-yield-breakdown", async (c) => {
+    const userAddress = c.req.param("address");
+    const fromTimestampParam = c.req.query("fromTimestamp");
+    const toTimestampParam = c.req.query("toTimestamp");
+
+    if (!userAddress || !fromTimestampParam || !toTimestampParam) {
+        return c.json({error: "User address, fromTimestamp, and toTimestamp are required"}, 400);
+    }
+
+    // Validate hex address format
+    if (!/^0x[a-fA-F0-9]{40}$/.test(userAddress)) {
+        return c.json({error: "Invalid user address format"}, 400);
+    }
+
+    const fromTimestamp = parseInt(fromTimestampParam);
+    const toTimestamp = parseInt(toTimestampParam);
+
+    // Validate timestamps
+    if (isNaN(fromTimestamp) || isNaN(toTimestamp)) {
+        return c.json({error: "Invalid timestamp format. Must be Unix timestamps in seconds"}, 400);
+    }
+
+    if (fromTimestamp < 0 || toTimestamp < 0) {
+        return c.json({error: "Timestamps must be positive values"}, 400);
+    }
+
+    if (toTimestamp <= fromTimestamp) {
+        return c.json({error: "toTimestamp must be greater than fromTimestamp"}, 400);
+    }
+
+    // Validate reasonable time range (not more than 1 year for daily breakdown)
+    const maxPeriodSeconds = 365 * 24 * 60 * 60; // 1 year
+    if (toTimestamp - fromTimestamp > maxPeriodSeconds) {
+        return c.json({error: "Time period cannot exceed 1 year for daily breakdown"}, 400);
+    }
+
+    // Validate timestamps are not in the future (with 1 hour buffer for clock differences)
+    const currentTimestamp = Math.floor(Date.now() / 1000);
+    const futureBuffer = 3600; // 1 hour
+    if (toTimestamp > currentTimestamp + futureBuffer) {
+        return c.json({error: "toTimestamp cannot be in the future"}, 400);
+    }
+
+    try {
+        const context = {db};
+
+        // Calculate daily yield breakdown
+        const dailyYieldData = await calculateUserDailyYieldBreakdown(context, userAddress, fromTimestamp, toTimestamp);
+
+        // Note: dailyYieldData now includes all days in the period (including zero-yield days)
+        // Only return empty response if no data could be calculated at all (e.g., no assets found)
+        if (dailyYieldData.length === 0) {
+            // Calculate expected number of days for empty response
+            const expectedDays = Math.ceil((toTimestamp - fromTimestamp) / (24 * 60 * 60));
+            return c.json({
+                user: userAddress,
+                fromTimestamp,
+                toTimestamp,
+                fromDate: new Date(fromTimestamp * 1000).toISOString(),
+                toDate: new Date(toTimestamp * 1000).toISOString(),
+                days: Math.round((toTimestamp - fromTimestamp) / (24 * 60 * 60) * 100) / 100,
+                dailyBreakdown: [],
+                summary: {
+                    totalYield: "0",
+                    totalYieldFormatted: "0.000000",
+                    averageDailyYield: "0",
+                    averageDailyYieldFormatted: "0.000000",
+                    maxDailyYield: "0",
+                    maxDailyYieldFormatted: "0.000000",
+                    minDailyYield: "0",
+                    minDailyYieldFormatted: "0.000000",
+                    daysWithYield: 0,
+                    totalDaysInPeriod: expectedDays
+                },
+                message: "No positions found for this user during the specified period"
+            });
+        }
+
+        // Calculate summary statistics
+        const totalYield = dailyYieldData.reduce((sum, day) => sum + day.dailyYield, 0n);
+        const daysWithYield = dailyYieldData.filter(day => day.dailyYield > 0n).length;
+        const averageDailyYield = dailyYieldData.length > 0 ? totalYield / BigInt(dailyYieldData.length) : 0n;
+        const maxDailyYield = dailyYieldData.reduce((max, day) => day.dailyYield > max ? day.dailyYield : max, 0n);
+        const minDailyYield = dailyYieldData.reduce((min, day) => day.dailyYield < min ? day.dailyYield : min, dailyYieldData[0]?.dailyYield || 0n);
+
+        return c.json({
+            user: userAddress,
+            fromTimestamp,
+            toTimestamp,
+            fromDate: new Date(fromTimestamp * 1000).toISOString(),
+            toDate: new Date(toTimestamp * 1000).toISOString(),
+            days: Math.round((toTimestamp - fromTimestamp) / (24 * 60 * 60) * 100) / 100,
+            dailyBreakdown: dailyYieldData,
+            summary: {
+                totalYield: totalYield.toString(),
+                totalYieldFormatted: formatRayValue(totalYield),
+                averageDailyYield: averageDailyYield.toString(),
+                averageDailyYieldFormatted: formatRayValue(averageDailyYield),
+                maxDailyYield: maxDailyYield.toString(),
+                maxDailyYieldFormatted: formatRayValue(maxDailyYield),
+                minDailyYield: minDailyYield.toString(),
+                minDailyYieldFormatted: formatRayValue(minDailyYield),
+                daysWithYield: daysWithYield,
+                totalDaysInPeriod: dailyYieldData.length // Now equals dailyBreakdown.length
+            },
+            calculatedAt: Math.floor(Date.now() / 1000)
+        });
+
+    } catch (error) {
+        console.error("Error calculating daily yield breakdown:", error);
+        return c.json({error: "Failed to calculate daily yield breakdown"}, 500);
     }
 });
 

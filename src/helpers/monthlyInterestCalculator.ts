@@ -2,9 +2,10 @@ import { UserBalanceEvent, UserPosition } from "ponder:schema";
 import {
     getMonthTimestamps,
     calculateLiquidityIndexAtTimestamp,
-    calculateActualBalance
+    calculateActualBalance,
+    formatRayValue
 } from "./interestCalculations";
-import { calculateNetDeposits } from "./userPositionManager";
+import { calculateNetDeposits, calculateTotalSupplied, calculateTotalBorrowed } from "./userPositionManager";
 import { eq, and, lte, desc, gte } from "ponder";
 
 /**
@@ -599,6 +600,8 @@ export async function calculateUserCustomPeriodYield(
     startLiquidityIndex: bigint;
     endLiquidityIndex: bigint;
     netDeposits: bigint;
+    suppliedAmount: bigint;
+    borrowedAmount: bigint;
     startTimestamp: number;
     endTimestamp: number;
     hadPositionDuringPeriod: boolean;
@@ -661,6 +664,10 @@ export async function calculateUserCustomPeriodYield(
                 // Calculate net deposits during the period
                 const netDeposits = await calculateNetDeposits(context, user, asset, startTimestamp, endTimestamp);
 
+                // Calculate supplied and borrowed amounts during the period
+                const suppliedAmount = await calculateTotalSupplied(context, user, asset, startTimestamp, endTimestamp);
+                const borrowedAmount = await calculateTotalBorrowed(context, user, asset, startTimestamp, endTimestamp);
+
                 // Enhanced calculation: Handle intra-period positions
                 const segmentedResult = await calculateSegmentedCustomPeriodYield(
                     context,
@@ -688,6 +695,8 @@ export async function calculateUserCustomPeriodYield(
                     startLiquidityIndex,
                     endLiquidityIndex,
                     netDeposits,
+                    suppliedAmount,
+                    borrowedAmount,
                     startTimestamp,
                     endTimestamp,
                     // Additional context fields
@@ -851,5 +860,219 @@ export async function calculateUserMonthlyYield(
     } catch (error) {
         console.error(`❌ Error calculating monthly yield for user ${user}:`, error);
         return [];
+    }
+}
+
+/**
+ * Calculate daily yield breakdown for a specific user over a custom time period
+ * Returns yield data broken down by individual days for charting/graphing purposes
+ *
+ * This function builds upon the existing custom period yield calculation but aggregates
+ * the results by day, making it suitable for time-series visualization.
+ */
+export async function calculateUserDailyYieldBreakdown(
+    context: any,
+    user: string,
+    startTimestamp: number,
+    endTimestamp: number
+): Promise<Array<{
+    date: string;
+    timestamp: number;
+    dailyYield: bigint;
+    dailyYieldFormatted: string;
+    assets: Array<{
+        asset: string;
+        dailyYield: bigint;
+        dailyYieldFormatted: string;
+        segments: Array<{
+            startTime: number;
+            endTime: number;
+            scaledBalance: bigint;
+            segmentYield: bigint;
+            durationHours: number;
+        }>;
+    }>;
+}>> {
+    try {
+        console.log(`📅 Calculating daily yield breakdown for ${user} from ${startTimestamp} to ${endTimestamp}`);
+
+        // Get all assets user had positions in during this period
+        const assets = await getUserAssetsForPeriod(context, user, startTimestamp, endTimestamp);
+        console.log(`🎯 Found ${assets.length} assets for user ${user} in period:`, assets);
+
+        if (assets.length === 0) {
+            return [];
+        }
+
+        // Create daily time buckets
+        const dailyResults = new Map<string, {
+            date: string;
+            timestamp: number;
+            dailyYield: bigint;
+            assets: Map<string, {
+                asset: string;
+                dailyYield: bigint;
+                segments: Array<{
+                    startTime: number;
+                    endTime: number;
+                    scaledBalance: bigint;
+                    segmentYield: bigint;
+                    durationHours: number;
+                }>;
+            }>;
+        }>();
+
+        // Initialize daily buckets
+        const startDate = new Date(startTimestamp * 1000);
+        const endDate = new Date(endTimestamp * 1000);
+
+        for (let currentDate = new Date(startDate); currentDate <= endDate; currentDate.setDate(currentDate.getDate() + 1)) {
+            const dateStr = currentDate.toISOString().split('T')[0]; // YYYY-MM-DD format
+            const dayStartTimestamp = Math.floor(new Date(currentDate.getFullYear(), currentDate.getMonth(), currentDate.getDate()).getTime() / 1000);
+
+            dailyResults.set(dateStr, {
+                date: dateStr,
+                timestamp: dayStartTimestamp,
+                dailyYield: 0n,
+                assets: new Map()
+            });
+        }
+
+        // Process each asset
+        for (const asset of assets) {
+            try {
+                console.log(`🔍 Processing asset ${asset} for daily breakdown`);
+
+                // Initialize this asset in all days with zero yield (for consistent asset-level breakdown)
+                for (const [dateStr, dayData] of dailyResults) {
+                    if (!dayData.assets.has(asset)) {
+                        dayData.assets.set(asset, {
+                            asset,
+                            dailyYield: 0n,
+                            segments: []
+                        });
+                    }
+                }
+
+                // Get segmented yield data for this asset over the entire period
+                const segmentedResult = await calculateSegmentedCustomPeriodYield(
+                    context,
+                    user,
+                    asset,
+                    startTimestamp,
+                    endTimestamp
+                );
+
+                // Process each segment and assign yield to appropriate days
+                for (const segment of segmentedResult.segments) {
+                    // Process all segments, including zero-yield ones for completeness
+
+                    // Determine which day(s) this segment spans
+                    const segmentStartDate = new Date(segment.startTime * 1000);
+                    const segmentEndDate = new Date(segment.endTime * 1000);
+
+                    // If segment is within a single day, assign all yield to that day
+                    const segmentStartDay = segmentStartDate.toISOString().split('T')[0];
+                    const segmentEndDay = segmentEndDate.toISOString().split('T')[0];
+
+                    if (segmentStartDay === segmentEndDay) {
+                        // Segment is within a single day
+                        const dayData = dailyResults.get(segmentStartDay);
+                        if (dayData) {
+                            dayData.dailyYield += segment.segmentYield;
+
+                            if (!dayData.assets.has(asset)) {
+                                dayData.assets.set(asset, {
+                                    asset,
+                                    dailyYield: 0n,
+                                    segments: []
+                                });
+                            }
+
+                            const assetData = dayData.assets.get(asset)!;
+                            assetData.dailyYield += segment.segmentYield;
+                            assetData.segments.push({
+                                startTime: segment.startTime,
+                                endTime: segment.endTime,
+                                scaledBalance: segment.scaledBalance,
+                                segmentYield: segment.segmentYield,
+                                durationHours: segment.durationDays * 24
+                            });
+                        }
+                    } else {
+                        // Segment spans multiple days - need to proportionally distribute yield
+                        const totalSegmentDuration = segment.endTime - segment.startTime;
+
+                        // Iterate through each day the segment spans
+                        for (let currentDate = new Date(segmentStartDate); currentDate <= segmentEndDate; currentDate.setDate(currentDate.getDate() + 1)) {
+                            const currentDateStr = currentDate.toISOString().split('T')[0];
+                            const dayData = dailyResults.get(currentDateStr);
+                            if (!dayData) continue;
+
+                            // Calculate the portion of the segment that falls within this day
+                            const dayStart = Math.floor(new Date(currentDate.getFullYear(), currentDate.getMonth(), currentDate.getDate()).getTime() / 1000);
+                            const dayEnd = dayStart + 24 * 60 * 60 - 1; // End of day
+
+                            const overlapStart = Math.max(segment.startTime, dayStart);
+                            const overlapEnd = Math.min(segment.endTime, dayEnd);
+
+                            if (overlapEnd > overlapStart) {
+                                const overlapDuration = overlapEnd - overlapStart;
+                                const proportionalYield = (segment.segmentYield * BigInt(overlapDuration)) / BigInt(totalSegmentDuration);
+
+                                dayData.dailyYield += proportionalYield;
+
+                                if (!dayData.assets.has(asset)) {
+                                    dayData.assets.set(asset, {
+                                        asset,
+                                        dailyYield: 0n,
+                                        segments: []
+                                    });
+                                }
+
+                                const assetData = dayData.assets.get(asset)!;
+                                assetData.dailyYield += proportionalYield;
+                                assetData.segments.push({
+                                    startTime: overlapStart,
+                                    endTime: overlapEnd,
+                                    scaledBalance: segment.scaledBalance,
+                                    segmentYield: proportionalYield,
+                                    durationHours: overlapDuration / 3600
+                                });
+                            }
+                        }
+                    }
+                }
+
+                console.log(`✅ Processed daily breakdown for asset ${asset}`);
+
+            } catch (error) {
+                console.error(`❌ Error processing asset ${asset} for daily breakdown:`, error);
+                // Continue with other assets even if one fails
+            }
+        }
+
+        // Convert Map results to array format and add formatting
+        // Include ALL days in the period, even those with zero yield for continuous time-series
+        const formattedResults = Array.from(dailyResults.values())
+            .map(dayData => ({
+                date: dayData.date,
+                timestamp: dayData.timestamp,
+                dailyYield: dayData.dailyYield,
+                dailyYieldFormatted: formatRayValue(dayData.dailyYield),
+                assets: Array.from(dayData.assets.values()).map(assetData => ({
+                    asset: assetData.asset,
+                    dailyYield: assetData.dailyYield,
+                    dailyYieldFormatted: formatRayValue(assetData.dailyYield)
+                }))
+            }))
+            .sort((a, b) => a.timestamp - b.timestamp); // Sort chronologically
+
+        console.log(`📊 Completed daily yield breakdown for ${user}. Returning ${formattedResults.length} days (including zero-yield days for continuous time-series).`);
+        return formattedResults;
+
+    } catch (error) {
+        console.error(`❌ Error in calculateUserDailyYieldBreakdown for user ${user}:`, error);
+        throw error;
     }
 }

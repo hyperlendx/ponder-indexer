@@ -1,4 +1,4 @@
-import { UserPosition, UserBalanceEvent, ReserveDataEvent } from "ponder:schema";
+import { UserPosition, UserBalanceEvent, ReserveDataEvent, Borrow } from "ponder:schema";
 import { calculateLiquidityIndexAtTimestamp, calculateActualBalance, RAY } from "./interestCalculations";
 import { eq, and, gte, lte, desc } from "ponder";
 
@@ -378,4 +378,82 @@ export async function calculateNetDeposits(
     }
 
     return netDeposits;
+}
+
+/**
+ * Calculate total supplied amount for a user in a specific time period
+ * This includes all deposits and transfers in, regardless of withdrawals
+ */
+export async function calculateTotalSupplied(
+    context: any,
+    user: string,
+    asset: string,
+    startTimestamp: number,
+    endTimestamp: number
+): Promise<bigint> {
+    const { db } = context;
+
+    // Handle both indexing context (db.sql) and API context (db)
+    const dbQuery = db.sql || db;
+    const events = await dbQuery
+        .select()
+        .from(UserBalanceEvent)
+        .where(
+            and(
+                eq(UserBalanceEvent.user, user as `0x${string}`),
+                eq(UserBalanceEvent.asset, asset as `0x${string}`),
+                gte(UserBalanceEvent.timestamp, startTimestamp),
+                lte(UserBalanceEvent.timestamp, endTimestamp)
+            )
+        );
+
+    let totalSupplied = 0n;
+
+    for (const event of events) {
+        // Convert transaction amount to actual amount using liquidity index
+        const actualAmount = calculateActualBalance(event.transactionAmount, event.liquidityIndex);
+
+        // Only count supply events (deposits and transfers in)
+        if (event.eventType === 'deposit' || event.eventType === 'transfer_in') {
+            totalSupplied += actualAmount;
+        }
+    }
+
+    return totalSupplied;
+}
+
+/**
+ * Calculate total borrowed amount for a user in a specific time period
+ * This includes all borrow transactions during the period
+ */
+export async function calculateTotalBorrowed(
+    context: any,
+    user: string,
+    asset: string,
+    startTimestamp: number,
+    endTimestamp: number
+): Promise<bigint> {
+    const { db } = context;
+
+    // Handle both indexing context (db.sql) and API context (db)
+    const dbQuery = db.sql || db;
+    const borrowEvents = await dbQuery
+        .select()
+        .from(Borrow)
+        .where(
+            and(
+                eq(Borrow.onBehalfOf, user as `0x${string}`),
+                eq(Borrow.reserve, asset as `0x${string}`),
+                gte(Borrow.timestamp, startTimestamp),
+                lte(Borrow.timestamp, endTimestamp)
+            )
+        );
+
+    let totalBorrowed = 0n;
+
+    for (const event of borrowEvents) {
+        totalBorrowed += event.amount;
+    }
+
+    return totalBorrowed;
 }
