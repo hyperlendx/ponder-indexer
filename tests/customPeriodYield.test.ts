@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { calculateUserCustomPeriodYield } from '../src/helpers/monthlyInterestCalculator';
+import { calculateUserCustomPeriodYield } from '../src/helpers/yield/yieldReports';
 
 // Mock the ponder imports
 vi.mock('ponder', () => ({
@@ -199,7 +199,7 @@ describe('calculateUserCustomPeriodYield', () => {
         expect(result).toHaveLength(1);
         
         // Check that segments with zero yield would be filtered out
-        if (result[0].segments) {
+        if (result?.length > 0 && result[0]?.segments) {
             const zeroYieldSegments = result[0].segments.filter(segment => segment.segmentYield === 0n);
             expect(zeroYieldSegments).toHaveLength(0);
         }

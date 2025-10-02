@@ -38,8 +38,8 @@ import {
 
 import { getOraclePrice, getIsolatedOraclePrice } from "./helpers/getPrice";
 import { updateUserDepositBalance } from "./helpers/userBalanceManager";
-import { updateUserPosition, updatePositionsForReserveUpdate } from "./helpers/userPositionManager";
-import { calculateScaledBalance, calculateLiquidityIndexAtTimestamp } from "./helpers/interestCalculations";
+import { updateUserPosition } from "./helpers/userPositionManager";
+import { calculateScaledBalance, calculateLiquidityIndexAtTimestamp } from "./helpers/aave";
 
 // HToken Transfer Event Handler - Enhanced for Interest Tracking
 ponder.on("HTokens:BalanceTransfer", async ({ event, context }) => {

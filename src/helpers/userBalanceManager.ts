@@ -28,16 +28,7 @@ export async function updateUserDepositBalance(
         // Update existing deposit balance
         const newBalance = existingDeposit.currentBalance + amountDelta;
 
-        console.log(`💰 Balance update for ${userAddress}:`, {
-            token: tokenAddress,
-            previousBalance: existingDeposit.currentBalance.toString(),
-            amountDelta: amountDelta.toString(),
-            newBalance: newBalance.toString()
-        });
-
         if (newBalance === 0n) {
-            // Remove deposit record if balance reaches zero
-            console.log(`🗑️ Removing zero balance record for ${userAddress}, token ${tokenAddress}`);
             await db.delete(UserDeposit, { id: userDepositId });
             await decrementUserDepositCount(context, userAddress, timestamp);
         } else if (newBalance > 0n) {

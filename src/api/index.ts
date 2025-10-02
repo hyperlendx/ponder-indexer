@@ -4,8 +4,8 @@ import schema from "ponder:schema";
 import {Hono} from "hono";
 import {eq, graphql, and, desc, lte} from "ponder";
 import {getUserPositions} from "../helpers/userPositionManager";
-import {calculateUserMonthlyYield, calculateUserCustomPeriodYield, calculateUserDailyYieldBreakdown} from "../helpers/monthlyInterestCalculator";
-import {calculateLiquidityIndexAtTimestamp, formatRayValue} from "../helpers/interestCalculations";
+import {calculateUserMonthlyYield, calculateUserCustomPeriodYield, calculateUserDailyYieldBreakdown, calculateUserDailyPortfolioValue} from "../helpers/yield/yieldReports";
+import {calculateLiquidityIndexAtTimestamp, formatRayValue, formatTokenBalance} from "../helpers/aave";
 
 const app = new Hono();
 
@@ -671,6 +671,139 @@ app.get("/user/:address/daily-yield-breakdown", async (c) => {
         console.error("Error stack:", error instanceof Error ? error.stack : 'No stack trace');
         console.error("Error message:", error instanceof Error ? error.message : String(error));
         return c.json({error: "Failed to calculate daily yield breakdown"}, 500);
+    }
+});
+
+// Get daily portfolio values for a specific user over a custom time period
+// Portfolio Value = Total Supplied - Total Borrowed
+app.get("/user/:address/daily-portfolio-value", async (c) => {
+    const userAddress = c.req.param("address");
+    const fromTimestampParam = c.req.query("fromTimestamp");
+    const toTimestampParam = c.req.query("toTimestamp");
+
+    if (!userAddress || !fromTimestampParam || !toTimestampParam) {
+        return c.json({error: "User address, fromTimestamp, and toTimestamp are required"}, 400);
+    }
+
+    // Validate hex address format
+    if (!/^0x[a-fA-F0-9]{40}$/.test(userAddress)) {
+        return c.json({error: "Invalid user address format"}, 400);
+    }
+
+    const fromTimestamp = parseInt(fromTimestampParam);
+    const toTimestamp = parseInt(toTimestampParam);
+
+    // Validate timestamps
+    if (isNaN(fromTimestamp) || isNaN(toTimestamp)) {
+        return c.json({error: "Invalid timestamp format. Must be Unix timestamps in seconds"}, 400);
+    }
+
+    if (fromTimestamp < 0 || toTimestamp < 0) {
+        return c.json({error: "Timestamps must be positive values"}, 400);
+    }
+
+    if (toTimestamp <= fromTimestamp) {
+        return c.json({error: "toTimestamp must be greater than fromTimestamp"}, 400);
+    }
+
+    // Validate reasonable time range (not more than 1 year for daily breakdown)
+    const maxPeriodSeconds = 365 * 24 * 60 * 60; // 1 year
+    if (toTimestamp - fromTimestamp > maxPeriodSeconds) {
+        return c.json({error: "Time period cannot exceed 1 year for daily breakdown"}, 400);
+    }
+
+    // Validate timestamps are not in the future (with 1 hour buffer for clock differences)
+    const currentTimestamp = Math.floor(Date.now() / 1000);
+    const futureBuffer = 3600; // 1 hour
+    if (toTimestamp > currentTimestamp + futureBuffer) {
+        return c.json({error: "toTimestamp cannot be in the future"}, 400);
+    }
+
+    try {
+        console.log(`🚀 Starting daily portfolio value calculation for ${userAddress}`);
+        const context = {db};
+
+        // Calculate daily portfolio values
+        console.log(`📞 Calling calculateUserDailyPortfolioValue...`);
+        const dailyPortfolioData = await calculateUserDailyPortfolioValue(context, userAddress, fromTimestamp, toTimestamp);
+        console.log(`✅ Got daily portfolio data, length: ${dailyPortfolioData.length}`);
+
+        if (dailyPortfolioData.length === 0) {
+            // Calculate expected number of days for empty response
+            const expectedDays = Math.ceil((toTimestamp - fromTimestamp) / (24 * 60 * 60));
+            return c.json({
+                user: userAddress,
+                fromTimestamp,
+                toTimestamp,
+                fromDate: new Date(fromTimestamp * 1000).toISOString(),
+                toDate: new Date(toTimestamp * 1000).toISOString(),
+                days: Math.round((toTimestamp - fromTimestamp) / (24 * 60 * 60) * 100) / 100,
+                dailyPortfolioValues: [],
+                summary: {
+                    averagePortfolioValue: "0",
+                    averagePortfolioValueFormatted: "0.000000",
+                    maxPortfolioValue: "0",
+                    maxPortfolioValueFormatted: "0.000000",
+                    minPortfolioValue: "0",
+                    minPortfolioValueFormatted: "0.000000",
+                    totalDaysInPeriod: expectedDays
+                },
+                message: "No positions found for this user during the specified period"
+            });
+        }
+
+        // Calculate summary statistics
+        const totalPortfolioValue = dailyPortfolioData.reduce((sum, day) => sum + day.portfolioValue, 0n);
+        const averagePortfolioValue = dailyPortfolioData.length > 0 ? totalPortfolioValue / BigInt(dailyPortfolioData.length) : 0n;
+        const maxPortfolioValue = dailyPortfolioData.reduce((max, day) => day.portfolioValue > max ? day.portfolioValue : max, dailyPortfolioData[0]?.portfolioValue || 0n);
+        const minPortfolioValue = dailyPortfolioData.reduce((min, day) => day.portfolioValue < min ? day.portfolioValue : min, dailyPortfolioData[0]?.portfolioValue || 0n);
+
+        // Convert all BigInt values to strings for JSON serialization
+        const serializedDailyPortfolio = dailyPortfolioData.map(day => ({
+            date: day.date,
+            timestamp: day.timestamp,
+            portfolioValue: day.portfolioValue.toString(),
+            portfolioValueFormatted: day.portfolioValueFormatted,
+            totalSupplied: day.totalSupplied.toString(),
+            totalSuppliedFormatted: day.totalSuppliedFormatted,
+            totalBorrowed: day.totalBorrowed.toString(),
+            totalBorrowedFormatted: day.totalBorrowedFormatted,
+            assets: day.assets.map(asset => ({
+                asset: asset.asset,
+                supplied: asset.supplied.toString(),
+                suppliedFormatted: asset.suppliedFormatted,
+                borrowed: asset.borrowed.toString(),
+                borrowedFormatted: asset.borrowedFormatted,
+                netPosition: asset.netPosition.toString(),
+                netPositionFormatted: asset.netPositionFormatted
+            }))
+        }));
+
+        return c.json({
+            user: userAddress,
+            fromTimestamp,
+            toTimestamp,
+            fromDate: new Date(fromTimestamp * 1000).toISOString(),
+            toDate: new Date(toTimestamp * 1000).toISOString(),
+            days: Math.round((toTimestamp - fromTimestamp) / (24 * 60 * 60) * 100) / 100,
+            dailyPortfolioValues: serializedDailyPortfolio,
+            summary: {
+                averagePortfolioValue: averagePortfolioValue.toString(),
+                averagePortfolioValueFormatted: formatTokenBalance(averagePortfolioValue, 18),
+                maxPortfolioValue: maxPortfolioValue.toString(),
+                maxPortfolioValueFormatted: formatTokenBalance(maxPortfolioValue, 18),
+                minPortfolioValue: minPortfolioValue.toString(),
+                minPortfolioValueFormatted: formatTokenBalance(minPortfolioValue, 18),
+                totalDaysInPeriod: dailyPortfolioData.length
+            },
+            calculatedAt: Math.floor(Date.now() / 1000)
+        });
+
+    } catch (error) {
+        console.error("❌ Error calculating daily portfolio values:", error);
+        console.error("Error stack:", error instanceof Error ? error.stack : 'No stack trace');
+        console.error("Error message:", error instanceof Error ? error.message : String(error));
+        return c.json({error: "Failed to calculate daily portfolio values"}, 500);
     }
 });
 

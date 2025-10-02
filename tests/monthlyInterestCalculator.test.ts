@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { getScaledBalanceAtTimestamp, calculateUserMonthlyYield } from '../src/helpers/monthlyInterestCalculator';
+import { getScaledBalanceAtTimestamp } from '../src/helpers/yield/balanceQueries';
+import { calculateUserMonthlyYield } from '../src/helpers/yield/yieldReports';
 
 // Mock the ponder imports
 vi.mock('ponder', () => ({

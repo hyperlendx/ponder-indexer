@@ -1,5 +1,5 @@
 import { UserPosition, UserBalanceEvent, ReserveDataEvent, Borrow } from "ponder:schema";
-import { calculateLiquidityIndexAtTimestamp, calculateActualBalance, RAY } from "./interestCalculations";
+import { calculateLiquidityIndexAtTimestamp, calculateActualBalance, RAY } from "./aave";
 import { eq, and, gte, lte, desc } from "ponder";
 
 /**
@@ -61,7 +61,7 @@ export async function updateUserPosition(
     const { db } = context;
     const positionId = `${user}_${asset}`;
 
-    // Fix 1: Add duplicate event detection
+    // Duplicate event detection
     const isDuplicate = await checkForDuplicateEvents(
         context,
         user,
@@ -91,8 +91,7 @@ export async function updateUserPosition(
         txHash
     );
 
-    // Get existing position using Ponder's SQL select method
-    // Handle both indexing context (db.sql) and API context (db)
+    // Get existing position
     const dbQuery = db.sql || db;
     const existingPositions = await dbQuery
         .select()
@@ -116,7 +115,6 @@ export async function updateUserPosition(
             const actualAmount = calculateActualBalance(scaledBalanceDelta, currentLiquidityIndex);
             totalDeposits += actualAmount;
         } else if (eventType === 'withdraw' || eventType === 'transfer_out') {
-            // Fix 2: Use absolute value to ensure positive amount for totalWithdrawals
             const actualAmount = calculateActualBalance(
                 scaledBalanceDelta < 0n ? -scaledBalanceDelta : scaledBalanceDelta,
                 currentLiquidityIndex
@@ -133,7 +131,6 @@ export async function updateUserPosition(
             totalWithdrawals = 0n;
         } else {
             totalDeposits = 0n;
-            // Fix 2: Use absolute value to ensure positive amount for totalWithdrawals
             const actualAmount = calculateActualBalance(
                 scaledBalanceDelta < 0n ? -scaledBalanceDelta : scaledBalanceDelta,
                 currentLiquidityIndex
@@ -142,7 +139,6 @@ export async function updateUserPosition(
         }
     }
 
-    // Fix 3: Add validation for negative scaled balance
     if (newScaledBalance < 0n) {
         console.error(`❌ Negative scaled balance detected:`, {
             user,
@@ -163,6 +159,7 @@ export async function updateUserPosition(
     // Use a truly unique ID to avoid conflicts when multiple events occur in same transaction
     const randomSuffix = Math.random().toString(36).substring(2, 8);
     const eventId = `${txHash}_${user}_${asset}_${eventType}_${timestamp}_${randomSuffix}`;
+
     await db.insert(UserBalanceEvent).values({
         id: eventId,
         txHash: txHash as `0x${string}`,
@@ -211,68 +208,6 @@ export async function updateUserPosition(
 }
 
 /**
- * Get user's current position for an asset
- */
-export async function getUserPosition(
-    context: any,
-    user: string,
-    asset: string
-): Promise<{
-    scaledBalance: bigint;
-    actualBalance: bigint;
-    totalDeposits: bigint;
-    totalWithdrawals: bigint;
-    lastUpdated: number;
-    currentYield: bigint;
-} | null> {
-    const { db } = context;
-    const positionId = `${user}_${asset}`;
-
-    // Handle both indexing context (db.sql) and API context (db)
-    const dbQuery = db.sql || db;
-    const positions = await dbQuery
-        .select()
-        .from(UserPosition)
-        .where(eq(UserPosition.id, positionId));
-
-    const position = positions[0] || null;
-
-    if (!position) {
-        return null;
-    }
-
-    // Get current liquidity index to calculate up-to-date actual balance
-    const currentTimestamp = Math.floor(Date.now() / 1000);
-    console.log(`🔍 Getting position for user ${user}, asset ${asset}, current timestamp: ${currentTimestamp}`);
-    const currentLiquidityIndex = await calculateLiquidityIndexAtTimestamp(
-        context,
-        asset,
-        currentTimestamp
-        // No transaction hash needed for current position queries
-    );
-    console.log(`📊 Current liquidity index for position query: ${currentLiquidityIndex}`);
-
-    // Calculate current actual balance
-    const currentActualBalance = calculateActualBalance(
-        position.scaledBalance,
-        currentLiquidityIndex
-    );
-
-    // Calculate current yield (difference between actual balance and net deposits)
-    const netDeposits = BigInt(position.totalDeposits) - BigInt(position.totalWithdrawals);
-    const currentYield = currentActualBalance - netDeposits;
-
-    return {
-        scaledBalance: position.scaledBalance,
-        actualBalance: currentActualBalance,
-        totalDeposits: position.totalDeposits,
-        totalWithdrawals: position.totalWithdrawals,
-        lastUpdated: position.lastUpdated,
-        currentYield,
-    };
-}
-
-/**
  * Get all positions for a user
  */
 export async function getUserPositions(
@@ -309,7 +244,6 @@ export async function getUserPositions(
             ? BigInt(mostRecentEvent[0].liquidityIndex)
             : RAY; // Fallback to RAY if no events found
 
-        console.log("🔍 Most recent liquidity index for", position.asset, ":", currentLiquidityIndex.toString());
         // Calculate current actual balance
         const currentActualBalance = calculateActualBalance(
             position.scaledBalance,
@@ -337,7 +271,6 @@ export async function getUserPositions(
 
 /**
  * Calculate net deposits for a user in a specific time period
- * Fixed to use transactionAmount instead of scaledBalance (cumulative balance)
  */
 export async function calculateNetDeposits(
     context: any,
@@ -348,7 +281,6 @@ export async function calculateNetDeposits(
 ): Promise<bigint> {
     const { db } = context;
 
-    // Handle both indexing context (db.sql) and API context (db)
     const dbQuery = db.sql || db;
     const events = await dbQuery
         .select()
@@ -393,7 +325,6 @@ export async function calculateTotalSupplied(
 ): Promise<bigint> {
     const { db } = context;
 
-    // Handle both indexing context (db.sql) and API context (db)
     const dbQuery = db.sql || db;
     const events = await dbQuery
         .select()
@@ -435,7 +366,6 @@ export async function calculateTotalBorrowed(
 ): Promise<bigint> {
     const { db } = context;
 
-    // Handle both indexing context (db.sql) and API context (db)
     const dbQuery = db.sql || db;
     const borrowEvents = await dbQuery
         .select()

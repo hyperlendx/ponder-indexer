@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { calculateUserDailyYieldBreakdown } from '../src/helpers/monthlyInterestCalculator';
+import { calculateUserDailyYieldBreakdown } from '../src/helpers/yield/yieldReports';
 
 // Mock the ponder imports
 vi.mock('ponder', () => ({
