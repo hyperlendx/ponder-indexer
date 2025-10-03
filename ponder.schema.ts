@@ -410,7 +410,6 @@ export const StrategyDeployed = onchainTable(
     })
 );
 
-// Enhanced Interest Tracking Schema
 
 // Store reserve data events for liquidityIndex tracking
 export const ReserveDataEvent = onchainTable(
