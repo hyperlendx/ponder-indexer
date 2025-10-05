@@ -2,9 +2,11 @@ import { UserBalanceEvent } from "ponder:schema";
 import { eq, and, gte, lte } from "ponder";
 import { calculateLiquidityIndexAtTimestamp, calculateActualBalance } from "../aave";
 import { getScaledBalanceAtTimestamp } from "./balanceQueries";
+import { LiquidityIndexCache } from "./liquidityIndexCache";
 
 /**
  * Calculate interest earned in a specific time segment
+ * @param indexCache - Optional cache to avoid redundant liquidity index queries
  */
 export async function calculateSegmentInterest(
     context: any,
@@ -13,15 +15,28 @@ export async function calculateSegmentInterest(
         startTime: number;
         endTime: number;
         scaledBalance: bigint;
-    }
+    },
+    indexCache?: LiquidityIndexCache
 ): Promise<bigint> {
     if (segment.scaledBalance === 0n || segment.startTime >= segment.endTime) {
         return 0n;
     }
 
-    // Get liquidity indices at segment boundaries
-    const startIndex = await calculateLiquidityIndexAtTimestamp(context, asset, segment.startTime);
-    const endIndex = await calculateLiquidityIndexAtTimestamp(context, asset, segment.endTime);
+    // Get liquidity indices at segment boundaries (use cache if available)
+    let startIndex: bigint;
+    let endIndex: bigint;
+
+    if (indexCache) {
+        [startIndex, endIndex] = await Promise.all([
+            indexCache.get(context, asset, segment.startTime),
+            indexCache.get(context, asset, segment.endTime)
+        ]);
+    } else {
+        [startIndex, endIndex] = await Promise.all([
+            calculateLiquidityIndexAtTimestamp(context, asset, segment.startTime),
+            calculateLiquidityIndexAtTimestamp(context, asset, segment.endTime)
+        ]);
+    }
 
     // Calculate actual balances
     const startActualBalance = calculateActualBalance(segment.scaledBalance, startIndex);
@@ -92,13 +107,16 @@ export async function createTimeSegments(
  * 2. Create time segments: [monthStart, event1, event2, ..., monthEnd]
  * 3. For each segment, calculate: (scaledBalance * liquidityIndexGrowth)
  * 4. Sum interest from all segments
+ *
+ * @param indexCache - Optional cache to avoid redundant liquidity index queries
  */
 export async function calculateSegmentedMonthlyYield(
     context: any,
     user: string,
     asset: string,
     startTimestamp: number,
-    endTimestamp: number
+    endTimestamp: number,
+    indexCache?: LiquidityIndexCache
 ): Promise<{
     totalYield: bigint;
     segments: Array<{
@@ -132,6 +150,18 @@ export async function calculateSegmentedMonthlyYield(
     // Create time segments for interest calculation
     const segments = await createTimeSegments(context, user, asset, startTimestamp, endTimestamp, monthlyEvents);
 
+    // Prefetch all liquidity indices for segments if cache provided
+    if (indexCache) {
+        const indexPrefetchList = [];
+        for (const segment of segments) {
+            indexPrefetchList.push(
+                { asset, timestamp: segment.startTime },
+                { asset, timestamp: segment.endTime }
+            );
+        }
+        await indexCache.prefetch(context, indexPrefetchList);
+    }
+
     // Calculate interest for each segment and collect detailed information
     let totalInterest = 0n;
     const detailedSegments = [];
@@ -140,12 +170,24 @@ export async function calculateSegmentedMonthlyYield(
         const segment = segments[i];
         if (!segment) continue; // Skip if segment is undefined
 
-        const segmentInterest = await calculateSegmentInterest(context, asset, segment);
+        const segmentInterest = await calculateSegmentInterest(context, asset, segment, indexCache);
         totalInterest += segmentInterest;
 
-        // Get liquidity indices for this segment
-        const startLiquidityIndex = await calculateLiquidityIndexAtTimestamp(context, asset, segment.startTime);
-        const endLiquidityIndex = await calculateLiquidityIndexAtTimestamp(context, asset, segment.endTime);
+        // Get liquidity indices for this segment (use cache if available)
+        let startLiquidityIndex: bigint;
+        let endLiquidityIndex: bigint;
+
+        if (indexCache) {
+            [startLiquidityIndex, endLiquidityIndex] = await Promise.all([
+                indexCache.get(context, asset, segment.startTime),
+                indexCache.get(context, asset, segment.endTime)
+            ]);
+        } else {
+            [startLiquidityIndex, endLiquidityIndex] = await Promise.all([
+                calculateLiquidityIndexAtTimestamp(context, asset, segment.startTime),
+                calculateLiquidityIndexAtTimestamp(context, asset, segment.endTime)
+            ]);
+        }
 
         const actualBalance = calculateActualBalance(segment.scaledBalance, startLiquidityIndex);
         const durationDays = (segment.endTime - segment.startTime) / (24 * 60 * 60);
@@ -171,15 +213,18 @@ export async function calculateSegmentedMonthlyYield(
 }
 
 /**
- * Enhanced custom period yield calculation that handles intra-period positions
+ * Custom period yield calculation that handles intra-period positions
  * Adapts the monthly segmented calculation for arbitrary date ranges
+ *
+ * @param indexCache - Optional cache to avoid redundant liquidity index queries
  */
 export async function calculateSegmentedCustomPeriodYield(
     context: any,
     user: string,
     asset: string,
     startTimestamp: number,
-    endTimestamp: number
+    endTimestamp: number,
+    indexCache?: LiquidityIndexCache
 ): Promise<{
     totalYield: bigint;
     segments: Array<{
@@ -213,6 +258,18 @@ export async function calculateSegmentedCustomPeriodYield(
     // Create time segments for interest calculation
     const segments = await createTimeSegments(context, user, asset, startTimestamp, endTimestamp, periodEvents);
 
+    // Prefetch all liquidity indices for segments if cache provided
+    if (indexCache) {
+        const indexPrefetchList = [];
+        for (const segment of segments) {
+            indexPrefetchList.push(
+                { asset, timestamp: segment.startTime },
+                { asset, timestamp: segment.endTime }
+            );
+        }
+        await indexCache.prefetch(context, indexPrefetchList);
+    }
+
     // Calculate interest for each segment and collect detailed information
     let totalInterest = 0n;
     const detailedSegments = [];
@@ -221,12 +278,24 @@ export async function calculateSegmentedCustomPeriodYield(
         const segment = segments[i];
         if (!segment) continue; // Skip if segment is undefined
 
-        const segmentInterest = await calculateSegmentInterest(context, asset, segment);
+        const segmentInterest = await calculateSegmentInterest(context, asset, segment, indexCache);
         totalInterest += segmentInterest;
 
-        // Get liquidity indices for this segment
-        const startLiquidityIndex = await calculateLiquidityIndexAtTimestamp(context, asset, segment.startTime);
-        const endLiquidityIndex = await calculateLiquidityIndexAtTimestamp(context, asset, segment.endTime);
+        // Get liquidity indices for this segment (use cache if available)
+        let startLiquidityIndex: bigint;
+        let endLiquidityIndex: bigint;
+
+        if (indexCache) {
+            [startLiquidityIndex, endLiquidityIndex] = await Promise.all([
+                indexCache.get(context, asset, segment.startTime),
+                indexCache.get(context, asset, segment.endTime)
+            ]);
+        } else {
+            [startLiquidityIndex, endLiquidityIndex] = await Promise.all([
+                calculateLiquidityIndexAtTimestamp(context, asset, segment.startTime),
+                calculateLiquidityIndexAtTimestamp(context, asset, segment.endTime)
+            ]);
+        }
 
         const actualBalance = calculateActualBalance(segment.scaledBalance, startLiquidityIndex);
         const durationDays = (segment.endTime - segment.startTime) / (24 * 60 * 60);

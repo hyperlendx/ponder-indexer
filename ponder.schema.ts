@@ -63,21 +63,28 @@ export const Borrow = onchainTable(
     }),
     (table) => ({
         onBehalfOfIdx: index().on(table.onBehalfOf),
+        onBehalfOfReserveTimestampIdx: index().on(table.onBehalfOf, table.reserve, table.timestamp),
     })
 );
 
-export const Repay = onchainTable("repay", (t) => ({
-    id: t.text().primaryKey(),
-    txHash: t.hex(),
-    pool: t.hex(),
-    reserve: t.hex(),
-    user: t.hex(),
-    repayer: t.hex(),
-    amount: t.bigint(),
-    useATokens: t.boolean(),
-    timestamp: t.integer(),
-    price: t.bigint(),
-}));
+export const Repay = onchainTable(
+    "repay",
+    (t) => ({
+        id: t.text().primaryKey(),
+        txHash: t.hex(),
+        pool: t.hex(),
+        reserve: t.hex(),
+        user: t.hex(),
+        repayer: t.hex(),
+        amount: t.bigint(),
+        useATokens: t.boolean(),
+        timestamp: t.integer(),
+        price: t.bigint(),
+    }),
+    (table) => ({
+        userReserveTimestampIdx: index().on(table.user, table.reserve, table.timestamp),
+    })
+);
 
 export const Supply = onchainTable("supply", (t) => ({
     id: t.text().primaryKey(),
@@ -451,6 +458,7 @@ export const UserBalanceEvent = onchainTable(
         userAssetIdx: index().on(table.user, table.asset),
         timestampIdx: index().on(table.timestamp),
         eventTypeIdx: index().on(table.eventType),
+        userAssetTimestampIdx: index().on(table.user, table.asset, table.timestamp),
     })
 );
 

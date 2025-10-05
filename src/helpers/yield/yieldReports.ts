@@ -21,6 +21,8 @@ import {
     calculateSegmentedMonthlyYield,
     calculateSegmentedCustomPeriodYield
 } from "./yieldCalculations";
+import { LiquidityIndexCache } from "./liquidityIndexCache";
+import { getCachedMonthlyYield, cacheMonthlyYield, isCompletedMonth } from "./monthlyAggregationCache";
 
 /**
  * Calculate monthly yield data for a specific user and month
@@ -73,38 +75,90 @@ export async function calculateUserMonthlyYield(
             return [];
         }
 
-        const results = [];
+        // Check if this is a completed month (eligible for caching)
+        const shouldCache = isCompletedMonth(year, month);
 
+        // Initialize liquidity index cache for this request
+        const indexCache = new LiquidityIndexCache();
+
+        // Batch fetch all monthly events for all assets in ONE query
+        const dbQuery = context.db.sql || context.db;
+        const allMonthlyEvents = await dbQuery
+            .select()
+            .from(UserBalanceEvent)
+            .where(
+                and(
+                    eq(UserBalanceEvent.user, user as `0x${string}`),
+                    gte(UserBalanceEvent.timestamp, startTimestamp),
+                    lte(UserBalanceEvent.timestamp, endTimestamp)
+                )
+            );
+
+        // Group events by asset
+        const eventsByAsset = new Map<string, any[]>();
+        for (const event of allMonthlyEvents) {
+            if (!eventsByAsset.has(event.asset)) {
+                eventsByAsset.set(event.asset, []);
+            }
+            eventsByAsset.get(event.asset)!.push(event);
+        }
+
+        // Prefetch all liquidity indices we'll need
+        const indexPrefetchList = [];
         for (const asset of assets) {
-            try {
-                // Get scaled balances at month boundaries
-                const startScaledBalance = await getScaledBalanceAtTimestamp(context, user, asset, startTimestamp);
-                const endScaledBalance = await getScaledBalanceAtTimestamp(context, user, asset, endTimestamp);
+            indexPrefetchList.push(
+                { asset, timestamp: startTimestamp },
+                { asset, timestamp: endTimestamp }
+            );
+        }
+        await indexCache.prefetch(context, indexPrefetchList);
 
-                // Get liquidity indices at month boundaries
-                const startLiquidityIndex = await calculateLiquidityIndexAtTimestamp(context, asset, startTimestamp);
-                const endLiquidityIndex = await calculateLiquidityIndexAtTimestamp(context, asset, endTimestamp);
+        // Process all assets in parallel
+        const assetPromises = assets.map(async (asset) => {
+            try {
+                // Check cache first for completed months
+                if (shouldCache) {
+                    const cached = await getCachedMonthlyYield(context, user, asset, year, month);
+                    if (cached) {
+                        // Recalculate actual balances from cached indices
+                        cached.startActualBalance = calculateActualBalance(
+                            cached.startScaledBalance,
+                            cached.startLiquidityIndex
+                        );
+                        cached.endActualBalance = calculateActualBalance(
+                            cached.endScaledBalance,
+                            cached.endLiquidityIndex
+                        );
+                        cached.startTimestamp = startTimestamp;
+                        cached.endTimestamp = endTimestamp;
+                        return cached;
+                    }
+                }
+
+                // Get scaled balances at month boundaries
+                const [startScaledBalance, endScaledBalance] = await Promise.all([
+                    getScaledBalanceAtTimestamp(context, user, asset, startTimestamp),
+                    getScaledBalanceAtTimestamp(context, user, asset, endTimestamp)
+                ]);
+
+                // Get liquidity indices from cache (already prefetched)
+                const [startLiquidityIndex, endLiquidityIndex] = await Promise.all([
+                    indexCache.get(context, asset, startTimestamp),
+                    indexCache.get(context, asset, endTimestamp)
+                ]);
 
                 // Calculate actual balances
                 const startActualBalance = calculateActualBalance(startScaledBalance, startLiquidityIndex);
                 const endActualBalance = calculateActualBalance(endScaledBalance, endLiquidityIndex);
 
-                // Get monthly events for this asset to calculate additional metrics
-                const dbQuery = context.db.sql || context.db;
-                const monthlyEvents = await dbQuery
-                    .select()
-                    .from(UserBalanceEvent)
-                    .where(
-                        and(
-                            eq(UserBalanceEvent.user, user as `0x${string}`),
-                            eq(UserBalanceEvent.asset, asset as `0x${string}`),
-                            gte(UserBalanceEvent.timestamp, startTimestamp),
-                            lte(UserBalanceEvent.timestamp, endTimestamp)
-                        )
-                    );
+                // Get monthly events for this asset from pre-fetched data
+                const monthlyEvents = eventsByAsset.get(asset) || [];
 
-                // Calculate net deposits during the month
-                const netDeposits = await calculateNetDeposits(context, user, asset, startTimestamp, endTimestamp);
+                // Calculate net deposits and max balance in parallel
+                const [netDeposits, maxBalanceDuringMonth] = await Promise.all([
+                    calculateNetDeposits(context, user, asset, startTimestamp, endTimestamp),
+                    getMaxBalanceDuringMonth(context, user, asset, startTimestamp, endTimestamp)
+                ]);
 
                 // Enhanced calculation: Handle intra-month positions
                 const segmentedResult = await calculateSegmentedMonthlyYield(
@@ -112,17 +166,17 @@ export async function calculateUserMonthlyYield(
                     user,
                     asset,
                     startTimestamp,
-                    endTimestamp
+                    endTimestamp,
+                    indexCache // Pass cache to avoid redundant queries
                 );
 
                 const monthlyYield = segmentedResult.totalYield;
                 const segments = segmentedResult.segments;
 
-                // Calculate additional metrics for better understanding
+                // Calculate additional metrics
                 const hadPositionDuringMonth = monthlyEvents.length > 0 || startScaledBalance > 0n;
-                const maxBalanceDuringMonth = await getMaxBalanceDuringMonth(context, user, asset, startTimestamp, endTimestamp);
 
-                results.push({
+                const result = {
                     user,
                     asset,
                     year,
@@ -137,21 +191,30 @@ export async function calculateUserMonthlyYield(
                     netDeposits,
                     startTimestamp,
                     endTimestamp,
-                    // Additional context fields
                     hadPositionDuringMonth,
                     maxBalanceDuringMonth,
                     transactionCount: monthlyEvents.length,
-                    // Detailed segment information
                     segments
-                });
+                };
+
+                // Cache result for completed months
+                if (shouldCache) {
+                    await cacheMonthlyYield(context, result);
+                }
+
+                return result;
 
             } catch (error) {
                 console.error(`❌ Error calculating yield for asset ${asset}:`, error);
-                // Continue with other assets even if one fails
+                return null;
             }
-        }
+        });
 
-        return results;
+        // Wait for all assets to complete
+        const results = await Promise.all(assetPromises);
+
+        // Filter out null results (failed calculations)
+        return results.filter((r): r is NonNullable<typeof r> => r !== null);
 
     } catch (error) {
         console.error(`❌ Error calculating monthly yield for user ${user}:`, error);
@@ -201,7 +264,6 @@ export async function calculateUserCustomPeriodYield(
     }>;
 }>> {
     try {
-
         // Get all assets user had positions in during this period
         const assets = await getUserAssetsForPeriod(context, user, startTimestamp, endTimestamp);
 
@@ -209,42 +271,70 @@ export async function calculateUserCustomPeriodYield(
             return [];
         }
 
-        const results = [];
+        // Initialize liquidity index cache for this request
+        const indexCache = new LiquidityIndexCache();
 
+        // Batch fetch all period events for all assets in ONE query
+        const dbQuery = context.db.sql || context.db;
+        const allPeriodEvents = await dbQuery
+            .select()
+            .from(UserBalanceEvent)
+            .where(
+                and(
+                    eq(UserBalanceEvent.user, user as `0x${string}`),
+                    gte(UserBalanceEvent.timestamp, startTimestamp),
+                    lte(UserBalanceEvent.timestamp, endTimestamp)
+                )
+            );
+
+        // Group events by asset
+        const eventsByAsset = new Map<string, any[]>();
+        for (const event of allPeriodEvents) {
+            if (!eventsByAsset.has(event.asset)) {
+                eventsByAsset.set(event.asset, []);
+            }
+            eventsByAsset.get(event.asset)!.push(event);
+        }
+
+        // Prefetch all liquidity indices we'll need
+        const indexPrefetchList = [];
         for (const asset of assets) {
-            try {
-                // Get scaled balances at period boundaries
-                const startScaledBalance = await getScaledBalanceAtTimestamp(context, user, asset, startTimestamp);
-                const endScaledBalance = await getScaledBalanceAtTimestamp(context, user, asset, endTimestamp);
+            indexPrefetchList.push(
+                { asset, timestamp: startTimestamp },
+                { asset, timestamp: endTimestamp }
+            );
+        }
+        await indexCache.prefetch(context, indexPrefetchList);
 
-                // Get liquidity indices at period boundaries
-                const startLiquidityIndex = await calculateLiquidityIndexAtTimestamp(context, asset, startTimestamp);
-                const endLiquidityIndex = await calculateLiquidityIndexAtTimestamp(context, asset, endTimestamp);
+        // Process all assets in parallel
+        const assetPromises = assets.map(async (asset) => {
+            try {
+                // Get scaled balances at period boundaries in parallel
+                const [startScaledBalance, endScaledBalance] = await Promise.all([
+                    getScaledBalanceAtTimestamp(context, user, asset, startTimestamp),
+                    getScaledBalanceAtTimestamp(context, user, asset, endTimestamp)
+                ]);
+
+                // Get liquidity indices from cache (already prefetched)
+                const [startLiquidityIndex, endLiquidityIndex] = await Promise.all([
+                    indexCache.get(context, asset, startTimestamp),
+                    indexCache.get(context, asset, endTimestamp)
+                ]);
 
                 // Calculate actual balances
                 const startActualBalance = calculateActualBalance(startScaledBalance, startLiquidityIndex);
                 const endActualBalance = calculateActualBalance(endScaledBalance, endLiquidityIndex);
 
-                // Get period events for this asset to calculate additional metrics
-                const dbQuery = context.db.sql || context.db;
-                const periodEvents = await dbQuery
-                    .select()
-                    .from(UserBalanceEvent)
-                    .where(
-                        and(
-                            eq(UserBalanceEvent.user, user as `0x${string}`),
-                            eq(UserBalanceEvent.asset, asset as `0x${string}`),
-                            gte(UserBalanceEvent.timestamp, startTimestamp),
-                            lte(UserBalanceEvent.timestamp, endTimestamp)
-                        )
-                    );
+                // Get period events for this asset from pre-fetched data
+                const periodEvents = eventsByAsset.get(asset) || [];
 
-                // Calculate net deposits during the period
-                const netDeposits = await calculateNetDeposits(context, user, asset, startTimestamp, endTimestamp);
-
-                // Calculate supplied and borrowed amounts during the period
-                const suppliedAmount = await calculateTotalSupplied(context, user, asset, startTimestamp, endTimestamp);
-                const borrowedAmount = await calculateTotalBorrowed(context, user, asset, startTimestamp, endTimestamp);
+                // Calculate metrics in parallel
+                const [netDeposits, suppliedAmount, borrowedAmount, maxBalanceDuringPeriod] = await Promise.all([
+                    calculateNetDeposits(context, user, asset, startTimestamp, endTimestamp),
+                    calculateTotalSupplied(context, user, asset, startTimestamp, endTimestamp),
+                    calculateTotalBorrowed(context, user, asset, startTimestamp, endTimestamp),
+                    getMaxBalanceDuringPeriod(context, user, asset, startTimestamp, endTimestamp)
+                ]);
 
                 // Enhanced calculation: Handle intra-period positions
                 const segmentedResult = await calculateSegmentedCustomPeriodYield(
@@ -252,17 +342,17 @@ export async function calculateUserCustomPeriodYield(
                     user,
                     asset,
                     startTimestamp,
-                    endTimestamp
+                    endTimestamp,
+                    indexCache // Pass cache to avoid redundant queries
                 );
 
                 const periodYield = segmentedResult.totalYield;
                 const segments = segmentedResult.segments;
 
-                // Calculate additional metrics for better understanding
+                // Calculate additional metrics
                 const hadPositionDuringPeriod = periodEvents.length > 0 || startScaledBalance > 0n;
-                const maxBalanceDuringPeriod = await getMaxBalanceDuringPeriod(context, user, asset, startTimestamp, endTimestamp);
 
-                results.push({
+                return {
                     user,
                     asset,
                     periodYield,
@@ -277,20 +367,23 @@ export async function calculateUserCustomPeriodYield(
                     borrowedAmount,
                     startTimestamp,
                     endTimestamp,
-                    // Additional context fields
                     hadPositionDuringPeriod,
                     maxBalanceDuringPeriod,
                     transactionCount: periodEvents.length,
-                    // Detailed segment information
                     segments
-                });
+                };
 
             } catch (error) {
                 console.error(`❌ Error calculating yield for asset ${asset}:`, error);
-                // Continue with other assets even if one fails
+                return null;
             }
-        }
-      return results;
+        });
+
+        // Wait for all assets to complete
+        const results = await Promise.all(assetPromises);
+
+        // Filter out null results (failed calculations)
+        return results.filter((r): r is NonNullable<typeof r> => r !== null);
 
     } catch (error) {
         console.error(`❌ Error in calculateUserCustomPeriodYield for user ${user}:`, error);
@@ -558,11 +651,63 @@ export async function calculateUserDailyYieldBreakdown(
 
 
 /**
+ * Helper: Calculate scaled balance at a specific timestamp from pre-fetched events
+ * This avoids database queries by using in-memory event data
+ */
+function calculateBalanceFromEvents(
+    events: any[],
+    timestamp: number
+): bigint {
+    // Find the most recent event at or before the timestamp
+    let balance = 0n;
+
+    for (const event of events) {
+        if (event.timestamp <= timestamp) {
+            balance = event.scaledBalance;
+        } else {
+            break; // Events are sorted, so we can stop here
+        }
+    }
+
+    return balance;
+}
+
+/**
+ * Helper: Calculate borrowed balance at a specific timestamp from pre-fetched events
+ * This avoids database queries by using in-memory event data
+ */
+function calculateBorrowedFromEvents(
+    borrows: any[],
+    repays: any[],
+    timestamp: number
+): bigint {
+    let totalBorrowed = 0n;
+
+    // Add all borrows up to timestamp
+    for (const borrow of borrows) {
+        if (borrow.timestamp <= timestamp) {
+            totalBorrowed += borrow.amount;
+        }
+    }
+
+    // Subtract all repays up to timestamp
+    for (const repay of repays) {
+        if (repay.timestamp <= timestamp) {
+            totalBorrowed -= repay.amount;
+        }
+    }
+
+    return totalBorrowed > 0n ? totalBorrowed : 0n;
+}
+
+/**
  * Calculate daily portfolio values for a user over a custom time period
  * Portfolio Value = Total Supplied - Total Borrowed
  *
  * Returns daily breakdown showing supplied and borrowed amounts per asset,
  * suitable for portfolio value charts and net worth tracking.
+ *
+ * Batch fetches all data upfront, eliminating O(days × assets × 2) query pattern
  */
 export async function calculateUserDailyPortfolioValue(
     context: any,
@@ -602,6 +747,56 @@ export async function calculateUserDailyPortfolioValue(
             return [];
         }
 
+        // Initialize liquidity index cache
+        const indexCache = new LiquidityIndexCache();
+
+        // Batch fetch ALL balance events for ALL assets in ONE query
+        const dbQuery = context.db.sql || context.db;
+        const { Borrow, Repay } = await import("ponder:schema");
+
+        const [allBalanceEvents, allBorrows, allRepays] = await Promise.all([
+            dbQuery
+                .select()
+                .from(UserBalanceEvent)
+                .where(eq(UserBalanceEvent.user, user as `0x${string}`))
+                .orderBy(UserBalanceEvent.timestamp),
+            dbQuery
+                .select()
+                .from(Borrow)
+                .where(eq(Borrow.onBehalfOf, user as `0x${string}`))
+                .orderBy(Borrow.timestamp),
+            dbQuery
+                .select()
+                .from(Repay)
+                .where(eq(Repay.user, user as `0x${string}`))
+                .orderBy(Repay.timestamp)
+        ]);
+
+        // Group events by asset
+        const balanceEventsByAsset = new Map<string, any[]>();
+        for (const event of allBalanceEvents) {
+            if (!balanceEventsByAsset.has(event.asset)) {
+                balanceEventsByAsset.set(event.asset, []);
+            }
+            balanceEventsByAsset.get(event.asset)!.push(event);
+        }
+
+        const borrowsByAsset = new Map<string, any[]>();
+        for (const borrow of allBorrows) {
+            if (!borrowsByAsset.has(borrow.reserve)) {
+                borrowsByAsset.set(borrow.reserve, []);
+            }
+            borrowsByAsset.get(borrow.reserve)!.push(borrow);
+        }
+
+        const repaysByAsset = new Map<string, any[]>();
+        for (const repay of allRepays) {
+            if (!repaysByAsset.has(repay.reserve)) {
+                repaysByAsset.set(repay.reserve, []);
+            }
+            repaysByAsset.get(repay.reserve)!.push(repay);
+        }
+
         // Create daily time buckets
         const dailyResults = new Map<string, {
             date: string;
@@ -619,14 +814,16 @@ export async function calculateUserDailyPortfolioValue(
         const startDate = new Date(startTimestamp * 1000);
         const totalDays = Math.ceil((endTimestamp - startTimestamp) / (24 * 60 * 60)) + 1;
 
+        const dayTimestamps: number[] = [];
         for (let dayOffset = 0; dayOffset < totalDays; dayOffset++) {
             const currentDate = new Date(startDate);
             currentDate.setDate(startDate.getDate() + dayOffset);
 
             const dateStr = currentDate.toISOString().split('T')[0]!;
-            // Use UTC to ensure consistent day boundaries regardless of server timezone
             const dayStartTimestamp = Math.floor(Date.UTC(currentDate.getUTCFullYear(), currentDate.getUTCMonth(), currentDate.getUTCDate()) / 1000);
+            const dayEndTimestamp = dayStartTimestamp + (24 * 60 * 60) - 1;
 
+            dayTimestamps.push(dayEndTimestamp);
             dailyResults.set(dateStr, {
                 date: dateStr,
                 timestamp: dayStartTimestamp,
@@ -636,22 +833,32 @@ export async function calculateUserDailyPortfolioValue(
             });
         }
 
-        // Process each asset
+        // Prefetch all liquidity indices we'll need (days × assets)
+        const indexPrefetchList = [];
         for (const asset of allAssets) {
+            for (const dayEndTimestamp of dayTimestamps) {
+                indexPrefetchList.push({ asset, timestamp: dayEndTimestamp });
+            }
+        }
+        await indexCache.prefetch(context, indexPrefetchList);
 
-            // For each day, calculate supplied and borrowed balances
+        // Process each asset using pre-fetched data (NO database queries in loop)
+        for (const asset of allAssets) {
+            const balanceEvents = balanceEventsByAsset.get(asset) || [];
+            const borrows = borrowsByAsset.get(asset) || [];
+            const repays = repaysByAsset.get(asset) || [];
+
+            // For each day, calculate supplied and borrowed balances from pre-fetched events
             for (const [dateStr, dayData] of dailyResults) {
-                // Use end of day timestamp (23:59:59) to capture all activity during the day
-                // This ensures we see deposits/withdrawals that happened during the day
                 const dayEndTimestamp = dayData.timestamp + (24 * 60 * 60) - 1;
 
-                // Get supplied balance at end of day
-                const scaledBalance = await getScaledBalanceAtTimestamp(context, user, asset, dayEndTimestamp);
-                const liquidityIndex = await calculateLiquidityIndexAtTimestamp(context, asset, dayEndTimestamp);
+                // Calculate supplied balance from events (no DB query)
+                const scaledBalance = calculateBalanceFromEvents(balanceEvents, dayEndTimestamp);
+                const liquidityIndex = await indexCache.get(context, asset, dayEndTimestamp);
                 const suppliedBalance = calculateActualBalance(scaledBalance, liquidityIndex);
 
-                // Get borrowed balance at end of day
-                const borrowedBalance = await getBorrowedBalanceAtTimestamp(context, user, asset, dayEndTimestamp);
+                // Calculate borrowed balance from events (no DB query)
+                const borrowedBalance = calculateBorrowedFromEvents(borrows, repays, dayEndTimestamp);
 
                 // Only add to assets map if there's a non-zero position
                 if (suppliedBalance > 0n || borrowedBalance > 0n) {
@@ -668,8 +875,6 @@ export async function calculateUserDailyPortfolioValue(
         }
 
         // Convert Map results to array format with formatting
-        // Note: Balances are in wei (token decimals), NOT RAY precision
-        // We assume 18 decimals for most ERC20 tokens (standard)
         const TOKEN_DECIMALS = 18;
 
         const formattedResults = Array.from(dailyResults.values())
