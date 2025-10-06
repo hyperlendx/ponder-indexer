@@ -6,10 +6,12 @@ import {eq, graphql, and, desc, lte} from "ponder";
 import {getUserPositions} from "../helpers/userPositionManager";
 import {calculateUserMonthlyYield, calculateUserCustomPeriodYield, calculateUserDailyYieldBreakdown, calculateUserDailyPortfolioValue} from "../helpers/yield/yieldReports";
 import {calculateLiquidityIndexAtTimestamp, formatRayValue, formatTokenBalance} from "../helpers/aave";
+import { cors } from 'hono/cors'
 
 const app = new Hono();
 
 // Add GraphQL endpoint
+app.use('/*', cors())
 app.use("/", graphql({db, schema}));
 app.use("/graphql", graphql({db, schema}));
 
