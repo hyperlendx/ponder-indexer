@@ -10,8 +10,17 @@ import { cors } from 'hono/cors'
 
 const app = new Hono();
 
+//fix CORS
+app.use('/*', cors({
+  origin: '*',
+  allowHeaders: ['Origin', 'Content-Type', 'Accept', 'Authorization'],
+  allowMethods: ['GET', 'POST', 'OPTIONS'],
+  exposeHeaders: ['Content-Length'],
+  maxAge: 600,
+  credentials: false, // Must be false when using wildcard '*'
+}))
+
 // Add GraphQL endpoint
-app.use('/*', cors())
 app.use("/", graphql({db, schema}));
 app.use("/graphql", graphql({db, schema}));
 
