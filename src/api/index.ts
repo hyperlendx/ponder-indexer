@@ -2,9 +2,9 @@ import {db} from "ponder:api";
 import {UserDeposit, ReserveDataEvent} from "ponder:schema";
 import schema from "ponder:schema";
 import {Hono} from "hono";
-import {eq, graphql, and, desc, lte} from "ponder";
+import {eq, graphql, desc} from "ponder";
 import {getUserPositions} from "../helpers/userPositionManager";
-import {calculateUserMonthlyYield, calculateUserCustomPeriodYield, calculateUserDailyYieldBreakdown, calculateUserDailyPortfolioValue} from "../helpers/yield/yieldReports";
+import {calculateUserMonthlyYield, calculateUserCustomPeriodYield, calculateUserDailyYieldBreakdown, calculateUserDailyPortfolioValue, calculateUserMonthlyYieldBreakdown, calculateUserMonthlyPortfolioValue} from "../helpers/yield/yieldReports";
 import {calculateLiquidityIndexAtTimestamp, formatRayValue, formatTokenBalance} from "../helpers/aave";
 
 const app = new Hono();
@@ -511,8 +511,11 @@ app.get("/user/:address/custom-period-yield", async (c) => {
             })) || []
         }));
 
-        // Filter out assets with zero yield for cleaner response (as per user preference)
-        const filteredYields = formattedYields.filter(data => data.yield !== '0');
+        // Filter out assets with no active position at end of period
+        // This shows all assets where user has supplied or borrowed amounts (including pre-existing positions)
+        const filteredYields = formattedYields.filter(data =>
+            BigInt(data.suppliedAmount) > 0n || BigInt(data.borrowedAmount) > 0n
+        );
 
         // Calculate totals across all assets
         const totalSupplied = filteredYields.reduce((sum, asset) => sum + BigInt(asset.suppliedAmount), 0n);
@@ -804,6 +807,296 @@ app.get("/user/:address/daily-portfolio-value", async (c) => {
         console.error("Error stack:", error instanceof Error ? error.stack : 'No stack trace');
         console.error("Error message:", error instanceof Error ? error.message : String(error));
         return c.json({error: "Failed to calculate daily portfolio values"}, 500);
+    }
+});
+
+// Get monthly yield breakdown for a specific user over a custom time period
+// Optimized for long-term analysis (≥ 1 month periods)
+app.get("/user/:address/monthly-yield-breakdown", async (c) => {
+    const userAddress = c.req.param("address");
+    const fromTimestampParam = c.req.query("fromTimestamp");
+    const toTimestampParam = c.req.query("toTimestamp");
+
+    if (!userAddress || !fromTimestampParam || !toTimestampParam) {
+        return c.json({error: "User address, fromTimestamp, and toTimestamp are required"}, 400);
+    }
+
+    // Validate hex address format
+    if (!/^0x[a-fA-F0-9]{40}$/.test(userAddress)) {
+        return c.json({error: "Invalid user address format"}, 400);
+    }
+
+    const fromTimestamp = parseInt(fromTimestampParam);
+    const toTimestamp = parseInt(toTimestampParam);
+
+    // Validate timestamps
+    if (isNaN(fromTimestamp) || isNaN(toTimestamp)) {
+        return c.json({error: "Invalid timestamp format. Must be Unix timestamps in seconds"}, 400);
+    }
+
+    if (fromTimestamp < 0 || toTimestamp < 0) {
+        return c.json({error: "Timestamps must be positive values"}, 400);
+    }
+
+    if (toTimestamp <= fromTimestamp) {
+        return c.json({error: "toTimestamp must be greater than fromTimestamp"}, 400);
+    }
+
+    // Validate minimum time range (at least 1 month = ~30 days)
+    const minPeriodSeconds = 30 * 24 * 60 * 60; // 30 days
+    if (toTimestamp - fromTimestamp < minPeriodSeconds) {
+        return c.json({error: "Time period must be at least 1 month (30 days). Use daily-yield-breakdown for shorter periods."}, 400);
+    }
+
+    // Validate reasonable time range (not more than 3 years for monthly breakdown)
+    const maxPeriodSeconds = 3 * 365 * 24 * 60 * 60; // 3 years
+    if (toTimestamp - fromTimestamp > maxPeriodSeconds) {
+        return c.json({error: "Time period cannot exceed 3 years for monthly breakdown"}, 400);
+    }
+
+    // Validate timestamps are not in the future (with 1 hour buffer for clock differences)
+    const currentTimestamp = Math.floor(Date.now() / 1000);
+    const futureBuffer = 3600; // 1 hour
+    if (toTimestamp > currentTimestamp + futureBuffer) {
+        return c.json({error: "toTimestamp cannot be in the future"}, 400);
+    }
+
+    try {
+        console.log(`🚀 Starting monthly yield breakdown calculation for ${userAddress}`);
+        const context = {db};
+
+        // Calculate monthly yield breakdown
+        console.log(`📞 Calling calculateUserMonthlyYieldBreakdown...`);
+        const monthlyYieldData = await calculateUserMonthlyYieldBreakdown(context, userAddress, fromTimestamp, toTimestamp);
+        console.log(`✅ Got monthly yield data, length: ${monthlyYieldData.length}`);
+
+        if (monthlyYieldData.length === 0) {
+            return c.json({
+                user: userAddress,
+                fromTimestamp,
+                toTimestamp,
+                fromDate: new Date(fromTimestamp * 1000).toISOString(),
+                toDate: new Date(toTimestamp * 1000).toISOString(),
+                months: 0,
+                monthlyBreakdown: [],
+                summary: {
+                    totalYield: "0",
+                    totalYieldFormatted: "0.000000",
+                    averageMonthlyYield: "0",
+                    averageMonthlyYieldFormatted: "0.000000",
+                    maxMonthlyYield: "0",
+                    minMonthlyYield: "0",
+                    monthsWithYield: 0,
+                    totalMonths: 0
+                },
+                calculatedAt: Math.floor(Date.now() / 1000),
+                message: "No positions found for this user during the specified period"
+            });
+        }
+
+        // Calculate summary statistics
+        const totalYield = monthlyYieldData.reduce((sum, month) => sum + month.totalYield, 0n);
+        const monthsWithYield = monthlyYieldData.filter(month => month.totalYield > 0n).length;
+        const averageMonthlyYield = monthlyYieldData.length > 0 ? totalYield / BigInt(monthlyYieldData.length) : 0n;
+        const maxMonthlyYield = monthlyYieldData.reduce((max, month) => month.totalYield > max ? month.totalYield : max, 0n);
+        const minMonthlyYield = monthlyYieldData.reduce((min, month) => month.totalYield < min ? month.totalYield : min, monthlyYieldData[0]?.totalYield || 0n);
+
+        // Format the response data
+        const formattedMonthlyBreakdown = monthlyYieldData.map(month => ({
+            year: month.year,
+            month: month.month,
+            monthName: month.monthName,
+            startDate: month.startDate,
+            endDate: month.endDate,
+            totalYield: month.totalYield.toString(),
+            totalYieldFormatted: formatRayValue(month.totalYield),
+            assets: month.assets.map(asset => ({
+                asset: asset.asset,
+                monthlyYield: asset.monthlyYield.toString(),
+                monthlyYieldFormatted: formatRayValue(asset.monthlyYield),
+                netDeposits: asset.netDeposits.toString(),
+                netDepositsFormatted: formatRayValue(asset.netDeposits),
+                hadPositionDuringMonth: asset.hadPositionDuringMonth,
+                maxBalanceDuringMonth: asset.maxBalanceDuringMonth.toString(),
+                maxBalanceDuringMonthFormatted: formatRayValue(asset.maxBalanceDuringMonth)
+            }))
+        }));
+
+        return c.json({
+            user: userAddress,
+            fromTimestamp,
+            toTimestamp,
+            fromDate: new Date(fromTimestamp * 1000).toISOString(),
+            toDate: new Date(toTimestamp * 1000).toISOString(),
+            months: monthlyYieldData.length,
+            monthlyBreakdown: formattedMonthlyBreakdown,
+            summary: {
+                totalYield: totalYield.toString(),
+                totalYieldFormatted: formatRayValue(totalYield),
+                averageMonthlyYield: averageMonthlyYield.toString(),
+                averageMonthlyYieldFormatted: formatRayValue(averageMonthlyYield),
+                maxMonthlyYield: maxMonthlyYield.toString(),
+                maxMonthlyYieldFormatted: formatRayValue(maxMonthlyYield),
+                minMonthlyYield: minMonthlyYield.toString(),
+                minMonthlyYieldFormatted: formatRayValue(minMonthlyYield),
+                monthsWithYield: monthsWithYield,
+                totalMonths: monthlyYieldData.length
+            },
+            calculatedAt: Math.floor(Date.now() / 1000)
+        });
+
+    } catch (error) {
+        console.error("❌ Error calculating monthly yield breakdown:", error);
+        console.error("Error stack:", error instanceof Error ? error.stack : 'No stack trace');
+        console.error("Error message:", error instanceof Error ? error.message : String(error));
+        return c.json({error: "Failed to calculate monthly yield breakdown"}, 500);
+    }
+});
+
+// Get monthly portfolio values for a specific user over a custom time period
+// Portfolio Value = Total Supplied - Total Borrowed (both with accrued interest)
+app.get("/user/:address/monthly-portfolio-value", async (c) => {
+    const userAddress = c.req.param("address");
+    const fromTimestampParam = c.req.query("fromTimestamp");
+    const toTimestampParam = c.req.query("toTimestamp");
+
+    if (!userAddress || !fromTimestampParam || !toTimestampParam) {
+        return c.json({error: "User address, fromTimestamp, and toTimestamp are required"}, 400);
+    }
+
+    // Validate hex address format
+    if (!/^0x[a-fA-F0-9]{40}$/.test(userAddress)) {
+        return c.json({error: "Invalid user address format"}, 400);
+    }
+
+    const fromTimestamp = parseInt(fromTimestampParam);
+    const toTimestamp = parseInt(toTimestampParam);
+
+    // Validate timestamps
+    if (isNaN(fromTimestamp) || isNaN(toTimestamp)) {
+        return c.json({error: "Invalid timestamp format. Must be Unix timestamps in seconds"}, 400);
+    }
+
+    if (fromTimestamp < 0 || toTimestamp < 0) {
+        return c.json({error: "Timestamps must be positive values"}, 400);
+    }
+
+    if (toTimestamp <= fromTimestamp) {
+        return c.json({error: "toTimestamp must be greater than fromTimestamp"}, 400);
+    }
+
+    // Validate minimum time range (at least 1 month = ~30 days)
+    const minPeriodSeconds = 30 * 24 * 60 * 60; // 30 days
+    if (toTimestamp - fromTimestamp < minPeriodSeconds) {
+        return c.json({error: "Time period must be at least 1 month (30 days). Use daily-portfolio-value for shorter periods."}, 400);
+    }
+
+    // Validate reasonable time range (not more than 3 years for monthly breakdown)
+    const maxPeriodSeconds = 3 * 365 * 24 * 60 * 60; // 3 years
+    if (toTimestamp - fromTimestamp > maxPeriodSeconds) {
+        return c.json({error: "Time period cannot exceed 3 years for monthly breakdown"}, 400);
+    }
+
+    // Validate timestamps are not in the future (with 1 hour buffer for clock differences)
+    const currentTimestamp = Math.floor(Date.now() / 1000);
+    const futureBuffer = 3600; // 1 hour
+    if (toTimestamp > currentTimestamp + futureBuffer) {
+        return c.json({error: "toTimestamp cannot be in the future"}, 400);
+    }
+
+    try {
+        console.log(`🚀 Starting monthly portfolio value calculation for ${userAddress}`);
+        const context = {db};
+
+        // Calculate monthly portfolio values
+        console.log(`📞 Calling calculateUserMonthlyPortfolioValue...`);
+        const monthlyPortfolioData = await calculateUserMonthlyPortfolioValue(context, userAddress, fromTimestamp, toTimestamp);
+        console.log(`✅ Got monthly portfolio data, length: ${monthlyPortfolioData.length}`);
+
+        if (monthlyPortfolioData.length === 0) {
+            return c.json({
+                user: userAddress,
+                fromTimestamp,
+                toTimestamp,
+                fromDate: new Date(fromTimestamp * 1000).toISOString(),
+                toDate: new Date(toTimestamp * 1000).toISOString(),
+                months: 0,
+                monthlyPortfolioValues: [],
+                summary: {
+                    averagePortfolioValue: "0",
+                    averagePortfolioValueFormatted: "0.000000",
+                    maxPortfolioValue: "0",
+                    maxPortfolioValueFormatted: "0.000000",
+                    minPortfolioValue: "0",
+                    minPortfolioValueFormatted: "0.000000",
+                    currentPortfolioValue: "0",
+                    currentPortfolioValueFormatted: "0.000000",
+                    totalMonths: 0
+                },
+                calculatedAt: Math.floor(Date.now() / 1000),
+                message: "No positions found for this user during the specified period"
+            });
+        }
+
+        // Calculate summary statistics
+        const totalPortfolioValue = monthlyPortfolioData.reduce((sum, month) => sum + month.portfolioValue, 0n);
+        const averagePortfolioValue = monthlyPortfolioData.length > 0 ? totalPortfolioValue / BigInt(monthlyPortfolioData.length) : 0n;
+        const maxPortfolioValue = monthlyPortfolioData.reduce((max, month) => month.portfolioValue > max ? month.portfolioValue : max, monthlyPortfolioData[0]?.portfolioValue || 0n);
+        const minPortfolioValue = monthlyPortfolioData.reduce((min, month) => month.portfolioValue < min ? month.portfolioValue : min, monthlyPortfolioData[0]?.portfolioValue || 0n);
+        const currentPortfolioValue = monthlyPortfolioData[monthlyPortfolioData.length - 1]?.portfolioValue || 0n;
+
+        // Format the response data
+        const TOKEN_DECIMALS = 18;
+        const formattedMonthlyPortfolio = monthlyPortfolioData.map(month => ({
+            year: month.year,
+            month: month.month,
+            monthName: month.monthName,
+            endDate: month.endDate,
+            endTimestamp: month.endTimestamp,
+            portfolioValue: month.portfolioValue.toString(),
+            portfolioValueFormatted: formatTokenBalance(month.portfolioValue, TOKEN_DECIMALS),
+            totalSupplied: month.totalSupplied.toString(),
+            totalSuppliedFormatted: formatTokenBalance(month.totalSupplied, TOKEN_DECIMALS),
+            totalBorrowed: month.totalBorrowed.toString(),
+            totalBorrowedFormatted: formatTokenBalance(month.totalBorrowed, TOKEN_DECIMALS),
+            assets: month.assets.map(asset => ({
+                asset: asset.asset,
+                supplied: asset.supplied.toString(),
+                suppliedFormatted: formatTokenBalance(asset.supplied, TOKEN_DECIMALS),
+                borrowed: asset.borrowed.toString(),
+                borrowedFormatted: formatTokenBalance(asset.borrowed, TOKEN_DECIMALS),
+                netPosition: asset.netPosition.toString(),
+                netPositionFormatted: formatTokenBalance(asset.netPosition, TOKEN_DECIMALS)
+            }))
+        }));
+
+        return c.json({
+            user: userAddress,
+            fromTimestamp,
+            toTimestamp,
+            fromDate: new Date(fromTimestamp * 1000).toISOString(),
+            toDate: new Date(toTimestamp * 1000).toISOString(),
+            months: monthlyPortfolioData.length,
+            monthlyPortfolioValues: formattedMonthlyPortfolio,
+            summary: {
+                averagePortfolioValue: averagePortfolioValue.toString(),
+                averagePortfolioValueFormatted: formatTokenBalance(averagePortfolioValue, TOKEN_DECIMALS),
+                maxPortfolioValue: maxPortfolioValue.toString(),
+                maxPortfolioValueFormatted: formatTokenBalance(maxPortfolioValue, TOKEN_DECIMALS),
+                minPortfolioValue: minPortfolioValue.toString(),
+                minPortfolioValueFormatted: formatTokenBalance(minPortfolioValue, TOKEN_DECIMALS),
+                currentPortfolioValue: currentPortfolioValue.toString(),
+                currentPortfolioValueFormatted: formatTokenBalance(currentPortfolioValue, TOKEN_DECIMALS),
+                totalMonths: monthlyPortfolioData.length
+            },
+            calculatedAt: Math.floor(Date.now() / 1000)
+        });
+
+    } catch (error) {
+        console.error("❌ Error calculating monthly portfolio values:", error);
+        console.error("Error stack:", error instanceof Error ? error.stack : 'No stack trace');
+        console.error("Error message:", error instanceof Error ? error.message : String(error));
+        return c.json({error: "Failed to calculate monthly portfolio values"}, 500);
     }
 });
 

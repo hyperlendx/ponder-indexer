@@ -1,5 +1,7 @@
 import { UserBalanceEvent, UserPosition, Borrow, Repay } from "ponder:schema";
 import { eq, and, lte, desc, gte } from "ponder";
+import { calculateVariableBorrowIndexAtTimestamp } from "../aave/borrowIndex";
+import { calculateActualBalance } from "../aave";
 
 /**
  * Get scaled balance at a specific timestamp by looking at balance events
@@ -280,8 +282,19 @@ export async function getMaxBalanceDuringPeriod(
 
 
 /**
- * Get borrowed balance at a specific timestamp
- * Calculates net borrowed amount (total borrows - total repays) up to the timestamp
+ * Get borrowed balance at a specific timestamp with accrued interest
+ *
+ * This function properly calculates the borrowed amount including accrued interest
+ * by using the variable borrow index, following AAVE's methodology.
+ *
+ * Algorithm:
+ * 1. Get all borrow and repay events up to the timestamp
+ * 2. Calculate scaled borrow balance (constant value)
+ * 3. Get variable borrow index at the target timestamp
+ * 4. Calculate actual borrowed amount: scaledBorrow * variableBorrowIndex / RAY
+ *
+ * Note: In AAVE, borrow amounts are stored as scaled values and grow over time
+ * through the increasing variableBorrowIndex, similar to how supply balances work.
  */
 export async function getBorrowedBalanceAtTimestamp(
     context: any,
@@ -292,43 +305,70 @@ export async function getBorrowedBalanceAtTimestamp(
     const { db } = context;
     const dbQuery = db.sql || db;
 
-    // Get all borrow events up to timestamp
-    const borrowEvents = await dbQuery
-        .select()
-        .from(Borrow)
-        .where(
-            and(
-                eq(Borrow.onBehalfOf, user as `0x${string}`),
-                eq(Borrow.reserve, asset as `0x${string}`),
-                lte(Borrow.timestamp, timestamp)
-            )
+    try {
+        // Get all borrow events up to timestamp
+        const borrowEvents = await dbQuery
+            .select()
+            .from(Borrow)
+            .where(
+                and(
+                    eq(Borrow.onBehalfOf, user as `0x${string}`),
+                    eq(Borrow.reserve, asset as `0x${string}`),
+                    lte(Borrow.timestamp, timestamp)
+                )
+            );
+
+        // Get all repay events up to timestamp
+        const repayEvents = await dbQuery
+            .select()
+            .from(Repay)
+            .where(
+                and(
+                    eq(Repay.user, user as `0x${string}`),
+                    eq(Repay.reserve, asset as `0x${string}`),
+                    lte(Repay.timestamp, timestamp)
+                )
+            );
+
+        // Calculate scaled borrow balance
+        // In AAVE, borrow amounts are stored as scaled values (constant)
+        // The actual borrowed amount grows over time via the variableBorrowIndex
+        let scaledBorrowBalance = 0n;
+
+        for (const event of borrowEvents) {
+            scaledBorrowBalance += event.amount;
+        }
+
+        for (const event of repayEvents) {
+            scaledBorrowBalance -= event.amount;
+        }
+
+        // If no net borrowed amount, return 0
+        if (scaledBorrowBalance <= 0n) {
+            return 0n;
+        }
+
+        // Get the variable borrow index at the target timestamp
+        const variableBorrowIndex = await calculateVariableBorrowIndexAtTimestamp(
+            context,
+            asset,
+            timestamp
         );
 
-    // Get all repay events up to timestamp
-    const repayEvents = await dbQuery
-        .select()
-        .from(Repay)
-        .where(
-            and(
-                eq(Repay.user, user as `0x${string}`),
-                eq(Repay.reserve, asset as `0x${string}`),
-                lte(Repay.timestamp, timestamp)
-            )
+        // Calculate actual borrowed amount with accrued interest
+        // Formula: actualBorrow = scaledBorrow * variableBorrowIndex / RAY
+        const actualBorrowedBalance = calculateActualBalance(
+            scaledBorrowBalance,
+            variableBorrowIndex
         );
 
-    // Calculate net borrowed amount
-    let totalBorrowed = 0n;
-    for (const event of borrowEvents) {
-        totalBorrowed += event.amount;
-    }
+        return actualBorrowedBalance > 0n ? actualBorrowedBalance : 0n;
 
-    let totalRepaid = 0n;
-    for (const event of repayEvents) {
-        totalRepaid += event.amount;
+    } catch (error) {
+        console.error(`❌ Error calculating borrowed balance at timestamp for user ${user}, asset ${asset}:`, error);
+        // Return 0 as fallback to prevent calculation errors
+        return 0n;
     }
-
-    const netBorrowed = totalBorrowed - totalRepaid;
-    return netBorrowed > 0n ? netBorrowed : 0n;
 }
 
 /**
