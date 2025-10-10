@@ -6,8 +6,19 @@ import {eq, graphql, desc} from "ponder";
 import {getUserPositions} from "../helpers/userPositionManager";
 import {calculateUserMonthlyYield, calculateUserCustomPeriodYield, calculateUserDailyYieldBreakdown, calculateUserDailyPortfolioValue, calculateUserMonthlyYieldBreakdown, calculateUserMonthlyPortfolioValue} from "../helpers/yield/yieldReports";
 import {calculateLiquidityIndexAtTimestamp, formatRayValue, formatTokenBalance} from "../helpers/aave";
+import { cors } from 'hono/cors'
 
 const app = new Hono();
+
+//fix CORS
+app.use('/*', cors({
+  origin: '*',
+  allowHeaders: ['Origin', 'Content-Type', 'Accept', 'Authorization'],
+  allowMethods: ['GET', 'POST', 'OPTIONS'],
+  exposeHeaders: ['Content-Length'],
+  maxAge: 600,
+  credentials: false, // Must be false when using wildcard '*'
+}))
 
 // Add GraphQL endpoint
 app.use("/", graphql({db, schema}));
