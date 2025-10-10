@@ -282,6 +282,71 @@ export async function getMaxBalanceDuringPeriod(
 
 
 /**
+ * Get scaled borrow balance at a specific timestamp
+ * Returns the SCALED balance (constant value before applying borrow index)
+ * Similar to getScaledBalanceAtTimestamp but for borrows
+ *
+ * Algorithm:
+ * 1. Get all borrow events up to the timestamp
+ * 2. Get all repay events up to the timestamp
+ * 3. Calculate: scaledBorrowBalance = Σ(borrows) - Σ(repays)
+ */
+export async function getScaledBorrowBalanceAtTimestamp(
+    context: any,
+    user: string,
+    asset: string,
+    timestamp: number
+): Promise<bigint> {
+    const { db } = context;
+    const dbQuery = db.sql || db;
+
+    try {
+        const { Borrow, Repay } = await import("ponder:schema");
+
+        // Get all borrow events up to timestamp
+        const borrowEvents = await dbQuery
+            .select()
+            .from(Borrow)
+            .where(
+                and(
+                    eq(Borrow.onBehalfOf, user as `0x${string}`),
+                    eq(Borrow.reserve, asset as `0x${string}`),
+                    lte(Borrow.timestamp, timestamp)
+                )
+            );
+
+        // Get all repay events up to timestamp
+        const repayEvents = await dbQuery
+            .select()
+            .from(Repay)
+            .where(
+                and(
+                    eq(Repay.user, user as `0x${string}`),
+                    eq(Repay.reserve, asset as `0x${string}`),
+                    lte(Repay.timestamp, timestamp)
+                )
+            );
+
+        // Calculate scaled borrow balance
+        let scaledBorrowBalance = 0n;
+
+        for (const event of borrowEvents) {
+            scaledBorrowBalance += event.amount;
+        }
+
+        for (const event of repayEvents) {
+            scaledBorrowBalance -= event.amount;
+        }
+
+        return scaledBorrowBalance > 0n ? scaledBorrowBalance : 0n;
+
+    } catch (error) {
+        console.error(`❌ Error getting scaled borrow balance at timestamp for user ${user}, asset ${asset}:`, error);
+        return 0n;
+    }
+}
+
+/**
  * Get borrowed balance at a specific timestamp with accrued interest
  *
  * This function properly calculates the borrowed amount including accrued interest

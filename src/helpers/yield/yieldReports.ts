@@ -15,6 +15,7 @@ import {
     getMaxBalanceDuringMonth,
     getMaxBalanceDuringPeriod,
     getBorrowedBalanceAtTimestamp,
+    getScaledBorrowBalanceAtTimestamp,
     getUserBorrowedAssets
 } from "./balanceQueries";
 import {
@@ -272,8 +273,9 @@ export async function calculateUserCustomPeriodYield(
             return [];
         }
 
-        // Initialize liquidity index cache for this request
+        // Initialize liquidity index cache and borrow index cache for this request
         const indexCache = new LiquidityIndexCache();
+        const borrowIndexCache = new BorrowIndexCache();
 
         // Batch fetch all period events for all assets in ONE query
         const dbQuery = context.db.sql || context.db;
@@ -297,7 +299,7 @@ export async function calculateUserCustomPeriodYield(
             eventsByAsset.get(event.asset)!.push(event);
         }
 
-        // Prefetch all liquidity indices we'll need
+        // Prefetch all liquidity indices and borrow indices we'll need
         const indexPrefetchList = [];
         for (const asset of assets) {
             indexPrefetchList.push(
@@ -305,7 +307,10 @@ export async function calculateUserCustomPeriodYield(
                 { asset, timestamp: endTimestamp }
             );
         }
-        await indexCache.prefetch(context, indexPrefetchList);
+        await Promise.all([
+            indexCache.prefetch(context, indexPrefetchList),
+            borrowIndexCache.prefetch(context, indexPrefetchList)
+        ]);
 
         // Process all assets in parallel
         const assetPromises = assets.map(async (asset) => {
@@ -332,16 +337,19 @@ export async function calculateUserCustomPeriodYield(
                 // Calculate metrics in parallel
                 // Note: For supplied/borrowed amounts, we use the actual balance at the end of the period
                 // This includes both existing positions from before the period AND new positions during the period
-                const [netDeposits, borrowedBalanceAtEnd, maxBalanceDuringPeriod] = await Promise.all([
+                const [netDeposits, maxBalanceDuringPeriod] = await Promise.all([
                     calculateNetDeposits(context, user, asset, startTimestamp, endTimestamp),
-                    getBorrowedBalanceAtTimestamp(context, user, asset, endTimestamp),
                     getMaxBalanceDuringPeriod(context, user, asset, startTimestamp, endTimestamp)
                 ]);
 
                 // For supplied amount, use the actual balance at the end of the period
                 // This represents the total amount supplied (including positions opened before the period)
                 const suppliedAmount = endActualBalance;
-                const borrowedAmount = borrowedBalanceAtEnd;
+
+                // For borrowed amount, use the same pattern as supply side
+                const scaledBorrowBalance = await getScaledBorrowBalanceAtTimestamp(context, user, asset, endTimestamp);
+                const variableBorrowIndex = await borrowIndexCache.get(context, asset, endTimestamp);
+                const borrowedAmount = calculateActualBalance(scaledBorrowBalance, variableBorrowIndex);
 
                 // Enhanced calculation: Handle intra-period positions
                 const segmentedResult = await calculateSegmentedCustomPeriodYield(
@@ -569,10 +577,11 @@ export async function calculateUserMonthlyPortfolioValue(
             return [];
         }
 
-        // Initialize liquidity index cache
+        // Initialize liquidity index cache and borrow index cache
         const indexCache = new LiquidityIndexCache();
+        const borrowIndexCache = new BorrowIndexCache();
 
-        // Prefetch all liquidity indices we'll need (months × assets)
+        // Prefetch all liquidity indices and borrow indices we'll need (months × assets)
         const indexPrefetchList = [];
         for (const { year, month } of months) {
             const { endTimestamp } = getMonthTimestamps(year, month);
@@ -580,7 +589,10 @@ export async function calculateUserMonthlyPortfolioValue(
                 indexPrefetchList.push({ asset, timestamp: endTimestamp });
             }
         }
-        await indexCache.prefetch(context, indexPrefetchList);
+        await Promise.all([
+            indexCache.prefetch(context, indexPrefetchList),
+            borrowIndexCache.prefetch(context, indexPrefetchList)
+        ]);
 
         // Calculate portfolio value for each month in parallel
         const monthlyResults = await Promise.all(
@@ -607,7 +619,9 @@ export async function calculateUserMonthlyPortfolioValue(
                                 const suppliedBalance = calculateActualBalance(scaledBalance, liquidityIndex);
 
                                 // Get borrowed balance (with accrued interest)
-                                const borrowedBalance = await getBorrowedBalanceAtTimestamp(context, user, asset, endTimestamp);
+                                const scaledBorrowBalance = await getScaledBorrowBalanceAtTimestamp(context, user, asset, endTimestamp);
+                                const variableBorrowIndex = await borrowIndexCache.get(context, asset, endTimestamp);
+                                const borrowedBalance = calculateActualBalance(scaledBorrowBalance, variableBorrowIndex);
 
                                 // Only include assets with non-zero positions
                                 if (suppliedBalance > 0n || borrowedBalance > 0n) {
@@ -954,6 +968,41 @@ function calculateBalanceFromEvents(
 }
 
 /**
+ * Helper: Calculate scaled borrow balance at a specific timestamp from pre-fetched events
+ * This avoids database queries by using in-memory event data
+ * Returns the SCALED balance (constant value before applying borrow index)
+ *
+ * @param borrows - Pre-fetched borrow events
+ * @param repays - Pre-fetched repay events
+ * @param timestamp - Target timestamp
+ * @returns Scaled borrow balance (constant value)
+ */
+function calculateScaledBorrowBalanceFromEvents(
+    borrows: any[],
+    repays: any[],
+    timestamp: number
+): bigint {
+    // Calculate scaled borrow balance (constant value)
+    let scaledBorrowBalance = 0n;
+
+    // Add all borrows up to timestamp
+    for (const borrow of borrows) {
+        if (borrow.timestamp <= timestamp) {
+            scaledBorrowBalance += borrow.amount;
+        }
+    }
+
+    // Subtract all repays up to timestamp
+    for (const repay of repays) {
+        if (repay.timestamp <= timestamp) {
+            scaledBorrowBalance -= repay.amount;
+        }
+    }
+
+    return scaledBorrowBalance > 0n ? scaledBorrowBalance : 0n;
+}
+
+/**
  * Helper: Calculate borrowed balance at a specific timestamp from pre-fetched events
  * This avoids database queries by using in-memory event data
  *
@@ -973,21 +1022,7 @@ function calculateBorrowedFromEvents(
     variableBorrowIndex: bigint
 ): bigint {
     // Calculate scaled borrow balance (constant value)
-    let scaledBorrowBalance = 0n;
-
-    // Add all borrows up to timestamp
-    for (const borrow of borrows) {
-        if (borrow.timestamp <= timestamp) {
-            scaledBorrowBalance += borrow.amount;
-        }
-    }
-
-    // Subtract all repays up to timestamp
-    for (const repay of repays) {
-        if (repay.timestamp <= timestamp) {
-            scaledBorrowBalance -= repay.amount;
-        }
-    }
+    const scaledBorrowBalance = calculateScaledBorrowBalanceFromEvents(borrows, repays, timestamp);
 
     // If no net borrowed amount, return 0
     if (scaledBorrowBalance <= 0n) {
