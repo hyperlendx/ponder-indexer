@@ -272,6 +272,7 @@ export const BorrowAssetIsolated = onchainTable(
         sharesAdded: t.bigint(),
         timestamp: t.integer(),
         price: t.bigint(),
+        exchangeRate: t.bigint(), // Vault exchange rate (assets/shares)
     }),
     (table) => ({
         borrowerIdx: index().on(table.borrower),
@@ -291,6 +292,7 @@ export const RepayAssetIsolated = onchainTable(
         shares: t.bigint(),
         timestamp: t.integer(),
         price: t.bigint(),
+        exchangeRate: t.bigint(), // Vault exchange rate (assets/shares)
     }),
     (table) => ({
         borrowerIdx: index().on(table.borrower),
@@ -371,12 +373,13 @@ export const DepositIsolated = onchainTable(
         shares: t.bigint(),
         timestamp: t.integer(),
         price: t.bigint(),
+        exchangeRate: t.bigint(), // Vault exchange rate (assets/shares)
     }),
     (table) => ({
         callerIdx: index().on(table.caller),
         ownerIdx: index().on(table.owner),
     })
-); 
+);
 
 export const WithdrawIsolated = onchainTable(
     "withdraw_isolated",
@@ -391,13 +394,14 @@ export const WithdrawIsolated = onchainTable(
         shares: t.bigint(),
         timestamp: t.integer(),
         price: t.bigint(),
+        exchangeRate: t.bigint(), // Vault exchange rate (assets/shares)
     }),
     (table) => ({
         callerIdx: index().on(table.caller),
         ownerIdx: index().on(table.owner),
         receiverIdx: index().on(table.receiver),
     })
-); 
+);
 
 
 export const StrategyDeployed = onchainTable(

@@ -514,6 +514,16 @@ ponder.on("IsolatedPair:BorrowAsset", async ({ event, context }) => {
         console.error(`Error fetching reserve price: ${e.message}`);
     }
 
+    // Calculate exchange rate from event data
+    // Exchange rate = borrowAmount / sharesAdded (in 1e18 precision)
+    const EXCHANGE_PRECISION = 1000000000000000000n; // 1e18
+    const borrowAmount = event.args._borrowAmount;
+    const sharesAdded = event.args._sharesAdded;
+
+    const exchangeRate = sharesAdded > 0n
+        ? (borrowAmount * EXCHANGE_PRECISION) / sharesAdded
+        : EXCHANGE_PRECISION; // Default 1:1 if no shares
+
     await context.db.insert(BorrowAssetIsolated).values({
         id: event.id,
         txHash: event.transaction.hash,
@@ -523,7 +533,8 @@ ponder.on("IsolatedPair:BorrowAsset", async ({ event, context }) => {
         borrowAmount: event.args._borrowAmount,
         sharesAdded: event.args._sharesAdded,
         timestamp: Number(event.block.timestamp),
-        price: price
+        price: price,
+        exchangeRate: exchangeRate
     });
 });
 
@@ -536,6 +547,16 @@ ponder.on("IsolatedPair:RepayAsset", async ({ event, context }) => {
         console.error(`Error fetching reserve price: ${e.message}`);
     }
 
+    // Calculate exchange rate from event data
+    // Exchange rate = amountToRepay / shares (in 1e18 precision)
+    const EXCHANGE_PRECISION = 1000000000000000000n; // 1e18
+    const amountToRepay = event.args.amountToRepay;
+    const shares = event.args.shares;
+
+    const exchangeRate = shares > 0n
+        ? (amountToRepay * EXCHANGE_PRECISION) / shares
+        : EXCHANGE_PRECISION; // Default 1:1 if no shares
+
     await context.db.insert(RepayAssetIsolated).values({
         id: event.id,
         txHash: event.transaction.hash,
@@ -546,6 +567,7 @@ ponder.on("IsolatedPair:RepayAsset", async ({ event, context }) => {
         shares: event.args.shares,
         timestamp: Number(event.block.timestamp),
         price: price,
+        exchangeRate: exchangeRate
     });
 });
 
@@ -627,6 +649,16 @@ ponder.on("IsolatedPair:Deposit", async ({ event, context }) => {
         console.error(`Error fetching reserve price: ${e.message}`);
     }
 
+    // Calculate exchange rate from event data
+    // Exchange rate = assets / shares (in 1e18 precision)
+    const EXCHANGE_PRECISION = 1000000000000000000n; // 1e18
+    const assets = event.args.assets;
+    const shares = event.args.shares;
+
+    const exchangeRate = shares > 0n
+        ? (assets * EXCHANGE_PRECISION) / shares
+        : EXCHANGE_PRECISION; // Default 1:1 if no shares
+
     await context.db.insert(DepositIsolated).values({
         id: event.id,
         txHash: event.transaction.hash,
@@ -637,6 +669,7 @@ ponder.on("IsolatedPair:Deposit", async ({ event, context }) => {
         shares: event.args.shares,
         timestamp: Number(event.block.timestamp),
         price: price,
+        exchangeRate: exchangeRate
     });
 });
 
@@ -649,6 +682,16 @@ ponder.on("IsolatedPair:Withdraw", async ({ event, context }) => {
         console.error(`Error fetching reserve price: ${e.message}`);
     }
 
+    // Calculate exchange rate from event data
+    // Exchange rate = assets / shares (in 1e18 precision)
+    const EXCHANGE_PRECISION = 1000000000000000000n; // 1e18
+    const assets = event.args.assets;
+    const shares = event.args.shares;
+
+    const exchangeRate = shares > 0n
+        ? (assets * EXCHANGE_PRECISION) / shares
+        : EXCHANGE_PRECISION; // Default 1:1 if no shares
+
     await context.db.insert(WithdrawIsolated).values({
         id: event.id,
         txHash: event.transaction.hash,
@@ -660,6 +703,7 @@ ponder.on("IsolatedPair:Withdraw", async ({ event, context }) => {
         shares: event.args.shares,
         timestamp: Number(event.block.timestamp),
         price: price,
+        exchangeRate: exchangeRate
     });
 });
 
