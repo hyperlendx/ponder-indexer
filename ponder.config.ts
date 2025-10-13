@@ -56,7 +56,7 @@ export default createConfig({
             chain: "hyperEvm",
             address: factory({
                 // The address of the factory contract that creates instances of this child contract.
-                address: "0x9A32C32D7A0e13892Cd68E143AC890F6308304F5",
+                address: "0xf55af86c9ec3a7d5fa6367c00a120e6b262f718d",
                 // The event emitted by the factory that announces a new instance of this child contract.
                 event: parseAbiItem("event AddPair(address pairAddress)"),
                 // The name of the parameter that contains the address of the new child contract.
