@@ -403,6 +403,32 @@ export const WithdrawIsolated = onchainTable(
     })
 );
 
+// Track which isolated pairs each user has ever interacted with
+// This enables fast lookups without scanning all event tables
+export const UserIsolatedPairTracking = onchainTable(
+    "user_isolated_pair_tracking",
+    (t) => ({
+        id: t.text().primaryKey(), // ${user}_${pair}
+        user: t.hex(),
+        pair: t.hex(),
+        // Track which types of interactions exist
+        hasDeposits: t.boolean().default(false),
+        hasWithdraws: t.boolean().default(false),
+        hasBorrows: t.boolean().default(false),
+        hasRepays: t.boolean().default(false),
+        hasCollateralAdded: t.boolean().default(false),
+        hasCollateralRemoved: t.boolean().default(false),
+        // Timestamps
+        firstInteraction: t.integer(),
+        lastInteraction: t.integer(),
+    }),
+    (table) => ({
+        userIdx: index().on(table.user),
+        pairIdx: index().on(table.pair),
+        userPairIdx: index().on(table.user, table.pair),
+    })
+);
+
 
 export const StrategyDeployed = onchainTable(
     "strategy_deployed",

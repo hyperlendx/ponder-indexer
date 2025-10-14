@@ -23,6 +23,7 @@ import {
     LiquidateIsolated,
     DepositIsolated,
     WithdrawIsolated,
+    UserIsolatedPairTracking,
     // UserCore,
     // UserReserveCore,
     HTokenTransfer,
@@ -40,6 +41,7 @@ import { getOraclePrice, getIsolatedOraclePrice } from "./helpers/getPrice";
 import { updateUserDepositBalance } from "./helpers/userBalanceManager";
 import { updateUserPosition } from "./helpers/userPositionManager";
 import { calculateScaledBalance, calculateLiquidityIndexAtTimestamp } from "./helpers/aave";
+import { updateUserIsolatedPairTracking } from "./helpers/userIsolatedPairTracker";
 
 // HToken Transfer Event Handler - Enhanced for Interest Tracking
 ponder.on("HTokens:BalanceTransfer", async ({ event, context }) => {
@@ -143,21 +145,6 @@ ponder.on("CorePool:Repay", async ({ event, context }) => {
 
 // Supply Event Handler - Enhanced for Interest Tracking
 ponder.on("CorePool:Supply", async ({ event, context }) => {
-    console.log("🔥 Supply event detected!", {
-        txHash: event.transaction.hash,
-        reserve: event.args.reserve,
-        amount: event.args.amount.toString(),
-        user: event.args.user,
-        onBehalfOf: event.args.onBehalfOf
-    });
-
-    console.log('blockNumber', event.block.number);
-    if(event.block.number >= 13403427) {
-        console.log('____________________________________________________________________________');
-        console.log('event', event);
-
-        console.log('blockNumber', event.block.number);
-    }
     const reservePrice = await getOraclePrice(context, event.args.reserve);
     const timestamp = Number(event.block.timestamp);
     const blockNumber = event.block.number;
@@ -536,6 +523,15 @@ ponder.on("IsolatedPair:BorrowAsset", async ({ event, context }) => {
         price: price,
         exchangeRate: exchangeRate
     });
+
+    // Update tracking table
+    await updateUserIsolatedPairTracking(
+        context,
+        event.args._borrower,
+        event.transaction.to || "0xNEW",
+        Number(event.block.timestamp),
+        'borrow'
+    );
 });
 
 ponder.on("IsolatedPair:RepayAsset", async ({ event, context }) => {
@@ -569,6 +565,15 @@ ponder.on("IsolatedPair:RepayAsset", async ({ event, context }) => {
         price: price,
         exchangeRate: exchangeRate
     });
+
+    // Update tracking table
+    await updateUserIsolatedPairTracking(
+        context,
+        event.args.borrower,
+        event.transaction.to || "0xNEW",
+        Number(event.block.timestamp),
+        'repay'
+    );
 });
 
 ponder.on("IsolatedPair:AddCollateral", async ({ event, context }) => {
@@ -590,6 +595,15 @@ ponder.on("IsolatedPair:AddCollateral", async ({ event, context }) => {
         timestamp: Number(event.block.timestamp),
         price: price,
     });
+
+    // Update tracking table
+    await updateUserIsolatedPairTracking(
+        context,
+        event.args.borrower,
+        event.transaction.to || "0xNEW",
+        Number(event.block.timestamp),
+        'addCollateral'
+    );
 });
 
 ponder.on("IsolatedPair:RemoveCollateral", async ({ event, context }) => {
@@ -612,6 +626,15 @@ ponder.on("IsolatedPair:RemoveCollateral", async ({ event, context }) => {
         timestamp: Number(event.block.timestamp),
         price: price,
     });
+
+    // Update tracking table
+    await updateUserIsolatedPairTracking(
+        context,
+        event.args._borrower,
+        event.transaction.to || "0xNEW",
+        Number(event.block.timestamp),
+        'removeCollateral'
+    );
 });
 
 ponder.on("IsolatedPair:Liquidate", async ({ event, context }) => {
@@ -671,6 +694,15 @@ ponder.on("IsolatedPair:Deposit", async ({ event, context }) => {
         price: price,
         exchangeRate: exchangeRate
     });
+
+    // Update tracking table
+    await updateUserIsolatedPairTracking(
+        context,
+        event.args.owner,
+        event.transaction.to || "0xNEW",
+        Number(event.block.timestamp),
+        'deposit'
+    );
 });
 
 ponder.on("IsolatedPair:Withdraw", async ({ event, context }) => {
@@ -705,6 +737,15 @@ ponder.on("IsolatedPair:Withdraw", async ({ event, context }) => {
         price: price,
         exchangeRate: exchangeRate
     });
+
+    // Update tracking table
+    await updateUserIsolatedPairTracking(
+        context,
+        event.args.owner,
+        event.transaction.to || "0xNEW",
+        Number(event.block.timestamp),
+        'withdraw'
+    );
 });
 
 ponder.on("LoopingStrategyManagerFactory:StrategyDeployed", async ({ event, context }) => {
