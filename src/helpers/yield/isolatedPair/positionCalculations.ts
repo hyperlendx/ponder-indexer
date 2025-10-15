@@ -60,7 +60,7 @@ export async function calculateIsolatedPairPosition(
     pair: string,
     timestamp: number
 ): Promise<IsolatedPairPosition> {
-    // Get all balances in parallel
+    // Get all balances and exchange rate in parallel
     const [collateralAmount, assetShares, borrowShares, exchangeRate] = await Promise.all([
         getIsolatedPairCollateralBalance(context, user, pair, timestamp),
         getIsolatedPairAssetShares(context, user, pair, timestamp),
@@ -68,7 +68,7 @@ export async function calculateIsolatedPairPosition(
         getIsolatedPairExchangeRate(context, pair, timestamp)
     ]);
 
-    // Convert shares to amounts
+    // Convert shares to amounts using the exchange rate
     const assetAmount = convertSharesToAssets(assetShares, exchangeRate);
     const borrowAmount = convertSharesToAssets(borrowShares, exchangeRate);
 

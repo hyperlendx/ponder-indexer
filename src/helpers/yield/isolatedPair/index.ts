@@ -56,5 +56,14 @@ export type {
 export { ExchangeRateCache } from "./exchangeRateCache";
 export { IsolatedPairBalanceCache } from "./balanceCache";
 
+// Re-export custom period position functions
+export {
+    calculateUserCustomPeriodIsolatedPositions
+} from "./customPeriodPositions";
+export type { IsolatedPairCustomPeriodPosition } from "./customPeriodPositions";
+
+// Re-export period tracking functions
+export { getUserIsolatedPairsForPeriod } from "./periodTracking";
+
 // Note: getUserPairEvents is intentionally NOT exported as it's an internal helper
 

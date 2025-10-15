@@ -169,7 +169,6 @@ export async function getUserAssetsForPeriod(
         const startOfPeriodAssets = await getAssetsWithBalanceAtTimestamp(context, user, startTimestamp);
         startOfPeriodAssets.forEach(asset => {
             assetsWithPositions.add(asset);
-            console.log(`✅ Found existing position at period start: ${asset}`);
         });
 
         // 2. Find all assets where user had balance events DURING the period
@@ -438,7 +437,13 @@ export async function getBorrowedBalanceAtTimestamp(
 
 /**
  * Get all assets a user has borrowed during a time period
- * Returns unique asset addresses where user had borrow activity
+ * Returns unique asset addresses where user had borrow positions
+ *
+ * This function checks:
+ * 1. Assets with non-zero borrow balance at START of period (existing borrows)
+ * 2. Assets with borrow/repay events DURING the period (new borrows or activity)
+ *
+ * This matches the behavior of getUserAssetsForPeriod for supply positions.
  */
 export async function getUserBorrowedAssets(
     context: any,
@@ -449,38 +454,86 @@ export async function getUserBorrowedAssets(
     const { db } = context;
     const dbQuery = db.sql || db;
 
-    // Get all borrow events in the period
-    const borrowEvents = await dbQuery
-        .select()
-        .from(Borrow)
-        .where(
-            and(
-                eq(Borrow.onBehalfOf, user as `0x${string}`),
-                gte(Borrow.timestamp, startTimestamp),
-                lte(Borrow.timestamp, endTimestamp)
-            )
-        );
+    try {
+        const assetsWithBorrows = new Set<string>();
 
-    // Get all repay events in the period
-    const repayEvents = await dbQuery
-        .select()
-        .from(Repay)
-        .where(
-            and(
-                eq(Repay.user, user as `0x${string}`),
-                gte(Repay.timestamp, startTimestamp),
-                lte(Repay.timestamp, endTimestamp)
-            )
-        );
+        // 1. Find all assets where user had non-zero borrow balance at START of period
+        // This catches existing borrows that were already open
+        const borrowEventsBeforeStart = await dbQuery
+            .select()
+            .from(Borrow)
+            .where(
+                and(
+                    eq(Borrow.onBehalfOf, user as `0x${string}`),
+                    lte(Borrow.timestamp, startTimestamp)
+                )
+            );
 
-    // Collect unique assets
-    const assetSet = new Set<string>();
-    for (const event of borrowEvents) {
-        assetSet.add(event.reserve);
+        const repayEventsBeforeStart = await dbQuery
+            .select()
+            .from(Repay)
+            .where(
+                and(
+                    eq(Repay.user, user as `0x${string}`),
+                    lte(Repay.timestamp, startTimestamp)
+                )
+            );
+
+        // Calculate which assets had non-zero borrow balance at start
+        const borrowBalancesAtStart = new Map<string, bigint>();
+
+        for (const event of borrowEventsBeforeStart) {
+            const current = borrowBalancesAtStart.get(event.reserve) || 0n;
+            borrowBalancesAtStart.set(event.reserve, current + event.amount);
+        }
+
+        for (const event of repayEventsBeforeStart) {
+            const current = borrowBalancesAtStart.get(event.reserve) || 0n;
+            borrowBalancesAtStart.set(event.reserve, current - event.amount);
+        }
+
+        // Add assets with non-zero borrow balance at start
+        for (const [asset, balance] of borrowBalancesAtStart.entries()) {
+            if (balance > 0n) {
+                assetsWithBorrows.add(asset);
+            }
+        }
+
+        // 2. Find all assets with borrow/repay events DURING the period
+        const borrowEventsDuringPeriod = await dbQuery
+            .select()
+            .from(Borrow)
+            .where(
+                and(
+                    eq(Borrow.onBehalfOf, user as `0x${string}`),
+                    gte(Borrow.timestamp, startTimestamp),
+                    lte(Borrow.timestamp, endTimestamp)
+                )
+            );
+
+        const repayEventsDuringPeriod = await dbQuery
+            .select()
+            .from(Repay)
+            .where(
+                and(
+                    eq(Repay.user, user as `0x${string}`),
+                    gte(Repay.timestamp, startTimestamp),
+                    lte(Repay.timestamp, endTimestamp)
+                )
+            );
+
+        // Add assets with activity during period
+        for (const event of borrowEventsDuringPeriod) {
+            assetsWithBorrows.add(event.reserve);
+        }
+        for (const event of repayEventsDuringPeriod) {
+            assetsWithBorrows.add(event.reserve);
+        }
+
+        return Array.from(assetsWithBorrows);
+
+    } catch (error) {
+        console.error(`❌ Error getting user borrowed assets for period:`, error);
+        return [];
     }
-    for (const event of repayEvents) {
-        assetSet.add(event.reserve);
-    }
-
-    return Array.from(assetSet);
 }

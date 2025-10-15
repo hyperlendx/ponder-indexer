@@ -429,6 +429,71 @@ export const UserIsolatedPairTracking = onchainTable(
     })
 );
 
+// Isolated Pair Rate Update Events
+// These events enable accurate exchange rate calculations without approximation
+
+export const UpdateRateIsolated = onchainTable(
+    "update_rate_isolated",
+    (t) => ({
+        id: t.text().primaryKey(),
+        txHash: t.hex(),
+        pair: t.hex(),
+        oldRatePerSec: t.bigint(),
+        oldFullUtilizationRate: t.bigint(),
+        newRatePerSec: t.bigint(),
+        newFullUtilizationRate: t.bigint(),
+        timestamp: t.integer(),
+    }),
+    (table) => ({
+        pairIdx: index().on(table.pair),
+        timestampIdx: index().on(table.timestamp),
+        pairTimestampIdx: index().on(table.pair, table.timestamp),
+    })
+);
+
+export const AddInterestIsolated = onchainTable(
+    "add_interest_isolated",
+    (t) => ({
+        id: t.text().primaryKey(),
+        txHash: t.hex(),
+        pair: t.hex(),
+        interestEarned: t.bigint(),
+        rate: t.bigint(),
+        feesAmount: t.bigint(),
+        feesShare: t.bigint(),
+        timestamp: t.integer(),
+    }),
+    (table) => ({
+        pairIdx: index().on(table.pair),
+        timestampIdx: index().on(table.timestamp),
+        pairTimestampIdx: index().on(table.pair, table.timestamp),
+    })
+);
+
+// Note: UpdateExchangeRate event is for collateral/asset oracle prices, NOT vault exchange rate
+// We don't need to track it for vault accounting
+
+/// @notice Tracks the vault state (totalAsset.amount and totalAsset.shares) for each isolated pair
+/// @dev This mirrors the VaultAccount struct in the contract and is updated on every state-changing event
+export const IsolatedPairVaultState = onchainTable(
+    "isolated_pair_vault_state",
+    (t) => ({
+        id: t.text().primaryKey(), // pair-timestamp-blockNumber
+        pair: t.hex(),
+        totalAssetAmount: t.bigint(), // totalAsset.amount - total assets in the vault
+        totalAssetShares: t.bigint(), // totalAsset.shares - total shares outstanding
+        timestamp: t.integer(),
+        blockNumber: t.integer(),
+        txHash: t.hex(),
+    }),
+    (table) => ({
+        pairIdx: index().on(table.pair),
+        timestampIdx: index().on(table.timestamp),
+        pairTimestampIdx: index().on(table.pair, table.timestamp),
+        pairBlockIdx: index().on(table.pair, table.blockNumber),
+    })
+);
+
 
 export const StrategyDeployed = onchainTable(
     "strategy_deployed",

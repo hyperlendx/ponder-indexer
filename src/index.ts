@@ -24,6 +24,9 @@ import {
     DepositIsolated,
     WithdrawIsolated,
     UserIsolatedPairTracking,
+    UpdateRateIsolated,
+    AddInterestIsolated,
+    IsolatedPairVaultState,
     // UserCore,
     // UserReserveCore,
     HTokenTransfer,
@@ -672,20 +675,33 @@ ponder.on("IsolatedPair:Deposit", async ({ event, context }) => {
         console.error(`Error fetching reserve price: ${e.message}`);
     }
 
-    // Calculate exchange rate from event data
-    // Exchange rate = assets / shares (in 1e18 precision)
-    const EXCHANGE_PRECISION = 1000000000000000000n; // 1e18
+    const pair = event.transaction.to || "0xNEW";
     const assets = event.args.assets;
     const shares = event.args.shares;
 
-    const exchangeRate = shares > 0n
-        ? (assets * EXCHANGE_PRECISION) / shares
-        : EXCHANGE_PRECISION; // Default 1:1 if no shares
+    // Update vault state (totalAsset.amount and totalAsset.shares)
+    const { updateVaultStateAfterDeposit, calculateExchangeRateFromVaultState, getCurrentVaultState } = await import("./helpers/yield/isolatedPair/vaultState");
+
+    await updateVaultStateAfterDeposit(
+        context.db,
+        pair,
+        assets,
+        shares,
+        Number(event.block.timestamp),
+        Number(event.block.number),
+        event.transaction.hash
+    );
+
+    // Get updated vault state to calculate exchange rate
+    const vaultState = await getCurrentVaultState(context.db, pair);
+    const exchangeRate = vaultState
+        ? calculateExchangeRateFromVaultState(vaultState.totalAssetAmount, vaultState.totalAssetShares)
+        : 1000000000000000000n; // Default 1:1
 
     await context.db.insert(DepositIsolated).values({
         id: event.id,
         txHash: event.transaction.hash,
-        pair: event.transaction.to || "0xNEW",
+        pair: pair as `0x${string}`,
         caller: event.args.caller,
         owner: event.args.owner,
         assets: event.args.assets,
@@ -699,7 +715,7 @@ ponder.on("IsolatedPair:Deposit", async ({ event, context }) => {
     await updateUserIsolatedPairTracking(
         context,
         event.args.owner,
-        event.transaction.to || "0xNEW",
+        pair,
         Number(event.block.timestamp),
         'deposit'
     );
@@ -714,20 +730,33 @@ ponder.on("IsolatedPair:Withdraw", async ({ event, context }) => {
         console.error(`Error fetching reserve price: ${e.message}`);
     }
 
-    // Calculate exchange rate from event data
-    // Exchange rate = assets / shares (in 1e18 precision)
-    const EXCHANGE_PRECISION = 1000000000000000000n; // 1e18
+    const pair = event.transaction.to || "0xNEW";
     const assets = event.args.assets;
     const shares = event.args.shares;
 
-    const exchangeRate = shares > 0n
-        ? (assets * EXCHANGE_PRECISION) / shares
-        : EXCHANGE_PRECISION; // Default 1:1 if no shares
+    // Update vault state (totalAsset.amount and totalAsset.shares)
+    const { updateVaultStateAfterWithdraw, calculateExchangeRateFromVaultState, getCurrentVaultState } = await import("./helpers/yield/isolatedPair/vaultState");
+
+    await updateVaultStateAfterWithdraw(
+        context.db,
+        pair,
+        assets,
+        shares,
+        Number(event.block.timestamp),
+        Number(event.block.number),
+        event.transaction.hash
+    );
+
+    // Get updated vault state to calculate exchange rate
+    const vaultState = await getCurrentVaultState(context.db, pair);
+    const exchangeRate = vaultState
+        ? calculateExchangeRateFromVaultState(vaultState.totalAssetAmount, vaultState.totalAssetShares)
+        : 1000000000000000000n; // Default 1:1
 
     await context.db.insert(WithdrawIsolated).values({
         id: event.id,
         txHash: event.transaction.hash,
-        pair: event.transaction.to || "0xNEW",
+        pair: pair as `0x${string}`,
         caller: event.args.caller,
         owner: event.args.owner,
         receiver: event.args.receiver,
@@ -742,11 +771,57 @@ ponder.on("IsolatedPair:Withdraw", async ({ event, context }) => {
     await updateUserIsolatedPairTracking(
         context,
         event.args.owner,
-        event.transaction.to || "0xNEW",
+        pair,
         Number(event.block.timestamp),
         'withdraw'
     );
 });
+
+// Isolated Pair Rate Events - Enable accurate exchange rate calculations
+
+ponder.on("IsolatedPair:UpdateRate", async ({ event, context }) => {
+    await context.db.insert(UpdateRateIsolated).values({
+        id: event.id,
+        txHash: event.transaction.hash,
+        pair: event.transaction.to || "0xNEW",
+        oldRatePerSec: event.args.oldRatePerSec,
+        oldFullUtilizationRate: event.args.oldFullUtilizationRate,
+        newRatePerSec: event.args.newRatePerSec,
+        newFullUtilizationRate: event.args.newFullUtilizationRate,
+        timestamp: Number(event.block.timestamp),
+    });
+});
+
+ponder.on("IsolatedPair:AddInterest", async ({ event, context }) => {
+    const pair = event.transaction.to || "0xNEW";
+
+    // Update vault state (totalAsset.amount increases by interestEarned, totalAsset.shares increases by feesShare)
+    const { updateVaultStateAfterAddInterest } = await import("./helpers/yield/isolatedPair/vaultState");
+
+    await updateVaultStateAfterAddInterest(
+        context.db,
+        pair,
+        event.args.interestEarned,
+        event.args.feesShare,
+        Number(event.block.timestamp),
+        Number(event.block.number),
+        event.transaction.hash
+    );
+
+    await context.db.insert(AddInterestIsolated).values({
+        id: event.id,
+        txHash: event.transaction.hash,
+        pair: pair as `0x${string}`,
+        interestEarned: event.args.interestEarned,
+        rate: event.args.rate,
+        feesAmount: event.args.feesAmount,
+        feesShare: event.args.feesShare,
+        timestamp: Number(event.block.timestamp),
+    });
+});
+
+// Note: UpdateExchangeRate event is for collateral/asset oracle prices, NOT vault exchange rate
+// We don't need to index it for vault accounting
 
 ponder.on("LoopingStrategyManagerFactory:StrategyDeployed", async ({ event, context }) => {
     await context.db.insert(StrategyDeployed).values({

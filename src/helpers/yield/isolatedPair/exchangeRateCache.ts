@@ -1,4 +1,4 @@
-import { calculateIsolatedPairExchangeRateAtTimestamp } from "./exchangeRate";
+import { calculateIsolatedPairExchangeRate } from "./vaultExchangeRate";
 
 /**
  * In-memory cache for isolated pair exchange rates to avoid redundant database queries
@@ -91,7 +91,7 @@ export class ExchangeRateCache {
         }
         
         // Query database and cache result
-        const rate = await calculateIsolatedPairExchangeRateAtTimestamp(
+        const rate = await calculateIsolatedPairExchangeRate(
             context,
             pair,
             timestamp
@@ -134,14 +134,14 @@ export class ExchangeRateCache {
         // Fetch all uncached rates in parallel
         const promises = uncached.map(async ({ pair, timestamp }) => {
             const key = this.getCacheKey(pair, timestamp);
-            const rate = await calculateIsolatedPairExchangeRateAtTimestamp(
+            const rate = await calculateIsolatedPairExchangeRate(
                 context,
                 pair,
                 timestamp
             );
             this.cache.set(key, rate);
         });
-        
+
         await Promise.all(promises);
     }
     

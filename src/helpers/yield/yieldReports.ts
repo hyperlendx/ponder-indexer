@@ -3,9 +3,7 @@ import { eq, and, gte, lte } from "ponder";
 import {
     getMonthTimestamps,
     calculateLiquidityIndexAtTimestamp,
-    calculateActualBalance,
-    formatRayValue,
-    formatTokenBalance
+    calculateActualBalance
 } from "../aave";
 import { calculateNetDeposits } from "../userPositionManager";
 import {
@@ -710,17 +708,14 @@ export async function calculateUserDailyYieldBreakdown(
     date: string;
     timestamp: number;
     dailyYield: bigint;
-    dailyYieldFormatted: string;
     assets: Array<{
         asset: string;
         dailyYield: bigint;
-        dailyYieldFormatted: string;
         segments: Array<{
             startTime: number;
             endTime: number;
             scaledBalance: string; // String for JSON serialization
             segmentYield: string;  // String for JSON serialization
-            segmentYieldFormatted: string;
             durationHours: number;
         }>;
     }>;
@@ -912,24 +907,21 @@ export async function calculateUserDailyYieldBreakdown(
             }
         }
 
-        // Convert Map results to array format and add formatting
+        // Convert Map results to array format
         // Include ALL days in the period, even those with zero yield for continuous time-series
         const formattedResults = Array.from(dailyResults.values())
             .map(dayData => ({
                 date: dayData.date,
                 timestamp: dayData.timestamp,
                 dailyYield: dayData.dailyYield,
-                dailyYieldFormatted: formatRayValue(dayData.dailyYield),
                 assets: Array.from(dayData.assets.values()).map(assetData => ({
                     asset: assetData.asset,
                     dailyYield: assetData.dailyYield,
-                    dailyYieldFormatted: formatRayValue(assetData.dailyYield),
                     segments: (assetData.segments || []).map(seg => ({
                         startTime: seg.startTime,
                         endTime: seg.endTime,
                         scaledBalance: seg.scaledBalance.toString(), // Convert BigInt to string for JSON serialization
                         segmentYield: seg.segmentYield.toString(),   // Convert BigInt to string for JSON serialization
-                        segmentYieldFormatted: formatRayValue(seg.segmentYield), // Add formatted value
                         durationHours: seg.durationHours
                     }))
                 }))
@@ -1057,19 +1049,13 @@ export async function calculateUserDailyPortfolioValue(
     date: string;
     timestamp: number;
     portfolioValue: bigint;
-    portfolioValueFormatted: string;
     totalSupplied: bigint;
-    totalSuppliedFormatted: string;
     totalBorrowed: bigint;
-    totalBorrowedFormatted: string;
     assets: Array<{
         asset: string;
         supplied: bigint;
-        suppliedFormatted: string;
         borrowed: bigint;
-        borrowedFormatted: string;
         netPosition: bigint;
-        netPositionFormatted: string;
     }>;
 }>> {
     try {
@@ -1218,10 +1204,8 @@ export async function calculateUserDailyPortfolioValue(
             }
         }
 
-        // Convert Map results to array format with formatting
-        const TOKEN_DECIMALS = 18;
-
-        const formattedResults = Array.from(dailyResults.values())
+        // Convert Map results to array format
+        const results = Array.from(dailyResults.values())
             .map(dayData => {
                 const portfolioValue = dayData.totalSupplied - dayData.totalBorrowed;
 
@@ -1229,28 +1213,22 @@ export async function calculateUserDailyPortfolioValue(
                     date: dayData.date,
                     timestamp: dayData.timestamp,
                     portfolioValue,
-                    portfolioValueFormatted: formatTokenBalance(portfolioValue, TOKEN_DECIMALS),
                     totalSupplied: dayData.totalSupplied,
-                    totalSuppliedFormatted: formatTokenBalance(dayData.totalSupplied, TOKEN_DECIMALS),
                     totalBorrowed: dayData.totalBorrowed,
-                    totalBorrowedFormatted: formatTokenBalance(dayData.totalBorrowed, TOKEN_DECIMALS),
                     assets: Array.from(dayData.assets.values()).map(assetData => {
                         const netPosition = assetData.supplied - assetData.borrowed;
                         return {
                             asset: assetData.asset,
                             supplied: assetData.supplied,
-                            suppliedFormatted: formatTokenBalance(assetData.supplied, TOKEN_DECIMALS),
                             borrowed: assetData.borrowed,
-                            borrowedFormatted: formatTokenBalance(assetData.borrowed, TOKEN_DECIMALS),
-                            netPosition,
-                            netPositionFormatted: formatTokenBalance(netPosition, TOKEN_DECIMALS)
+                            netPosition
                         };
                     })
                 };
             })
             .sort((a, b) => a.timestamp - b.timestamp);
 
-        return formattedResults;
+        return results;
 
     } catch (error) {
         console.error(`❌ Error in calculateUserDailyPortfolioValue for user ${user}:`, error);
