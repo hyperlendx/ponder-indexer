@@ -1,11 +1,12 @@
 /**
  * Vault State Management for Isolated Pairs
- * 
+ *
  * This module tracks the totalAsset.amount and totalAsset.shares for each isolated pair,
  * mirroring the VaultAccount struct in the contract.
  */
 
 import { IsolatedPairVaultState } from "../../../../ponder.schema";
+import { eq, lte, desc, and } from "ponder";
 
 /**
  * Get the current vault state for a pair
@@ -14,11 +15,14 @@ export async function getCurrentVaultState(
     db: any,
     pair: string
 ): Promise<{ totalAssetAmount: bigint; totalAssetShares: bigint } | null> {
-    const states = await db
+    // Handle both indexing context (db.sql) and API context (db)
+    const dbQuery = db.sql || db;
+
+    const states = await dbQuery
         .select()
         .from(IsolatedPairVaultState)
-        .where((row: any) => row.pair === pair)
-        .orderBy((row: any) => row.timestamp, "desc")
+        .where(eq(IsolatedPairVaultState.pair, pair as `0x${string}`))
+        .orderBy(desc(IsolatedPairVaultState.timestamp))
         .limit(1);
 
     if (!states || states.length === 0) {
@@ -39,11 +43,19 @@ export async function getVaultStateAtTimestamp(
     pair: string,
     targetTimestamp: number
 ): Promise<{ totalAssetAmount: bigint; totalAssetShares: bigint } | null> {
-    const states = await db
+    // Handle both indexing context (db.sql) and API context (db)
+    const dbQuery = db.sql || db;
+
+    const states = await dbQuery
         .select()
         .from(IsolatedPairVaultState)
-        .where((row: any) => row.pair === pair && row.timestamp <= targetTimestamp)
-        .orderBy((row: any) => row.timestamp, "desc")
+        .where(
+            and(
+                eq(IsolatedPairVaultState.pair, pair as `0x${string}`),
+                lte(IsolatedPairVaultState.timestamp, targetTimestamp)
+            )
+        )
+        .orderBy(desc(IsolatedPairVaultState.timestamp))
         .limit(1);
 
     if (!states || states.length === 0) {
@@ -67,7 +79,8 @@ export async function updateVaultStateAfterDeposit(
     shares: bigint,
     timestamp: number,
     blockNumber: number,
-    txHash: string
+    txHash: string,
+    eventId: string
 ): Promise<void> {
     const currentState = await getCurrentVaultState(db, pair);
 
@@ -79,7 +92,7 @@ export async function updateVaultStateAfterDeposit(
         : shares;
 
     await db.insert(IsolatedPairVaultState).values({
-        id: `${pair}-${timestamp}-${blockNumber}`,
+        id: `${pair}-${eventId}`,
         pair: pair as `0x${string}`,
         totalAssetAmount: newTotalAssetAmount,
         totalAssetShares: newTotalAssetShares,
@@ -100,7 +113,8 @@ export async function updateVaultStateAfterWithdraw(
     shares: bigint,
     timestamp: number,
     blockNumber: number,
-    txHash: string
+    txHash: string,
+    eventId: string
 ): Promise<void> {
     const currentState = await getCurrentVaultState(db, pair);
 
@@ -113,7 +127,7 @@ export async function updateVaultStateAfterWithdraw(
     const newTotalAssetShares = currentState.totalAssetShares - shares;
 
     await db.insert(IsolatedPairVaultState).values({
-        id: `${pair}-${timestamp}-${blockNumber}`,
+        id: `${pair}-${eventId}`,
         pair: pair as `0x${string}`,
         totalAssetAmount: newTotalAssetAmount,
         totalAssetShares: newTotalAssetShares,
@@ -134,7 +148,8 @@ export async function updateVaultStateAfterAddInterest(
     feesShare: bigint,
     timestamp: number,
     blockNumber: number,
-    txHash: string
+    txHash: string,
+    eventId: string
 ): Promise<void> {
     const currentState = await getCurrentVaultState(db, pair);
 
@@ -147,7 +162,7 @@ export async function updateVaultStateAfterAddInterest(
     const newTotalAssetShares = currentState.totalAssetShares + feesShare;
 
     await db.insert(IsolatedPairVaultState).values({
-        id: `${pair}-${timestamp}-${blockNumber}`,
+        id: `${pair}-${eventId}`,
         pair: pair as `0x${string}`,
         totalAssetAmount: newTotalAssetAmount,
         totalAssetShares: newTotalAssetShares,

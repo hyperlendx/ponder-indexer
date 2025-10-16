@@ -689,7 +689,8 @@ ponder.on("IsolatedPair:Deposit", async ({ event, context }) => {
         shares,
         Number(event.block.timestamp),
         Number(event.block.number),
-        event.transaction.hash
+        event.transaction.hash,
+        event.id
     );
 
     // Get updated vault state to calculate exchange rate
@@ -744,7 +745,8 @@ ponder.on("IsolatedPair:Withdraw", async ({ event, context }) => {
         shares,
         Number(event.block.timestamp),
         Number(event.block.number),
-        event.transaction.hash
+        event.transaction.hash,
+        event.id
     );
 
     // Get updated vault state to calculate exchange rate
@@ -805,7 +807,8 @@ ponder.on("IsolatedPair:AddInterest", async ({ event, context }) => {
         event.args.feesShare,
         Number(event.block.timestamp),
         Number(event.block.number),
-        event.transaction.hash
+        event.transaction.hash,
+        event.id
     );
 
     await context.db.insert(AddInterestIsolated).values({
