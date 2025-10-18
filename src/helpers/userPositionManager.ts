@@ -1,4 +1,4 @@
-import { UserPosition, UserBalanceEvent, ReserveDataEvent, Borrow } from "ponder:schema";
+import { UserPosition, UserBalanceEvent, ReserveDataEvent, Borrow, Repay } from "ponder:schema";
 import { calculateLiquidityIndexAtTimestamp, calculateActualBalance, RAY } from "./aave";
 import { eq, and, gte, lte, desc } from "ponder";
 
@@ -354,6 +354,47 @@ export async function calculateTotalSupplied(
 }
 
 /**
+ * Calculate total withdrawn amount for a user in a specific time period
+ * This includes all withdrawals and transfers out, regardless of deposits
+ */
+export async function calculateTotalWithdrawn(
+    context: any,
+    user: string,
+    asset: string,
+    startTimestamp: number,
+    endTimestamp: number
+): Promise<bigint> {
+    const { db } = context;
+
+    const dbQuery = db.sql || db;
+    const events = await dbQuery
+        .select()
+        .from(UserBalanceEvent)
+        .where(
+            and(
+                eq(UserBalanceEvent.user, user as `0x${string}`),
+                eq(UserBalanceEvent.asset, asset as `0x${string}`),
+                gte(UserBalanceEvent.timestamp, startTimestamp),
+                lte(UserBalanceEvent.timestamp, endTimestamp)
+            )
+        );
+
+    let totalWithdrawn = 0n;
+
+    for (const event of events) {
+        // Convert transaction amount to actual amount using liquidity index
+        const actualAmount = calculateActualBalance(event.transactionAmount, event.liquidityIndex);
+
+        // Only count withdrawal events (withdrawals and transfers out)
+        if (event.eventType === 'withdraw' || event.eventType === 'transfer_out') {
+            totalWithdrawn += actualAmount;
+        }
+    }
+
+    return totalWithdrawn;
+}
+
+/**
  * Calculate total borrowed amount for a user in a specific time period
  * This includes all borrow transactions during the period
  */
@@ -386,4 +427,39 @@ export async function calculateTotalBorrowed(
     }
 
     return totalBorrowed;
+}
+
+/**
+ * Calculate total repaid amount for a user in a specific time period
+ * This includes all repay transactions during the period
+ */
+export async function calculateTotalRepaid(
+    context: any,
+    user: string,
+    asset: string,
+    startTimestamp: number,
+    endTimestamp: number
+): Promise<bigint> {
+    const { db } = context;
+
+    const dbQuery = db.sql || db;
+    const repayEvents = await dbQuery
+        .select()
+        .from(Repay)
+        .where(
+            and(
+                eq(Repay.user, user as `0x${string}`),
+                eq(Repay.reserve, asset as `0x${string}`),
+                gte(Repay.timestamp, startTimestamp),
+                lte(Repay.timestamp, endTimestamp)
+            )
+        );
+
+    let totalRepaid = 0n;
+
+    for (const event of repayEvents) {
+        totalRepaid += event.amount;
+    }
+
+    return totalRepaid;
 }

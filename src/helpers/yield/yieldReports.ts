@@ -449,34 +449,63 @@ function getMonthName(year: number, month: number): string {
  *
  * This is optimized for long-term analysis (≥ 1 month periods) and leverages
  * the existing monthly caching system for completed months.
+ *
+ * **Partial Month Support:** If endTimestamp is not at a month boundary (first day of next month),
+ * also calculates current month's yield at endTimestamp and returns it separately.
  */
 export async function calculateUserMonthlyYieldBreakdown(
     context: any,
     user: string,
     fromTimestamp: number,
     toTimestamp: number
-): Promise<Array<{
-    year: number;
-    month: number;
-    monthName: string;
-    startDate: string;
-    endDate: string;
-    totalYield: bigint;
-    assets: Array<{
-        asset: string;
-        monthlyYield: bigint;
-        netDeposits: bigint;
-        hadPositionDuringMonth: boolean;
-        maxBalanceDuringMonth: bigint;
+): Promise<{
+    monthlyValues: Array<{
+        year: number;
+        month: number;
+        monthName: string;
+        startDate: string;
+        endDate: string;
+        totalYield: bigint;
+        assets: Array<{
+            asset: string;
+            monthlyYield: bigint;
+            netDeposits: bigint;
+            hadPositionDuringMonth: boolean;
+            maxBalanceDuringMonth: bigint;
+        }>;
     }>;
-}>> {
+    currentValue?: {
+        year: number;
+        month: number;
+        monthName: string;
+        startDate: string;
+        endDate: string;
+        totalYield: bigint;
+        isPartialMonth: boolean;
+        daysInPeriod: number;
+        assets: Array<{
+            asset: string;
+            monthlyYield: bigint;
+            netDeposits: bigint;
+            hadPositionDuringMonth: boolean;
+            maxBalanceDuringMonth: bigint;
+        }>;
+    };
+}> {
     try {
-        // Parse date range into individual months
-        const months = getMonthsInRange(fromTimestamp, toTimestamp);
+        // Check if endTimestamp is at a month boundary
+        const endDate = new Date(toTimestamp * 1000);
+        const currentMonthStart = new Date(Date.UTC(endDate.getUTCFullYear(), endDate.getUTCMonth(), 1));
+        const nextMonthStart = new Date(Date.UTC(endDate.getUTCFullYear(), endDate.getUTCMonth() + 1, 1));
+        const nextMonthStartTimestamp = Math.floor(nextMonthStart.getTime() / 1000);
+        const isPartialMonth = toTimestamp < nextMonthStartTimestamp;
 
-        if (months.length === 0) {
-            return [];
-        }
+        // Parse date range into individual complete months only
+        const endTimestampForMonths = isPartialMonth
+            ? Math.floor(currentMonthStart.getTime() / 1000)
+            : toTimestamp;
+        const months = getMonthsInRange(fromTimestamp, endTimestampForMonths);
+
 
         // Calculate yield for each month in parallel
         const monthlyResults = await Promise.all(
@@ -522,7 +551,68 @@ export async function calculateUserMonthlyYieldBreakdown(
             })
         );
 
-        return monthlyResults;
+        // Calculate current partial month yield if needed
+        let currentValue: {
+            year: number;
+            month: number;
+            monthName: string;
+            startDate: string;
+            endDate: string;
+            totalYield: bigint;
+            isPartialMonth: boolean;
+            daysInPeriod: number;
+            assets: Array<{
+                asset: string;
+                monthlyYield: bigint;
+                netDeposits: bigint;
+                hadPositionDuringMonth: boolean;
+                maxBalanceDuringMonth: bigint;
+            }>;
+        } | undefined;
+
+        if (isPartialMonth) {
+            try {
+                const currentMonthStartTimestamp = Math.floor(currentMonthStart.getTime() / 1000);
+                const currentYear = endDate.getUTCFullYear();
+                const currentMonth = endDate.getUTCMonth() + 1;
+
+                // Calculate yield for current partial month using custom period calculation
+                const yieldData = await calculateUserCustomPeriodYield(context, user, currentMonthStartTimestamp, toTimestamp);
+
+                // Aggregate yield across all assets
+                const totalYield = yieldData.reduce((sum, asset) => sum + asset.periodYield, 0n);
+
+                // Calculate days in partial month period
+                const daysInPeriod = Math.ceil((toTimestamp - currentMonthStartTimestamp) / (24 * 60 * 60));
+
+                currentValue = {
+                    year: currentYear,
+                    month: currentMonth,
+                    monthName: getMonthName(currentYear, currentMonth),
+                    startDate: currentMonthStart.toISOString().split('T')[0]!,
+                    endDate: endDate.toISOString().split('T')[0]!,
+                    totalYield,
+                    isPartialMonth: true,
+                    daysInPeriod,
+                    assets: yieldData.map(asset => ({
+                        asset: asset.asset,
+                        monthlyYield: asset.periodYield,
+                        netDeposits: asset.netDeposits,
+                        hadPositionDuringMonth: asset.hadPositionDuringPeriod,
+                        maxBalanceDuringMonth: asset.maxBalanceDuringPeriod
+                    }))
+                };
+            } catch (error) {
+                console.error(`❌ Error calculating current partial month yield:`, error);
+                // Continue without current value on error
+                currentValue = undefined;
+            }
+        }
+
+        return {
+            monthlyValues: monthlyResults,
+            currentValue
+        };
 
     } catch (error) {
         console.error(`❌ Error in calculateUserMonthlyYieldBreakdown for user ${user}:`, error);
@@ -536,112 +626,213 @@ export async function calculateUserMonthlyYieldBreakdown(
  *
  * This is optimized for long-term portfolio tracking (≥ 1 month periods).
  * Portfolio values include all accrued interest.
+ *
+ * **Partial Month Support:** If endTimestamp is not at a month boundary (first day of next month),
+ * also calculates current portfolio value at endTimestamp and returns it separately.
  */
 export async function calculateUserMonthlyPortfolioValue(
     context: any,
     user: string,
     fromTimestamp: number,
     toTimestamp: number
-): Promise<Array<{
-    year: number;
-    month: number;
-    monthName: string;
-    endDate: string;
-    endTimestamp: number;
-    portfolioValue: bigint;
-    totalSupplied: bigint;
-    totalBorrowed: bigint;
-    assets: Array<{
-        asset: string;
-        supplied: bigint;
-        borrowed: bigint;
-        netPosition: bigint;
+): Promise<{
+    monthlyValues: Array<{
+        year: number;
+        month: number;
+        monthName: string;
+        endDate: string;
+        endTimestamp: number;
+        portfolioValue: bigint;
+        totalSupplied: bigint;
+        totalBorrowed: bigint;
+        assets: Array<{
+            asset: string;
+            supplied: bigint;
+            borrowed: bigint;
+            netPosition: bigint;
+        }>;
     }>;
-}>> {
+    currentValue?: {
+        year: number;
+        month: number;
+        monthName: string;
+        startDate: string;
+        endDate: string;
+        endTimestamp: number;
+        portfolioValue: bigint;
+        totalSupplied: bigint;
+        totalBorrowed: bigint;
+        isPartialMonth: boolean;
+        daysInPeriod: number;
+        assets: Array<{
+            asset: string;
+            supplied: bigint;
+            borrowed: bigint;
+            netPosition: bigint;
+        }>;
+    };
+}> {
     try {
-        // Parse date range into individual months
-        const months = getMonthsInRange(fromTimestamp, toTimestamp);
+        // Check if endTimestamp is at a month boundary (first day of next month at midnight UTC)
+        const endDate = new Date(toTimestamp * 1000);
+        const currentMonthStart = new Date(Date.UTC(endDate.getUTCFullYear(), endDate.getUTCMonth(), 1));
+        const nextMonthStart = new Date(Date.UTC(endDate.getUTCFullYear(), endDate.getUTCMonth() + 1, 1));
+        const nextMonthStartTimestamp = Math.floor(nextMonthStart.getTime() / 1000);
+        const isPartialMonth = toTimestamp < nextMonthStartTimestamp;
 
-        if (months.length === 0) {
-            return [];
-        }
+        // Parse date range into individual complete months only
+        const endTimestampForMonths = isPartialMonth
+            ? Math.floor(currentMonthStart.getTime() / 1000)
+            : toTimestamp;
+        const months = getMonthsInRange(fromTimestamp, endTimestampForMonths);
 
         // Get all assets user had positions in during the entire period
         const suppliedAssets = await getUserAssetsForPeriod(context, user, fromTimestamp, toTimestamp);
         const borrowedAssets = await getUserBorrowedAssets(context, user, fromTimestamp, toTimestamp);
         const allAssets = Array.from(new Set([...suppliedAssets, ...borrowedAssets]));
 
-        if (allAssets.length === 0) {
-            return [];
+        if (allAssets.length === 0 && !isPartialMonth) {
+            return {
+                monthlyValues: [],
+                currentValue: undefined
+            };
         }
-
-        // Initialize liquidity index cache and borrow index cache
-        const indexCache = new LiquidityIndexCache();
-        const borrowIndexCache = new BorrowIndexCache();
-
-        // Prefetch all liquidity indices and borrow indices we'll need (months × assets)
-        const indexPrefetchList = [];
-        for (const { year, month } of months) {
-            const { endTimestamp } = getMonthTimestamps(year, month);
-            for (const asset of allAssets) {
-                indexPrefetchList.push({ asset, timestamp: endTimestamp });
-            }
-        }
-        await Promise.all([
-            indexCache.prefetch(context, indexPrefetchList),
-            borrowIndexCache.prefetch(context, indexPrefetchList)
-        ]);
 
         // Calculate portfolio value for each month in parallel
         const monthlyResults = await Promise.all(
             months.map(async ({ year, month }) => {
                 try {
-                    const { endTimestamp } = getMonthTimestamps(year, month);
+                    const { startTimestamp, endTimestamp } = getMonthTimestamps(year, month);
 
-                    let totalSupplied = 0n;
-                    let totalBorrowed = 0n;
-                    const assetData: Array<{
+                    // Get all timestamps during this month where user had balance changes
+                    const dbQuery = context.db.sql || context.db;
+                    const balanceEvents = await dbQuery
+                        .select()
+                        .from(UserBalanceEvent)
+                        .where(
+                            and(
+                                eq(UserBalanceEvent.user, user as `0x${string}`),
+                                gte(UserBalanceEvent.timestamp, startTimestamp),
+                                lte(UserBalanceEvent.timestamp, endTimestamp)
+                            )
+                        );
+
+                    // Get all timestamps where user had borrow/repay events
+                    const { Borrow, Repay } = await import("ponder:schema");
+                    const [borrowEvents, repayEvents] = await Promise.all([
+                        dbQuery
+                            .select()
+                            .from(Borrow)
+                            .where(
+                                and(
+                                    eq(Borrow.onBehalfOf, user as `0x${string}`),
+                                    gte(Borrow.timestamp, startTimestamp),
+                                    lte(Borrow.timestamp, endTimestamp)
+                                )
+                            ),
+                        dbQuery
+                            .select()
+                            .from(Repay)
+                            .where(
+                                and(
+                                    eq(Repay.user, user as `0x${string}`),
+                                    gte(Repay.timestamp, startTimestamp),
+                                    lte(Repay.timestamp, endTimestamp)
+                                )
+                            )
+                    ]);
+
+                    // Collect all unique timestamps (start, end, and all event timestamps)
+                    const timestampsSet = new Set<number>();
+                    timestampsSet.add(startTimestamp);
+                    timestampsSet.add(endTimestamp);
+                    balanceEvents.forEach((event: any) => timestampsSet.add(event.timestamp));
+                    borrowEvents.forEach((event: any) => timestampsSet.add(event.timestamp));
+                    repayEvents.forEach((event: any) => timestampsSet.add(event.timestamp));
+
+                    const timestamps = Array.from(timestampsSet).sort((a, b) => a - b);
+
+                    // Initialize caches for this month
+                    const indexCache = new LiquidityIndexCache();
+                    const borrowIndexCache = new BorrowIndexCache();
+
+                    // Prefetch all indices we'll need
+                    const indexPrefetchList = [];
+                    for (const timestamp of timestamps) {
+                        for (const asset of allAssets) {
+                            indexPrefetchList.push({ asset, timestamp });
+                        }
+                    }
+                    await Promise.all([
+                        indexCache.prefetch(context, indexPrefetchList),
+                        borrowIndexCache.prefetch(context, indexPrefetchList)
+                    ]);
+
+                    // Calculate portfolio value at each timestamp and track maximum
+                    let maxPortfolioValue = 0n;
+                    let maxTotalSupplied = 0n;
+                    let maxTotalBorrowed = 0n;
+                    let maxAssetData: Array<{
                         asset: string;
                         supplied: bigint;
                         borrowed: bigint;
                         netPosition: bigint;
                     }> = [];
 
-                    // Calculate supplied and borrowed for each asset at month-end
-                    await Promise.all(
-                        allAssets.map(async (asset) => {
-                            try {
-                                // Get supplied balance (with accrued interest)
-                                const scaledBalance = await getScaledBalanceAtTimestamp(context, user, asset, endTimestamp);
-                                const liquidityIndex = await indexCache.get(context, asset, endTimestamp);
-                                const suppliedBalance = calculateActualBalance(scaledBalance, liquidityIndex);
+                    for (const timestamp of timestamps) {
+                        let totalSupplied = 0n;
+                        let totalBorrowed = 0n;
+                        const assetData: Array<{
+                            asset: string;
+                            supplied: bigint;
+                            borrowed: bigint;
+                            netPosition: bigint;
+                        }> = [];
 
-                                // Get borrowed balance (with accrued interest)
-                                const scaledBorrowBalance = await getScaledBorrowBalanceAtTimestamp(context, user, asset, endTimestamp);
-                                const variableBorrowIndex = await borrowIndexCache.get(context, asset, endTimestamp);
-                                const borrowedBalance = calculateActualBalance(scaledBorrowBalance, variableBorrowIndex);
+                        // Calculate supplied and borrowed for each asset at this timestamp
+                        await Promise.all(
+                            allAssets.map(async (asset) => {
+                                try {
+                                    // Get supplied balance (with accrued interest)
+                                    const scaledBalance = await getScaledBalanceAtTimestamp(context, user, asset, timestamp);
+                                    const liquidityIndex = await indexCache.get(context, asset, timestamp);
+                                    const suppliedBalance = calculateActualBalance(scaledBalance, liquidityIndex);
 
-                                // Only include assets with non-zero positions
-                                if (suppliedBalance > 0n || borrowedBalance > 0n) {
-                                    const netPosition = suppliedBalance - borrowedBalance;
+                                    // Get borrowed balance (with accrued interest)
+                                    const scaledBorrowBalance = await getScaledBorrowBalanceAtTimestamp(context, user, asset, timestamp);
+                                    const variableBorrowIndex = await borrowIndexCache.get(context, asset, timestamp);
+                                    const borrowedBalance = calculateActualBalance(scaledBorrowBalance, variableBorrowIndex);
 
-                                    assetData.push({
-                                        asset,
-                                        supplied: suppliedBalance,
-                                        borrowed: borrowedBalance,
-                                        netPosition
-                                    });
+                                    // Only include assets with non-zero positions
+                                    if (suppliedBalance > 0n || borrowedBalance > 0n) {
+                                        const netPosition = suppliedBalance - borrowedBalance;
 
-                                    totalSupplied += suppliedBalance;
-                                    totalBorrowed += borrowedBalance;
+                                        assetData.push({
+                                            asset,
+                                            supplied: suppliedBalance,
+                                            borrowed: borrowedBalance,
+                                            netPosition
+                                        });
+
+                                        totalSupplied += suppliedBalance;
+                                        totalBorrowed += borrowedBalance;
+                                    }
+                                } catch (error) {
+                                    console.error(`❌ Error calculating balance for asset ${asset} at timestamp ${timestamp}:`, error);
                                 }
-                            } catch (error) {
-                                console.error(`❌ Error calculating balance for asset ${asset} at ${year}-${month}:`, error);
-                            }
-                        })
-                    );
+                            })
+                        );
 
-                    const portfolioValue = totalSupplied - totalBorrowed;
+                        const portfolioValue = totalSupplied - totalBorrowed;
+
+                        // Update maximum if this is higher
+                        if (portfolioValue > maxPortfolioValue) {
+                            maxPortfolioValue = portfolioValue;
+                            maxTotalSupplied = totalSupplied;
+                            maxTotalBorrowed = totalBorrowed;
+                            maxAssetData = assetData;
+                        }
+                    }
 
                     return {
                         year,
@@ -649,10 +840,10 @@ export async function calculateUserMonthlyPortfolioValue(
                         monthName: getMonthName(year, month),
                         endDate: new Date(endTimestamp * 1000).toISOString(),
                         endTimestamp,
-                        portfolioValue,
-                        totalSupplied,
-                        totalBorrowed,
-                        assets: assetData.sort((a, b) => {
+                        portfolioValue: maxPortfolioValue,
+                        totalSupplied: maxTotalSupplied,
+                        totalBorrowed: maxTotalBorrowed,
+                        assets: maxAssetData.sort((a, b) => {
                             // Sort by net position descending
                             if (b.netPosition > a.netPosition) return 1;
                             if (b.netPosition < a.netPosition) return -1;
@@ -678,7 +869,163 @@ export async function calculateUserMonthlyPortfolioValue(
             })
         );
 
-        return monthlyResults;
+        // Calculate current partial month value if needed
+        let currentValue: {
+            year: number;
+            month: number;
+            monthName: string;
+            startDate: string;
+            endDate: string;
+            endTimestamp: number;
+            portfolioValue: bigint;
+            totalSupplied: bigint;
+            totalBorrowed: bigint;
+            isPartialMonth: boolean;
+            daysInPeriod: number;
+            assets: Array<{
+                asset: string;
+                supplied: bigint;
+                borrowed: bigint;
+                netPosition: bigint;
+            }>;
+        } | undefined;
+
+        if (isPartialMonth && allAssets.length > 0) {
+            try {
+                const currentMonthStartTimestamp = Math.floor(currentMonthStart.getTime() / 1000);
+                const currentYear = endDate.getUTCFullYear();
+                const currentMonth = endDate.getUTCMonth() + 1;
+
+                // Get all timestamps during current partial month where user had balance changes
+                const dbQuery = context.db.sql || context.db;
+                const balanceEvents = await dbQuery
+                    .select()
+                    .from(UserBalanceEvent)
+                    .where(
+                        and(
+                            eq(UserBalanceEvent.user, user as `0x${string}`),
+                            gte(UserBalanceEvent.timestamp, currentMonthStartTimestamp),
+                            lte(UserBalanceEvent.timestamp, toTimestamp)
+                        )
+                    );
+
+                // Get all timestamps where user had borrow/repay events
+                const { Borrow, Repay } = await import("ponder:schema");
+                const [borrowEvents, repayEvents] = await Promise.all([
+                    dbQuery
+                        .select()
+                        .from(Borrow)
+                        .where(
+                            and(
+                                eq(Borrow.onBehalfOf, user as `0x${string}`),
+                                gte(Borrow.timestamp, currentMonthStartTimestamp),
+                                lte(Borrow.timestamp, toTimestamp)
+                            )
+                        ),
+                    dbQuery
+                        .select()
+                        .from(Repay)
+                        .where(
+                            and(
+                                eq(Repay.user, user as `0x${string}`),
+                                gte(Repay.timestamp, currentMonthStartTimestamp),
+                                lte(Repay.timestamp, toTimestamp)
+                            )
+                        )
+                ]);
+
+                // Collect all unique timestamps
+                const timestampsSet = new Set<number>();
+                timestampsSet.add(currentMonthStartTimestamp);
+                timestampsSet.add(toTimestamp);
+                balanceEvents.forEach((event: any) => timestampsSet.add(event.timestamp));
+                borrowEvents.forEach((event: any) => timestampsSet.add(event.timestamp));
+                repayEvents.forEach((event: any) => timestampsSet.add(event.timestamp));
+
+                const timestamps = Array.from(timestampsSet).sort((a, b) => a - b);
+
+                // Initialize caches
+                const indexCache = new LiquidityIndexCache();
+                const borrowIndexCache = new BorrowIndexCache();
+
+                // Prefetch all indices
+                const indexPrefetchList = [];
+                for (const timestamp of timestamps) {
+                    for (const asset of allAssets) {
+                        indexPrefetchList.push({ asset, timestamp });
+                    }
+                }
+                await Promise.all([
+                    indexCache.prefetch(context, indexPrefetchList),
+                    borrowIndexCache.prefetch(context, indexPrefetchList)
+                ]);
+
+                // Calculate portfolio value at toTimestamp
+                const assetResults: Array<{
+                    asset: string;
+                    supplied: bigint;
+                    borrowed: bigint;
+                    netPosition: bigint;
+                }> = [];
+
+                let totalSupplied = 0n;
+                let totalBorrowed = 0n;
+
+                for (const asset of allAssets) {
+                    // Get supplied balance at toTimestamp
+                    const scaledBalance = await getScaledBalanceAtTimestamp(context, user, asset, toTimestamp);
+                    const liquidityIndex = await indexCache.get(context, asset, toTimestamp);
+                    const suppliedBalance = calculateActualBalance(scaledBalance, liquidityIndex);
+
+                    // Get borrowed balance at toTimestamp
+                    const scaledBorrowBalance = await getScaledBorrowBalanceAtTimestamp(context, user, asset, toTimestamp);
+                    const variableBorrowIndex = await borrowIndexCache.get(context, asset, toTimestamp);
+                    const borrowedBalance = calculateActualBalance(scaledBorrowBalance, variableBorrowIndex);
+
+                    if (suppliedBalance > 0n || borrowedBalance > 0n) {
+                        totalSupplied += suppliedBalance;
+                        totalBorrowed += borrowedBalance;
+                        assetResults.push({
+                            asset,
+                            supplied: suppliedBalance,
+                            borrowed: borrowedBalance,
+                            netPosition: suppliedBalance - borrowedBalance
+                        });
+                    }
+                }
+
+                // Calculate days in partial month period
+                const daysInPeriod = Math.ceil((toTimestamp - currentMonthStartTimestamp) / (24 * 60 * 60));
+
+                currentValue = {
+                    year: currentYear,
+                    month: currentMonth,
+                    monthName: getMonthName(currentYear, currentMonth),
+                    startDate: currentMonthStart.toISOString().split('T')[0]!,
+                    endDate: endDate.toISOString().split('T')[0]!,
+                    endTimestamp: toTimestamp,
+                    portfolioValue: totalSupplied - totalBorrowed,
+                    totalSupplied,
+                    totalBorrowed,
+                    isPartialMonth: true,
+                    daysInPeriod,
+                    assets: assetResults.sort((a, b) => {
+                        if (a.netPosition > b.netPosition) return -1;
+                        if (a.netPosition < b.netPosition) return 1;
+                        return 0;
+                    })
+                };
+            } catch (error) {
+                console.error(`❌ Error calculating current partial month portfolio value:`, error);
+                // Continue without current value on error
+                currentValue = undefined;
+            }
+        }
+
+        return {
+            monthlyValues: monthlyResults,
+            currentValue
+        };
 
     } catch (error) {
         console.error(`❌ Error in calculateUserMonthlyPortfolioValue for user ${user}:`, error);
@@ -1032,22 +1379,20 @@ function calculateBorrowedFromEvents(
 }
 
 /**
- * Calculate daily portfolio values for a user over a custom time period
- * Portfolio Value = Total Supplied - Total Borrowed
- *
- * Returns daily breakdown showing supplied and borrowed amounts per asset,
- * suitable for portfolio value charts and net worth tracking.
- *
- * Batch fetches all data upfront, eliminating O(days × assets × 2) query pattern
+ * Calculate portfolio value at a specific timestamp
+ * Helper function used by both daily and current value calculations
  */
-export async function calculateUserDailyPortfolioValue(
+async function calculatePortfolioValueAtTimestamp(
     context: any,
     user: string,
-    startTimestamp: number,
-    endTimestamp: number
-): Promise<Array<{
-    date: string;
-    timestamp: number;
+    timestamp: number,
+    allAssets: string[],
+    balanceEventsByAsset: Map<string, any[]>,
+    borrowsByAsset: Map<string, any[]>,
+    repaysByAsset: Map<string, any[]>,
+    indexCache: LiquidityIndexCache,
+    borrowIndexCache: BorrowIndexCache
+): Promise<{
     portfolioValue: bigint;
     totalSupplied: bigint;
     totalBorrowed: bigint;
@@ -1057,7 +1402,96 @@ export async function calculateUserDailyPortfolioValue(
         borrowed: bigint;
         netPosition: bigint;
     }>;
-}>> {
+}> {
+    let totalSupplied = 0n;
+    let totalBorrowed = 0n;
+    const assets: Array<{
+        asset: string;
+        supplied: bigint;
+        borrowed: bigint;
+        netPosition: bigint;
+    }> = [];
+
+    for (const asset of allAssets) {
+        const balanceEvents = balanceEventsByAsset.get(asset) || [];
+        const borrows = borrowsByAsset.get(asset) || [];
+        const repays = repaysByAsset.get(asset) || [];
+
+        // Calculate supplied balance
+        const scaledBalance = calculateBalanceFromEvents(balanceEvents, timestamp);
+        const liquidityIndex = await indexCache.get(context, asset, timestamp);
+        const suppliedBalance = calculateActualBalance(scaledBalance, liquidityIndex);
+
+        // Calculate borrowed balance
+        const variableBorrowIndex = await borrowIndexCache.get(context, asset, timestamp);
+        const borrowedBalance = calculateBorrowedFromEvents(borrows, repays, timestamp, variableBorrowIndex);
+
+        if (suppliedBalance > 0n || borrowedBalance > 0n) {
+            totalSupplied += suppliedBalance;
+            totalBorrowed += borrowedBalance;
+            assets.push({
+                asset,
+                supplied: suppliedBalance,
+                borrowed: borrowedBalance,
+                netPosition: suppliedBalance - borrowedBalance
+            });
+        }
+    }
+
+    return {
+        portfolioValue: totalSupplied - totalBorrowed,
+        totalSupplied,
+        totalBorrowed,
+        assets
+    };
+}
+
+/**
+ * Calculate daily portfolio values for a user over a custom time period
+ * Portfolio Value = Total Supplied - Total Borrowed
+ *
+ * Returns daily breakdown showing supplied and borrowed amounts per asset,
+ * suitable for portfolio value charts and net worth tracking.
+ *
+ * Batch fetches all data upfront, eliminating O(days × assets × 2) query pattern
+ *
+ * If toTimestamp is not at a day boundary (midnight UTC), also calculates current
+ * portfolio value at toTimestamp and returns it separately.
+ */
+export async function calculateUserDailyPortfolioValue(
+    context: any,
+    user: string,
+    startTimestamp: number,
+    endTimestamp: number
+): Promise<{
+    dailyValues: Array<{
+        date: string;
+        timestamp: number;
+        portfolioValue: bigint;
+        totalSupplied: bigint;
+        totalBorrowed: bigint;
+        assets: Array<{
+            asset: string;
+            supplied: bigint;
+            borrowed: bigint;
+            netPosition: bigint;
+        }>;
+    }>;
+    currentValue?: {
+        date: string;
+        timestamp: number;
+        portfolioValue: bigint;
+        totalSupplied: bigint;
+        totalBorrowed: bigint;
+        isPartialDay: boolean;
+        assets: Array<{
+            asset: string;
+            supplied: bigint;
+            borrowed: bigint;
+            netPosition: bigint;
+        }>;
+    };
+}> {
     try {
         // Get all assets user had positions in during this period (supplies)
         const suppliedAssets = await getUserAssetsForPeriod(context, user, startTimestamp, endTimestamp);
@@ -1069,7 +1503,10 @@ export async function calculateUserDailyPortfolioValue(
         const allAssets = Array.from(new Set([...suppliedAssets, ...borrowedAssets]));
 
         if (allAssets.length === 0) {
-            return [];
+            return {
+                dailyValues: [],
+                currentValue: undefined
+            };
         }
 
         // Initialize liquidity index cache and borrow index cache
@@ -1205,7 +1642,7 @@ export async function calculateUserDailyPortfolioValue(
         }
 
         // Convert Map results to array format
-        const results = Array.from(dailyResults.values())
+        const dailyValues = Array.from(dailyResults.values())
             .map(dayData => {
                 const portfolioValue = dayData.totalSupplied - dayData.totalBorrowed;
 
@@ -1228,7 +1665,63 @@ export async function calculateUserDailyPortfolioValue(
             })
             .sort((a, b) => a.timestamp - b.timestamp);
 
-        return results;
+        // Check if endTimestamp is at a day boundary (midnight UTC)
+        const endDate = new Date(endTimestamp * 1000);
+        const endDayStart = Date.UTC(endDate.getUTCFullYear(), endDate.getUTCMonth(), endDate.getUTCDate()) / 1000;
+        const isPartialDay = endTimestamp !== endDayStart;
+
+        // If endTimestamp is in the middle of a day, calculate current portfolio value
+        let currentValue: {
+            date: string;
+            timestamp: number;
+            portfolioValue: bigint;
+            totalSupplied: bigint;
+            totalBorrowed: bigint;
+            isPartialDay: boolean;
+            assets: Array<{
+                asset: string;
+                supplied: bigint;
+                borrowed: bigint;
+                netPosition: bigint;
+            }>;
+        } | undefined;
+
+        if (isPartialDay) {
+            // Prefetch indices for current timestamp
+            const currentIndexPrefetchList = allAssets.map(asset => ({ asset, timestamp: endTimestamp }));
+            await Promise.all([
+                indexCache.prefetch(context, currentIndexPrefetchList),
+                borrowIndexCache.prefetch(context, currentIndexPrefetchList)
+            ]);
+
+            // Calculate portfolio value at current timestamp
+            const currentPortfolio = await calculatePortfolioValueAtTimestamp(
+                context,
+                user,
+                endTimestamp,
+                allAssets,
+                balanceEventsByAsset,
+                borrowsByAsset,
+                repaysByAsset,
+                indexCache,
+                borrowIndexCache
+            );
+
+            currentValue = {
+                date: endDate.toISOString().split('T')[0]!,
+                timestamp: endTimestamp,
+                portfolioValue: currentPortfolio.portfolioValue,
+                totalSupplied: currentPortfolio.totalSupplied,
+                totalBorrowed: currentPortfolio.totalBorrowed,
+                isPartialDay: true,
+                assets: currentPortfolio.assets
+            };
+        }
+
+        return {
+            dailyValues,
+            currentValue
+        };
 
     } catch (error) {
         console.error(`❌ Error in calculateUserDailyPortfolioValue for user ${user}:`, error);

@@ -277,6 +277,81 @@ export async function getMaxBalanceDuringPeriod(
     }
 }
 
+/**
+ * Get maximum borrow balance during a custom period
+ * Similar to getMaxBalanceDuringPeriod but for borrows
+ */
+export async function getMaxBorrowBalanceDuringPeriod(
+    context: any,
+    user: string,
+    asset: string,
+    startTimestamp: number,
+    endTimestamp: number
+): Promise<bigint> {
+    const { db } = context;
+
+    try {
+        const { Borrow, Repay } = await import("ponder:schema");
+        const dbQuery = db.sql || db;
+
+        // Get all borrow and repay events during the period
+        const [borrowEvents, repayEvents] = await Promise.all([
+            dbQuery
+                .select()
+                .from(Borrow)
+                .where(
+                    and(
+                        eq(Borrow.onBehalfOf, user as `0x${string}`),
+                        eq(Borrow.reserve, asset as `0x${string}`),
+                        gte(Borrow.timestamp, startTimestamp),
+                        lte(Borrow.timestamp, endTimestamp)
+                    )
+                ),
+            dbQuery
+                .select()
+                .from(Repay)
+                .where(
+                    and(
+                        eq(Repay.user, user as `0x${string}`),
+                        eq(Repay.reserve, asset as `0x${string}`),
+                        gte(Repay.timestamp, startTimestamp),
+                        lte(Repay.timestamp, endTimestamp)
+                    )
+                )
+        ]);
+
+        // Get starting borrow balance
+        const startBorrowBalance = await getScaledBorrowBalanceAtTimestamp(context, user, asset, startTimestamp);
+
+        // Track all borrow balance snapshots
+        const borrowBalances: bigint[] = [startBorrowBalance];
+
+        // Combine and sort all events by timestamp
+        const allEvents = [
+            ...borrowEvents.map((e: any) => ({ timestamp: e.timestamp, amount: e.amount, type: 'borrow' })),
+            ...repayEvents.map((e: any) => ({ timestamp: e.timestamp, amount: e.amount, type: 'repay' }))
+        ].sort((a, b) => a.timestamp - b.timestamp);
+
+        // Calculate running balance after each event
+        let currentBalance = startBorrowBalance;
+        for (const event of allEvents) {
+            if (event.type === 'borrow') {
+                currentBalance += event.amount;
+            } else {
+                currentBalance -= event.amount;
+            }
+            borrowBalances.push(currentBalance > 0n ? currentBalance : 0n);
+        }
+
+        // Return maximum
+        return borrowBalances.reduce((max, current) => current > max ? current : max, 0n);
+
+    } catch (error) {
+        console.error(`Error getting max borrow balance during custom period:`, error);
+        return 0n;
+    }
+}
+
 
 
 

@@ -679,9 +679,17 @@ ponder.on("IsolatedPair:Deposit", async ({ event, context }) => {
     const assets = event.args.assets;
     const shares = event.args.shares;
 
-    // Update vault state (totalAsset.amount and totalAsset.shares)
+    // Import vault state functions
     const { updateVaultStateAfterDeposit, calculateExchangeRateFromVaultState, getCurrentVaultState } = await import("./helpers/yield/isolatedPair/vaultState");
 
+    // Calculate exchange rate from the event data itself (assets/shares from this transaction)
+    // This represents the rate at which the shares were minted
+    const EXCHANGE_PRECISION = 1000000000000000000n; // 1e18
+    const exchangeRate = shares > 0n
+        ? (assets * EXCHANGE_PRECISION) / shares
+        : EXCHANGE_PRECISION; // Default 1:1 if no shares
+
+    // Update vault state (totalAsset.amount and totalAsset.shares)
     await updateVaultStateAfterDeposit(
         context.db,
         pair,
@@ -692,12 +700,6 @@ ponder.on("IsolatedPair:Deposit", async ({ event, context }) => {
         event.transaction.hash,
         event.id
     );
-
-    // Get updated vault state to calculate exchange rate
-    const vaultState = await getCurrentVaultState(context.db, pair);
-    const exchangeRate = vaultState
-        ? calculateExchangeRateFromVaultState(vaultState.totalAssetAmount, vaultState.totalAssetShares)
-        : 1000000000000000000n; // Default 1:1
 
     await context.db.insert(DepositIsolated).values({
         id: event.id,
@@ -735,9 +737,17 @@ ponder.on("IsolatedPair:Withdraw", async ({ event, context }) => {
     const assets = event.args.assets;
     const shares = event.args.shares;
 
-    // Update vault state (totalAsset.amount and totalAsset.shares)
+    // Import vault state functions
     const { updateVaultStateAfterWithdraw, calculateExchangeRateFromVaultState, getCurrentVaultState } = await import("./helpers/yield/isolatedPair/vaultState");
 
+    // Calculate exchange rate from the event data itself (assets/shares from this transaction)
+    // This represents the rate at which the shares were burned
+    const EXCHANGE_PRECISION = 1000000000000000000n; // 1e18
+    const exchangeRate = shares > 0n
+        ? (assets * EXCHANGE_PRECISION) / shares
+        : EXCHANGE_PRECISION; // Default 1:1 if no shares
+
+    // Update vault state (totalAsset.amount and totalAsset.shares)
     await updateVaultStateAfterWithdraw(
         context.db,
         pair,
@@ -748,12 +758,6 @@ ponder.on("IsolatedPair:Withdraw", async ({ event, context }) => {
         event.transaction.hash,
         event.id
     );
-
-    // Get updated vault state to calculate exchange rate
-    const vaultState = await getCurrentVaultState(context.db, pair);
-    const exchangeRate = vaultState
-        ? calculateExchangeRateFromVaultState(vaultState.totalAssetAmount, vaultState.totalAssetShares)
-        : 1000000000000000000n; // Default 1:1
 
     await context.db.insert(WithdrawIsolated).values({
         id: event.id,

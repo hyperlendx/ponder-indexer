@@ -31,9 +31,13 @@ export {
 // Re-export position calculation functions
 export {
     calculateIsolatedPairPosition,
-    calculateAllIsolatedPairPositions
+    calculateAllIsolatedPairPositions,
+    calculateCustomPeriodIsolatedPairPositions
 } from "./positionCalculations";
-export type { IsolatedPairPosition } from "./positionCalculations";
+export type {
+    IsolatedPairPosition,
+    IsolatedPairCustomPeriodPosition
+} from "./positionCalculations";
 
 // Re-export yield calculation functions
 export {
@@ -56,11 +60,10 @@ export type {
 export { ExchangeRateCache } from "./exchangeRateCache";
 export { IsolatedPairBalanceCache } from "./balanceCache";
 
-// Re-export custom period position functions
+// Re-export old custom period position functions (for backward compatibility)
 export {
     calculateUserCustomPeriodIsolatedPositions
 } from "./customPeriodPositions";
-export type { IsolatedPairCustomPeriodPosition } from "./customPeriodPositions";
 
 // Re-export period tracking functions
 export { getUserIsolatedPairsForPeriod } from "./periodTracking";
