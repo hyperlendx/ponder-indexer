@@ -298,15 +298,12 @@ export async function calculateNetDeposits(
 
     for (const event of events) {
         // Convert transaction amount to actual amount using liquidity index
-        // transactionAmount should always be positive (represents the amount of the transaction)
+        // Note: transactionAmount is stored as positive for deposits/transfers_in
+        // and negative for withdrawals/transfers_out
         const actualAmount = calculateActualBalance(event.transactionAmount, event.liquidityIndex);
 
-        // Apply correct sign based on event type
-        if (event.eventType === 'deposit' || event.eventType === 'transfer_in') {
-            netDeposits += actualAmount; // Deposits increase net deposits
-        } else if (event.eventType === 'withdraw' || event.eventType === 'transfer_out') {
-            netDeposits -= actualAmount; // Withdrawals decrease net deposits
-        }
+        // Simply add the actualAmount (which already has the correct sign)
+        netDeposits += actualAmount;
     }
 
     return netDeposits;
@@ -345,6 +342,7 @@ export async function calculateTotalSupplied(
         const actualAmount = calculateActualBalance(event.transactionAmount, event.liquidityIndex);
 
         // Only count supply events (deposits and transfers in)
+        // transactionAmount is positive for these events
         if (event.eventType === 'deposit' || event.eventType === 'transfer_in') {
             totalSupplied += actualAmount;
         }
@@ -386,8 +384,9 @@ export async function calculateTotalWithdrawn(
         const actualAmount = calculateActualBalance(event.transactionAmount, event.liquidityIndex);
 
         // Only count withdrawal events (withdrawals and transfers out)
+        // transactionAmount is stored as negative for these events, so take absolute value
         if (event.eventType === 'withdraw' || event.eventType === 'transfer_out') {
-            totalWithdrawn += actualAmount;
+            totalWithdrawn += actualAmount < 0n ? -actualAmount : actualAmount;
         }
     }
 
