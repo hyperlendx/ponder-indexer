@@ -277,6 +277,9 @@ export const BorrowAssetIsolated = onchainTable(
     (table) => ({
         borrowerIdx: index().on(table.borrower),
         receiverIdx: index().on(table.receiver),
+        // Composite indexes for efficient querying by user+pair+timestamp
+        borrowerPairTimestampIdx: index().on(table.borrower, table.pair, table.timestamp),
+        borrowerPairIdx: index().on(table.borrower, table.pair),
     })
 );
 
@@ -297,6 +300,9 @@ export const RepayAssetIsolated = onchainTable(
     (table) => ({
         borrowerIdx: index().on(table.borrower),
         payerIdx: index().on(table.payer),
+        // Composite indexes for efficient querying by user+pair+timestamp
+        borrowerPairTimestampIdx: index().on(table.borrower, table.pair, table.timestamp),
+        borrowerPairIdx: index().on(table.borrower, table.pair),
     })
 );
 
@@ -315,6 +321,9 @@ export const AddCollateralIsolated = onchainTable(
     (table) => ({
         borrowerIdx: index().on(table.borrower),
         senderIdx: index().on(table.sender),
+        // Composite indexes for efficient querying by user+pair+timestamp
+        borrowerPairTimestampIdx: index().on(table.borrower, table.pair, table.timestamp),
+        borrowerPairIdx: index().on(table.borrower, table.pair),
     })
 );
 
@@ -335,6 +344,9 @@ export const RemoveCollateralIsolated = onchainTable(
         receiverIdx: index().on(table.receiver),
         senderIdx: index().on(table.sender),
         borrowerIdx: index().on(table.borrower),
+        // Composite indexes for efficient querying by user+pair+timestamp
+        borrowerPairTimestampIdx: index().on(table.borrower, table.pair, table.timestamp),
+        borrowerPairIdx: index().on(table.borrower, table.pair),
     })
 );
 
@@ -378,6 +390,9 @@ export const DepositIsolated = onchainTable(
     (table) => ({
         callerIdx: index().on(table.caller),
         ownerIdx: index().on(table.owner),
+        // Composite indexes for efficient querying by user+pair+timestamp
+        ownerPairTimestampIdx: index().on(table.owner, table.pair, table.timestamp),
+        ownerPairIdx: index().on(table.owner, table.pair),
     })
 );
 
@@ -400,6 +415,9 @@ export const WithdrawIsolated = onchainTable(
         callerIdx: index().on(table.caller),
         ownerIdx: index().on(table.owner),
         receiverIdx: index().on(table.receiver),
+        // Composite indexes for efficient querying by user+pair+timestamp
+        ownerPairTimestampIdx: index().on(table.owner, table.pair, table.timestamp),
+        ownerPairIdx: index().on(table.owner, table.pair),
     })
 );
 

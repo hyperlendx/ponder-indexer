@@ -843,24 +843,9 @@ export async function calculateUserMonthlyPortfolioValue(
 }
 
 /**
- * Calculate daily yield breakdown for a specific user over a custom time period
- * Returns yield data broken down by individual days for charting/graphing purposes
- *
- * This function builds upon the existing custom period yield calculation but aggregates
- * the results by day, making it suitable for time-series visualization.
- *
- * Note on precision: Daily yields are calculated with AAVE-compatible rounding at each
- * day boundary. This introduces a small cumulative rounding difference (~0.0002% or 2 ppm)
- * compared to calculating the entire period at once. This is expected behavior and maintains
- * consistency with AAVE's onchain rounding semantics. Each day uses half-open intervals
- * [dayStart, dayEnd) where each day is exactly 86,400 seconds (24 hours).
+ * Daily yield data structure
  */
-export async function calculateUserDailyYieldBreakdown(
-    context: any,
-    user: string,
-    startTimestamp: number,
-    endTimestamp: number
-): Promise<Array<{
+export interface DailyYieldData {
     date: string;
     timestamp: number;
     dailyYield: bigint;
@@ -875,14 +860,57 @@ export async function calculateUserDailyYieldBreakdown(
             durationHours: number;
         }>;
     }>;
-}>> {
+}
+
+/**
+ * Calculate daily yield breakdown for a specific user over a custom time period
+ * Returns yield data broken down by individual days for charting/graphing purposes
+ *
+ * This function builds upon the existing custom period yield calculation but aggregates
+ * the results by day, making it suitable for time-series visualization.
+ *
+ * Note on precision: Daily yields are calculated with AAVE-compatible rounding at each
+ * day boundary. This introduces a small cumulative rounding difference (~0.0002% or 2 ppm)
+ * compared to calculating the entire period at once. This is expected behavior and maintains
+ * consistency with AAVE's onchain rounding semantics. Each day uses half-open intervals
+ * [dayStart, dayEnd) where each day is exactly 86,400 seconds (24 hours).
+ *
+ * **Partial Day Support:** If endTimestamp is not at a day boundary (midnight UTC),
+ * also calculates current day's yield at endTimestamp and returns it separately.
+ *
+ * @param context - Ponder context with database access
+ * @param user - User address
+ * @param startTimestamp - Start of time period
+ * @param endTimestamp - End of time period
+ * @returns Object with dailyValues (complete days) and optional currentValue (partial day)
+ */
+export async function calculateUserDailyYieldBreakdown(
+    context: any,
+    user: string,
+    startTimestamp: number,
+    endTimestamp: number
+): Promise<{
+    dailyValues: DailyYieldData[];
+    currentValue?: DailyYieldData & { isPartialDay: boolean };
+}> {
     try {
         // Get all assets user had positions in during this period
         const assets = await getUserAssetsForPeriod(context, user, startTimestamp, endTimestamp);
 
         if (assets.length === 0) {
-            return [];
+            return {
+                dailyValues: [],
+                currentValue: undefined
+            };
         }
+
+        // Check if endTimestamp is at a day boundary (midnight UTC)
+        const endDate = new Date(endTimestamp * 1000);
+        const endDayStart = Date.UTC(endDate.getUTCFullYear(), endDate.getUTCMonth(), endDate.getUTCDate()) / 1000;
+        const isPartialDay = endTimestamp !== endDayStart;
+
+        // Calculate the end timestamp for complete days
+        const endTimestampForDays = isPartialDay ? endDayStart : endTimestamp;
 
         // Create daily time buckets
         const dailyResults = new Map<string, {
@@ -902,11 +930,11 @@ export async function calculateUserDailyYieldBreakdown(
             }>;
         }>();
 
-        // Initialize daily buckets
+        // Initialize daily buckets for complete days only
         const startDate = new Date(startTimestamp * 1000);
 
-        // Calculate number of days to iterate (add 1 to include both start and end dates)
-        const totalDays = Math.ceil((endTimestamp - startTimestamp) / (24 * 60 * 60)) + 1;
+        // Calculate number of complete days to iterate
+        const totalDays = Math.ceil((endTimestampForDays - startTimestamp) / (24 * 60 * 60)) + 1;
 
         for (let dayOffset = 0; dayOffset < totalDays; dayOffset++) {
             const currentDate = new Date(startDate);
@@ -939,13 +967,13 @@ export async function calculateUserDailyYieldBreakdown(
                     }
                 }
 
-                // Get segmented yield data for this asset over the entire period
+                // Get segmented yield data for this asset over complete days only
                 const segmentedResult = await calculateSegmentedCustomPeriodYield(
                     context,
                     user,
                     asset,
                     startTimestamp,
-                    endTimestamp
+                    endTimestampForDays
                 );
 
                 // Process each segment and assign yield to appropriate days
@@ -1063,7 +1091,7 @@ export async function calculateUserDailyYieldBreakdown(
             }
         }
 
-        // Convert Map results to array format
+        // Convert Map results to array format for complete days
         // Include ALL days in the period, even those with zero yield for continuous time-series
         const formattedResults = Array.from(dailyResults.values())
             .map(dayData => ({
@@ -1084,7 +1112,92 @@ export async function calculateUserDailyYieldBreakdown(
             }))
             .sort((a, b) => a.timestamp - b.timestamp); // Sort chronologically
 
-        return formattedResults;
+        // Calculate current value if partial day
+        let currentValue: (DailyYieldData & { isPartialDay: boolean }) | undefined;
+
+        if (isPartialDay) {
+            // Calculate yield from start of current day to endTimestamp
+            const currentDayAssets = new Map<string, {
+                asset: string;
+                dailyYield: bigint;
+                segments: Array<{
+                    startTime: number;
+                    endTime: number;
+                    scaledBalance: bigint;
+                    segmentYield: bigint;
+                    durationHours: number;
+                }>;
+            }>();
+
+            // Initialize all assets with zero yield
+            for (const asset of assets) {
+                currentDayAssets.set(asset, {
+                    asset,
+                    dailyYield: 0n,
+                    segments: []
+                });
+            }
+
+            let totalCurrentYield = 0n;
+
+            // Process each asset for the partial day
+            for (const asset of assets) {
+                try {
+                    // Get segmented yield data for this asset for the partial day
+                    const segmentedResult = await calculateSegmentedCustomPeriodYield(
+                        context,
+                        user,
+                        asset,
+                        endDayStart,
+                        endTimestamp
+                    );
+
+                    const assetData = currentDayAssets.get(asset)!;
+
+                    // Process each segment
+                    for (const segment of segmentedResult.segments) {
+                        assetData.dailyYield += segment.segmentYield;
+                        assetData.segments.push({
+                            startTime: segment.startTime,
+                            endTime: segment.endTime,
+                            scaledBalance: segment.scaledBalance,
+                            segmentYield: segment.segmentYield,
+                            durationHours: segment.durationDays * 24
+                        });
+                    }
+
+                    totalCurrentYield += assetData.dailyYield;
+
+                } catch (error) {
+                    console.error(`❌ Error processing asset ${asset} for partial day:`, error);
+                    // Continue with other assets even if one fails
+                }
+            }
+
+            // Format current value
+            currentValue = {
+                date: endDate.toISOString().split('T')[0]!,
+                timestamp: endTimestamp,
+                dailyYield: totalCurrentYield,
+                assets: Array.from(currentDayAssets.values()).map(assetData => ({
+                    asset: assetData.asset,
+                    dailyYield: assetData.dailyYield,
+                    segments: assetData.segments.map(seg => ({
+                        startTime: seg.startTime,
+                        endTime: seg.endTime,
+                        scaledBalance: seg.scaledBalance.toString(),
+                        segmentYield: seg.segmentYield.toString(),
+                        durationHours: seg.durationHours
+                    }))
+                })),
+                isPartialDay: true
+            };
+        }
+
+        return {
+            dailyValues: formattedResults,
+            currentValue
+        };
 
     } catch (error) {
         console.error(`❌ Error in calculateUserDailyYieldBreakdown for user ${user}:`, error);

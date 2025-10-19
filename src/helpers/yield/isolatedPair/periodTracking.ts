@@ -14,12 +14,7 @@ import {
     WithdrawIsolated,
     UserIsolatedPairTracking
 } from "ponder:schema";
-import { eq, and, lte, gte, between } from "ponder";
-import {
-    getIsolatedPairCollateralBalance,
-    getIsolatedPairAssetShares,
-    getIsolatedPairBorrowShares
-} from "./balanceQueries";
+import { eq, and, lte, gte, inArray } from "ponder";
 
 /**
  * Get isolated pairs where user had positions during a specific time period
@@ -56,59 +51,32 @@ export async function getUserIsolatedPairsForPeriod(
     endTimestamp: number
 ): Promise<string[]> {
     const dbQuery = context.db.sql || context.db;
-    
+
     try {
         // Step 1: Get all pairs user has EVER interacted with (from tracking table)
         const trackingRecords = await dbQuery
             .select()
             .from(UserIsolatedPairTracking)
             .where(eq(UserIsolatedPairTracking.user, user as `0x${string}`));
-        
+
         if (trackingRecords.length === 0) {
             return [];
         }
-        
+
         const allPairs = trackingRecords.map((record: any) => record.pair as string);
 
-        // Step 2: For each pair, check if it had a position during the period
-        const pairsWithPositions = await Promise.all(
-            allPairs.map(async (pair: string) => {
-                // Check 1: Did user have a balance at START of period?
-                const [collateralAtStart, assetSharesAtStart, borrowSharesAtStart] = await Promise.all([
-                    getIsolatedPairCollateralBalance(context, user, pair, startTimestamp),
-                    getIsolatedPairAssetShares(context, user, pair, startTimestamp),
-                    getIsolatedPairBorrowShares(context, user, pair, startTimestamp)
-                ]);
-                
-                const hadBalanceAtStart = 
-                    collateralAtStart > 0n || 
-                    assetSharesAtStart > 0n || 
-                    borrowSharesAtStart > 0n;
-                
-                if (hadBalanceAtStart) {
-                    return pair;
-                }
-                
-                // Check 2: Did user have any activity DURING the period?
-                const hadActivityDuringPeriod = await checkPairActivityDuringPeriod(
-                    context,
-                    user,
-                    pair,
-                    startTimestamp,
-                    endTimestamp
-                );
-                
-                if (hadActivityDuringPeriod) {
-                    return pair;
-                }
-                
-                return null;
-            })
+        // Step 2: Batch check for activity during the period (OPTIMIZED)
+        // Instead of checking each pair individually, check all pairs at once
+        const pairsWithActivity = await checkBatchPairActivityDuringPeriod(
+            context,
+            user,
+            allPairs,
+            startTimestamp,
+            endTimestamp
         );
-        
-        // Filter out nulls and return unique pairs
-        return pairsWithPositions.filter((pair): pair is string => pair !== null);
-        
+
+        return pairsWithActivity;
+
     } catch (error: any) {
         console.error('Error in getUserIsolatedPairsForPeriod:', error.message);
         console.error('Stack:', error.stack);
@@ -117,34 +85,40 @@ export async function getUserIsolatedPairsForPeriod(
 }
 
 /**
- * Check if user had any activity in a specific pair during a time period
- * 
- * Checks all event types:
- * - Deposits
- * - Withdrawals
- * - Borrows
- * - Repays
- * - Add Collateral
- * - Remove Collateral
- * 
+ * OPTIMIZED: Batch check for pairs with activity during a time period
+ *
+ * This function checks ALL pairs at once using SQL IN clauses, dramatically reducing
+ * the number of database queries from O(n*6) to O(6) where n is the number of pairs.
+ *
+ * For a user with 5 pairs:
+ * - Old approach: 5 pairs × 6 event types = 30 queries
+ * - New approach: 6 queries total (one per event type for all pairs)
+ *
  * @param context - Ponder context with database access
  * @param user - User address
- * @param pair - Isolated pair address
+ * @param pairs - Array of isolated pair addresses to check
  * @param startTimestamp - Start of the period
  * @param endTimestamp - End of the period
- * @returns True if user had any activity during the period
+ * @returns Array of pair addresses that had activity during the period
  */
-async function checkPairActivityDuringPeriod(
+async function checkBatchPairActivityDuringPeriod(
     context: any,
     user: string,
-    pair: string,
+    pairs: string[],
     startTimestamp: number,
     endTimestamp: number
-): Promise<boolean> {
+): Promise<string[]> {
     const dbQuery = context.db.sql || context.db;
-    
+
+    if (pairs.length === 0) {
+        return [];
+    }
+
     try {
-        // Check each event type in parallel
+        // Use Set to track unique pairs with activity
+        const activePairs = new Set<string>();
+
+        // Check each event type in parallel, but query ALL pairs at once using inArray
         const [
             deposits,
             withdraws,
@@ -153,80 +127,81 @@ async function checkPairActivityDuringPeriod(
             addCollateral,
             removeCollateral
         ] = await Promise.all([
-            // Deposits
-            dbQuery.select().from(DepositIsolated).where(
+            // Deposits - check all pairs at once
+            dbQuery.select({pair: DepositIsolated.pair}).from(DepositIsolated).where(
                 and(
                     eq(DepositIsolated.owner, user as `0x${string}`),
-                    eq(DepositIsolated.pair, pair as `0x${string}`),
+                    inArray(DepositIsolated.pair, pairs as `0x${string}`[]),
                     gte(DepositIsolated.timestamp, startTimestamp),
                     lte(DepositIsolated.timestamp, endTimestamp)
                 )
-            ).limit(1),
-            
-            // Withdrawals
-            dbQuery.select().from(WithdrawIsolated).where(
+            ),
+
+            // Withdrawals - check all pairs at once
+            dbQuery.select({pair: WithdrawIsolated.pair}).from(WithdrawIsolated).where(
                 and(
                     eq(WithdrawIsolated.owner, user as `0x${string}`),
-                    eq(WithdrawIsolated.pair, pair as `0x${string}`),
+                    inArray(WithdrawIsolated.pair, pairs as `0x${string}`[]),
                     gte(WithdrawIsolated.timestamp, startTimestamp),
                     lte(WithdrawIsolated.timestamp, endTimestamp)
                 )
-            ).limit(1),
-            
-            // Borrows
-            dbQuery.select().from(BorrowAssetIsolated).where(
+            ),
+
+            // Borrows - check all pairs at once
+            dbQuery.select({pair: BorrowAssetIsolated.pair}).from(BorrowAssetIsolated).where(
                 and(
                     eq(BorrowAssetIsolated.borrower, user as `0x${string}`),
-                    eq(BorrowAssetIsolated.pair, pair as `0x${string}`),
+                    inArray(BorrowAssetIsolated.pair, pairs as `0x${string}`[]),
                     gte(BorrowAssetIsolated.timestamp, startTimestamp),
                     lte(BorrowAssetIsolated.timestamp, endTimestamp)
                 )
-            ).limit(1),
-            
-            // Repays
-            dbQuery.select().from(RepayAssetIsolated).where(
+            ),
+
+            // Repays - check all pairs at once
+            dbQuery.select({pair: RepayAssetIsolated.pair}).from(RepayAssetIsolated).where(
                 and(
                     eq(RepayAssetIsolated.borrower, user as `0x${string}`),
-                    eq(RepayAssetIsolated.pair, pair as `0x${string}`),
+                    inArray(RepayAssetIsolated.pair, pairs as `0x${string}`[]),
                     gte(RepayAssetIsolated.timestamp, startTimestamp),
                     lte(RepayAssetIsolated.timestamp, endTimestamp)
                 )
-            ).limit(1),
-            
-            // Add Collateral
-            dbQuery.select().from(AddCollateralIsolated).where(
+            ),
+
+            // Add Collateral - check all pairs at once
+            dbQuery.select({pair: AddCollateralIsolated.pair}).from(AddCollateralIsolated).where(
                 and(
                     eq(AddCollateralIsolated.borrower, user as `0x${string}`),
-                    eq(AddCollateralIsolated.pair, pair as `0x${string}`),
+                    inArray(AddCollateralIsolated.pair, pairs as `0x${string}`[]),
                     gte(AddCollateralIsolated.timestamp, startTimestamp),
                     lte(AddCollateralIsolated.timestamp, endTimestamp)
                 )
-            ).limit(1),
-            
-            // Remove Collateral
-            dbQuery.select().from(RemoveCollateralIsolated).where(
+            ),
+
+            // Remove Collateral - check all pairs at once
+            dbQuery.select({pair: RemoveCollateralIsolated.pair}).from(RemoveCollateralIsolated).where(
                 and(
                     eq(RemoveCollateralIsolated.borrower, user as `0x${string}`),
-                    eq(RemoveCollateralIsolated.pair, pair as `0x${string}`),
+                    inArray(RemoveCollateralIsolated.pair, pairs as `0x${string}`[]),
                     gte(RemoveCollateralIsolated.timestamp, startTimestamp),
                     lte(RemoveCollateralIsolated.timestamp, endTimestamp)
                 )
-            ).limit(1)
+            )
         ]);
-        
-        // Return true if any event type has results
-        return (
-            deposits.length > 0 ||
-            withdraws.length > 0 ||
-            borrows.length > 0 ||
-            repays.length > 0 ||
-            addCollateral.length > 0 ||
-            removeCollateral.length > 0
-        );
-        
+
+        // Collect all unique pairs that had any activity
+        deposits.forEach((row: any) => activePairs.add(row.pair));
+        withdraws.forEach((row: any) => activePairs.add(row.pair));
+        borrows.forEach((row: any) => activePairs.add(row.pair));
+        repays.forEach((row: any) => activePairs.add(row.pair));
+        addCollateral.forEach((row: any) => activePairs.add(row.pair));
+        removeCollateral.forEach((row: any) => activePairs.add(row.pair));
+
+        return Array.from(activePairs);
+
     } catch (error: any) {
-        console.error('Error checking pair activity:', error.message);
-        return false;
+        console.error('Error checking batch pair activity:', error.message);
+        console.error('Stack:', error.stack);
+        return [];
     }
 }
 

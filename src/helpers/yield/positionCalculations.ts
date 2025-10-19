@@ -35,7 +35,8 @@ export interface AssetPosition {
     totalRepaid: bigint;            // Sum of repay transactions during the period
 
     // Calculated yield
-    totalYieldEarned: bigint;       // Yield earned during the period
+    totalYieldEarned: bigint;       // Yield earned on supply during the period
+    totalBorrowCost: bigint;        // Interest cost on borrows during the period
 
     // Peak balances during period (deposits + accrued interest)
     maxSupplyBalance: bigint;       // Maximum supply balance reached during the period
@@ -111,12 +112,11 @@ export async function calculateUserCustomPeriodPositions(
     endTimestamp: number
 ): Promise<AssetPosition[]> {
     // Get all assets where user had positions
-    // getUserAssetsForPeriod already handles both:
     // 1. Assets with balance at START of period (positions opened before period)
     // 2. Assets with events DURING period (new positions or activity on existing ones)
     const supplyAssets = await getUserAssetsForPeriod(context, user, startTimestamp, endTimestamp);
 
-    // Similarly for borrows - this checks balance at start + events during period
+    //Checks balance at start + events during period
     const borrowAssets = await getUserBorrowedAssets(context, user, startTimestamp, endTimestamp);
 
     // Combine and deduplicate
@@ -174,10 +174,15 @@ export async function calculateUserCustomPeriodPositions(
             const maxSupplyBalance = calculateActualBalance(maxScaledSupplyBalance, endLiquidityIndex);
             const maxBorrowBalance = calculateActualBalance(maxScaledBorrowBalance, endBorrowIndex);
 
-            // Calculate yield earned during the period
+            // Calculate yield earned during the period (supply side)
             // Formula: (endBalance - startBalance) + totalWithdrawn - totalDeposited
             // This works for both open and closed positions
             const totalYieldEarned: bigint = (endSupplyBalance - startSupplyBalance) + totalWithdrawn - totalDeposited;
+
+            // Calculate borrow cost during the period (borrow side)
+            // Formula: (endBorrowBalance - startBorrowBalance) + totalRepaid - totalBorrowed
+            // This represents the interest accrued on borrows
+            const totalBorrowCost: bigint = (endBorrowBalance - startBorrowBalance) + totalRepaid - totalBorrowed;
 
             // Calculate net deposits and borrows
             const netDeposits: bigint = totalDeposited - totalWithdrawn;
@@ -190,6 +195,7 @@ export async function calculateUserCustomPeriodPositions(
                 totalBorrowed,
                 totalRepaid,
                 totalYieldEarned,
+                totalBorrowCost,
                 maxSupplyBalance,
                 maxBorrowBalance,
                 currentSupplyBalance: endSupplyBalance,

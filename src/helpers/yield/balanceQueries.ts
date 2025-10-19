@@ -518,7 +518,6 @@ export async function getBorrowedBalanceAtTimestamp(
  * 1. Assets with non-zero borrow balance at START of period (existing borrows)
  * 2. Assets with borrow/repay events DURING the period (new borrows or activity)
  *
- * This matches the behavior of getUserAssetsForPeriod for supply positions.
  */
 export async function getUserBorrowedAssets(
     context: any,

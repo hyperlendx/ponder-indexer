@@ -9,6 +9,21 @@
 import { calculateIsolatedPairExchangeRate } from "./vaultExchangeRate";
 
 /**
+ * Request-scoped cache for exchange rates
+ * Key format: `${pair}_${timestamp}`
+ * This prevents redundant calculations within a single API request
+ */
+const exchangeRateCache = new Map<string, bigint>();
+
+/**
+ * Clear the exchange rate cache
+ * Should be called at the start of each API request
+ */
+export function clearExchangeRateCache(): void {
+    exchangeRateCache.clear();
+}
+
+/**
  * Calculate exchange rate at a specific timestamp using vault state tracking
  *
  * This function calculates exchange rates by tracking totalAsset.amount and totalAsset.shares,
@@ -42,9 +57,10 @@ export async function calculateIsolatedPairExchangeRateAtTimestamp(
 }
 
 /**
- * Get exchange rate for an isolated pair at a specific timestamp
+ * Get exchange rate for an isolated pair at a specific timestamp (with caching)
  *
- * This is an alias for calculateIsolatedPairExchangeRateAtTimestamp() for convenience.
+ * This function uses a request-scoped cache to avoid redundant calculations
+ * for the same pair+timestamp combination within a single API request.
  *
  * @param context - Ponder context with database access
  * @param pair - Isolated pair address
@@ -56,6 +72,16 @@ export async function getIsolatedPairExchangeRate(
     pair: string,
     timestamp: number
 ): Promise<bigint> {
-    return calculateIsolatedPairExchangeRateAtTimestamp(context, pair, timestamp);
+    // Check cache first
+    const cacheKey = `${pair}_${timestamp}`;
+    const cached = exchangeRateCache.get(cacheKey);
+    if (cached !== undefined) {
+        return cached;
+    }
+
+    // Calculate and cache
+    const rate = await calculateIsolatedPairExchangeRateAtTimestamp(context, pair, timestamp);
+    exchangeRateCache.set(cacheKey, rate);
+    return rate;
 }
 

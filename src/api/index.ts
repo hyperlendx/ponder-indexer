@@ -92,10 +92,10 @@ app.get("/user/:address/custom-period-yield", async (c) => {
         // Format the response data with comprehensive metrics
         // DO NOT filter out assets with zero yield - return ALL assets with activity
         const formattedAssets = positions.map(pos => ({
-            user: userAddress,
             asset: pos.asset,
             // Yield metrics
             yield: pos.totalYieldEarned.toString(),
+            borrowCost: pos.totalBorrowCost.toString(),
             // Transaction activity during the period
             totalDeposited: pos.totalDeposited.toString(),
             totalWithdrawn: pos.totalWithdrawn.toString(),
@@ -109,12 +109,7 @@ app.get("/user/:address/custom-period-yield", async (c) => {
             currentBorrowBalance: pos.currentBorrowBalance.toString(),
             // Derived metrics
             netDeposits: pos.netDeposits.toString(),
-            netBorrows: pos.netBorrows.toString(),
-            // Legacy fields for backward compatibility
-            suppliedAmount: pos.currentSupplyBalance.toString(),
-            borrowedAmount: pos.currentBorrowBalance.toString(),
-            startDate: new Date(fromTimestamp * 1000).toISOString(),
-            endDate: new Date(toTimestamp * 1000).toISOString()
+            netBorrows: pos.netBorrows.toString()
         }));
 
         return c.json({
@@ -205,7 +200,6 @@ app.get("/user/:address/custom-period-yield-isolated", async (c) => {
         // Format the response data with comprehensive metrics
         // DO NOT filter out pairs with zero yield - return ALL pairs with activity
         const formattedPairs = positions.map(pos => ({
-            user: userAddress,
             pair: pos.pair,
 
             // Yield metrics
@@ -234,11 +228,7 @@ app.get("/user/:address/custom-period-yield-isolated", async (c) => {
             // Derived metrics
             netDeposits: pos.netDeposits.toString(),
             netBorrows: pos.netBorrows.toString(),
-            netCollateral: pos.netCollateral.toString(),
-
-            // Legacy fields for backward compatibility
-            startDate: new Date(fromTimestamp * 1000).toISOString(),
-            endDate: new Date(toTimestamp * 1000).toISOString()
+            netCollateral: pos.netCollateral.toString()
         }));
 
         return c.json({
@@ -416,6 +406,10 @@ app.get("/user/:address/custom-period-isolated-positions", async (c) => {
         // Import the new comprehensive isolated pair position calculation function
         const { calculateCustomPeriodIsolatedPairPositions } = await import("../helpers/yield/isolatedPair");
 
+        // Clear exchange rate cache for this request to prevent stale data
+        const { clearExchangeRateCache } = await import("../helpers/yield/isolatedPair/exchangeRate");
+        clearExchangeRateCache();
+
         // Calculate comprehensive isolated pair positions for the period
         const positions = await calculateCustomPeriodIsolatedPairPositions(context, userAddress, fromTimestamp, toTimestamp);
 
@@ -529,11 +523,11 @@ app.get("/user/:address/daily-yield-breakdown", async (c) => {
         const context = {db};
 
         // Calculate daily yield breakdown for regular pool only
-        const dailyYieldData = await calculateUserDailyYieldBreakdown(context, userAddress, fromTimestamp, toTimestamp);
+        const yieldData = await calculateUserDailyYieldBreakdown(context, userAddress, fromTimestamp, toTimestamp);
 
-        // Note: dailyYieldData now includes all days in the period (including zero-yield days)
+        // Note: yieldData.dailyValues now includes all days in the period (including zero-yield days)
         // Only return empty response if no data could be calculated at all (e.g., no assets found)
-        if (dailyYieldData.length === 0) {
+        if (yieldData.dailyValues.length === 0 && !yieldData.currentValue) {
             // Calculate expected number of days for empty response
             const expectedDays = Math.ceil((toTimestamp - fromTimestamp) / (24 * 60 * 60));
             return c.json({
@@ -544,28 +538,19 @@ app.get("/user/:address/daily-yield-breakdown", async (c) => {
                 toDate: new Date(toTimestamp * 1000).toISOString(),
                 days: Math.round((toTimestamp - fromTimestamp) / (24 * 60 * 60) * 100) / 100,
                 dailyBreakdown: [],
+                currentValue: null,
                 summary: {
-                    totalYield: "0",
-                    averageDailyYield: "0",
-                    maxDailyYield: "0",
-                    minDailyYield: "0",
-                    daysWithYield: 0,
-                    totalDaysInPeriod: expectedDays
+                    totalDaysInPeriod: expectedDays,
+                    hasPartialDay: false
                 },
                 calculatedAt: Math.floor(Date.now() / 1000),
-                message: "No positions found for this user during the specified period"
+                message: "No positions found for this user during the specified period",
+                note: "To calculate total yield in USD, sum (assetYield / 10^decimals * price) for each asset using current oracle prices"
             });
         }
 
-        // Calculate summary statistics for regular pool
-        const totalYield = dailyYieldData.reduce((sum, day) => sum + day.dailyYield, 0n);
-        const daysWithYield = dailyYieldData.filter(day => day.dailyYield > 0n).length;
-        const averageDailyYield = dailyYieldData.length > 0 ? totalYield / BigInt(dailyYieldData.length) : 0n;
-        const maxDailyYield = dailyYieldData.reduce((max, day) => day.dailyYield > max ? day.dailyYield : max, 0n);
-        const minDailyYield = dailyYieldData.reduce((min, day) => day.dailyYield < min ? day.dailyYield : min, dailyYieldData[0]?.dailyYield || 0n);
-
         // Convert all BigInt values to strings for JSON serialization
-        const serializedBreakdown = dailyYieldData.map(day => ({
+        const serializedBreakdown = yieldData.dailyValues.map(day => ({
             date: day.date,
             timestamp: day.timestamp,
             dailyYield: day.dailyYield.toString(),
@@ -576,6 +561,19 @@ app.get("/user/:address/daily-yield-breakdown", async (c) => {
             }))
         }));
 
+        // Serialize current value if present
+        const serializedCurrentValue = yieldData.currentValue ? {
+            date: yieldData.currentValue.date,
+            timestamp: yieldData.currentValue.timestamp,
+            dailyYield: yieldData.currentValue.dailyYield.toString(),
+            isPartialDay: yieldData.currentValue.isPartialDay,
+            assets: yieldData.currentValue.assets.map(asset => ({
+                asset: asset.asset,
+                dailyYield: asset.dailyYield.toString(),
+                segments: asset.segments // Already converted to strings in the helper function
+            }))
+        } : null;
+
         return c.json({
             user: userAddress,
             fromTimestamp,
@@ -584,15 +582,13 @@ app.get("/user/:address/daily-yield-breakdown", async (c) => {
             toDate: new Date(toTimestamp * 1000).toISOString(),
             days: Math.round((toTimestamp - fromTimestamp) / (24 * 60 * 60) * 100) / 100,
             dailyBreakdown: serializedBreakdown,
+            currentValue: serializedCurrentValue,
             summary: {
-                totalYield: totalYield.toString(),
-                averageDailyYield: averageDailyYield.toString(),
-                maxDailyYield: maxDailyYield.toString(),
-                minDailyYield: minDailyYield.toString(),
-                daysWithYield: daysWithYield,
-                totalDaysInPeriod: dailyYieldData.length
+                totalDaysInPeriod: yieldData.dailyValues.length,
+                hasPartialDay: !!yieldData.currentValue
             },
-            calculatedAt: Math.floor(Date.now() / 1000)
+            calculatedAt: Math.floor(Date.now() / 1000),
+            note: "To calculate total yield in USD, sum (assetYield / 10^decimals * price) for each asset using current oracle prices"
         });
 
     } catch (error) {
@@ -664,31 +660,14 @@ app.get("/user/:address/daily-yield-breakdown-isolated", async (c) => {
                 dailyBreakdown: [],
                 currentValue: null,
                 summary: {
-                    totalYield: "0",
-                    averageDailyYield: "0",
-                    maxDailyYield: "0",
-                    minDailyYield: "0",
-                    daysWithYield: 0,
                     totalDaysInPeriod: expectedDays,
                     hasPartialDay: false
                 },
                 calculatedAt: Math.floor(Date.now() / 1000),
-                message: "No isolated pair positions found for this user during the specified period"
+                message: "No isolated pair positions found for this user during the specified period",
+                note: "To calculate total yield in USD, sum (assetYield / 10^decimals * price) for each asset using current oracle prices"
             });
         }
-
-        // Calculate summary statistics for isolated pairs
-        // Include currentValue in calculations if present
-        const allValues = [...yieldData.dailyValues];
-        if (yieldData.currentValue) {
-            allValues.push(yieldData.currentValue);
-        }
-
-        const totalYield = allValues.reduce((sum, day) => sum + day.dailyYield, 0n);
-        const daysWithYield = allValues.filter(day => day.dailyYield > 0n).length;
-        const averageDailyYield = allValues.length > 0 ? totalYield / BigInt(allValues.length) : 0n;
-        const maxDailyYield = allValues.reduce((max, day) => day.dailyYield > max ? day.dailyYield : max, 0n);
-        const minDailyYield = allValues.reduce((min, day) => day.dailyYield < min ? day.dailyYield : min, allValues[0]?.dailyYield || 0n);
 
         // Convert all BigInt values to strings for JSON serialization
         const serializedBreakdown = yieldData.dailyValues.map(day => ({
@@ -727,15 +706,11 @@ app.get("/user/:address/daily-yield-breakdown-isolated", async (c) => {
             dailyBreakdown: serializedBreakdown,
             currentValue: serializedCurrentValue,
             summary: {
-                totalYield: totalYield.toString(),
-                averageDailyYield: averageDailyYield.toString(),
-                maxDailyYield: maxDailyYield.toString(),
-                minDailyYield: minDailyYield.toString(),
-                daysWithYield: daysWithYield,
                 totalDaysInPeriod: yieldData.dailyValues.length,
                 hasPartialDay: !!yieldData.currentValue
             },
-            calculatedAt: Math.floor(Date.now() / 1000)
+            calculatedAt: Math.floor(Date.now() / 1000),
+            note: "To calculate total yield in USD, sum (assetYield / 10^decimals * price) for each asset using current oracle prices"
         });
 
     } catch (error) {
@@ -1156,31 +1131,14 @@ app.get("/user/:address/monthly-yield-breakdown", async (c) => {
                 monthlyBreakdown: [],
                 currentValue: null,
                 summary: {
-                    totalYield: "0",
-                    averageMonthlyYield: "0",
-                    maxMonthlyYield: "0",
-                    minMonthlyYield: "0",
-                    monthsWithYield: 0,
                     totalMonths: 0,
                     hasPartialMonth: false
                 },
                 calculatedAt: Math.floor(Date.now() / 1000),
-                message: "No positions found for this user during the specified period"
+                message: "No positions found for this user during the specified period",
+                note: "To calculate total yield in USD, sum (assetYield / 10^decimals * price) for each asset using current oracle prices"
             });
         }
-
-        // Calculate summary statistics for regular pool
-        // Include currentValue in calculations if present
-        const allValues = [...yieldData.monthlyValues];
-        if (yieldData.currentValue) {
-            allValues.push(yieldData.currentValue);
-        }
-
-        const totalYield = allValues.reduce((sum, month) => sum + month.totalYield, 0n);
-        const monthsWithYield = allValues.filter(month => month.totalYield > 0n).length;
-        const averageMonthlyYield = allValues.length > 0 ? totalYield / BigInt(allValues.length) : 0n;
-        const maxMonthlyYield = allValues.reduce((max, month) => month.totalYield > max ? month.totalYield : max, 0n);
-        const minMonthlyYield = allValues.reduce((min, month) => month.totalYield < min ? month.totalYield : min, allValues[0]?.totalYield || 0n);
 
         // Format the response data for regular pool
         const formattedBreakdown = yieldData.monthlyValues.map(month => ({
@@ -1228,15 +1186,11 @@ app.get("/user/:address/monthly-yield-breakdown", async (c) => {
             monthlyBreakdown: formattedBreakdown,
             currentValue: serializedCurrentValue,
             summary: {
-                totalYield: totalYield.toString(),
-                averageMonthlyYield: averageMonthlyYield.toString(),
-                maxMonthlyYield: maxMonthlyYield.toString(),
-                minMonthlyYield: minMonthlyYield.toString(),
-                monthsWithYield: monthsWithYield,
                 totalMonths: yieldData.monthlyValues.length,
                 hasPartialMonth: !!yieldData.currentValue
             },
-            calculatedAt: Math.floor(Date.now() / 1000)
+            calculatedAt: Math.floor(Date.now() / 1000),
+            note: "To calculate total yield in USD, sum (assetYield / 10^decimals * price) for each asset using current oracle prices"
         });
 
     } catch (error) {
@@ -1312,31 +1266,14 @@ app.get("/user/:address/monthly-yield-breakdown-isolated", async (c) => {
                 monthlyBreakdown: [],
                 currentValue: null,
                 summary: {
-                    totalYield: "0",
-                    averageMonthlyYield: "0",
-                    maxMonthlyYield: "0",
-                    minMonthlyYield: "0",
-                    monthsWithYield: 0,
                     totalMonths: 0,
                     hasPartialMonth: false
                 },
                 calculatedAt: Math.floor(Date.now() / 1000),
-                message: "No isolated pair positions found for this user during the specified period"
+                message: "No isolated pair positions found for this user during the specified period",
+                note: "To calculate total yield in USD, sum (assetYield / 10^decimals * price) for each asset using current oracle prices"
             });
         }
-
-        // Calculate summary statistics for isolated pairs
-        // Include currentValue in calculations if present
-        const allValues = [...yieldData.monthlyValues];
-        if (yieldData.currentValue) {
-            allValues.push(yieldData.currentValue);
-        }
-
-        const totalYield = allValues.reduce((sum, month) => sum + month.monthlyYield, 0n);
-        const monthsWithYield = allValues.filter(month => month.monthlyYield > 0n).length;
-        const averageMonthlyYield = allValues.length > 0 ? totalYield / BigInt(allValues.length) : 0n;
-        const maxMonthlyYield = allValues.reduce((max, month) => month.monthlyYield > max ? month.monthlyYield : max, 0n);
-        const minMonthlyYield = allValues.reduce((min, month) => month.monthlyYield < min ? month.monthlyYield : min, allValues[0]?.monthlyYield || 0n);
 
         // Format the response data for isolated pairs
         const formattedBreakdown = yieldData.monthlyValues.map(month => ({
@@ -1382,15 +1319,11 @@ app.get("/user/:address/monthly-yield-breakdown-isolated", async (c) => {
             monthlyBreakdown: formattedBreakdown,
             currentValue: serializedCurrentValue,
             summary: {
-                totalYield: totalYield.toString(),
-                averageMonthlyYield: averageMonthlyYield.toString(),
-                maxMonthlyYield: maxMonthlyYield.toString(),
-                minMonthlyYield: minMonthlyYield.toString(),
-                monthsWithYield: monthsWithYield,
                 totalMonths: yieldData.monthlyValues.length,
                 hasPartialMonth: !!yieldData.currentValue
             },
-            calculatedAt: Math.floor(Date.now() / 1000)
+            calculatedAt: Math.floor(Date.now() / 1000),
+            note: "To calculate total yield in USD, sum (assetYield / 10^decimals * price) for each asset using current oracle prices"
         });
 
     } catch (error) {
