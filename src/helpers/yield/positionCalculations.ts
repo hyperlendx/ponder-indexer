@@ -18,6 +18,8 @@ import { calculateVariableBorrowIndexAtTimestamp } from "../aave/borrowIndex";
 import { calculateActualBalance } from "../aave/balanceConversions";
 import { RAY } from "../aave/rayMath";
 import { calculateTotalSupplied, calculateTotalWithdrawn, calculateTotalBorrowed, calculateTotalRepaid } from "../userPositionManager";
+import { UserBalanceEvent } from "ponder:schema";
+import { eq } from "ponder";
 
 /**
  * Position data for a single asset during a time period

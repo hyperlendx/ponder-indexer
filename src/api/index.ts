@@ -1464,33 +1464,12 @@ app.get("/user/:address/monthly-portfolio-value", async (c) => {
                 fromDate: new Date(fromTimestamp * 1000).toISOString(),
                 toDate: new Date(toTimestamp * 1000).toISOString(),
                 months: 0,
-                monthlyPortfolioValues: [],
+                monthlyPositions: [],
                 currentValue: null,
-                summary: {
-                    averagePortfolioValue: "0",
-                    maxPortfolioValue: "0",
-                    minPortfolioValue: "0",
-                    currentPortfolioValue: "0",
-                    totalMonths: 0,
-                    hasPartialMonth: false
-                },
                 calculatedAt: Math.floor(Date.now() / 1000),
                 message: "No positions found for this user during the specified period"
             });
         }
-
-        // Calculate summary statistics for regular pool
-        // Include currentValue in calculations if present
-        const allValues = [...portfolioData.monthlyValues];
-        if (portfolioData.currentValue) {
-            allValues.push(portfolioData.currentValue);
-        }
-
-        const totalPortfolioValue = allValues.reduce((sum, month) => sum + month.portfolioValue, 0n);
-        const averagePortfolioValue = allValues.length > 0 ? totalPortfolioValue / BigInt(allValues.length) : 0n;
-        const maxPortfolioValue = allValues.reduce((max, month) => month.portfolioValue > max ? month.portfolioValue : max, allValues[0]?.portfolioValue || 0n);
-        const minPortfolioValue = allValues.reduce((min, month) => month.portfolioValue < min ? month.portfolioValue : min, allValues[0]?.portfolioValue || 0n);
-        const currentPortfolioValue = portfolioData.currentValue?.portfolioValue || allValues[allValues.length - 1]?.portfolioValue || 0n;
 
         // Format the response data
         const formattedPortfolio = portfolioData.monthlyValues.map(month => ({
@@ -1499,14 +1478,19 @@ app.get("/user/:address/monthly-portfolio-value", async (c) => {
             monthName: month.monthName,
             endDate: month.endDate,
             endTimestamp: month.endTimestamp,
-            portfolioValue: month.portfolioValue.toString(),
-            totalSupplied: month.totalSupplied.toString(),
-            totalBorrowed: month.totalBorrowed.toString(),
             assets: month.assets.map(asset => ({
                 asset: asset.asset,
-                supplied: asset.supplied.toString(),
-                borrowed: asset.borrowed.toString(),
-                netPosition: asset.netPosition.toString()
+                totalDeposited: asset.totalDeposited.toString(),
+                totalWithdrawn: asset.totalWithdrawn.toString(),
+                totalBorrowed: asset.totalBorrowed.toString(),
+                totalRepaid: asset.totalRepaid.toString(),
+                totalYieldEarned: asset.totalYieldEarned.toString(),
+                maxSupplyBalance: asset.maxSupplyBalance.toString(),
+                maxBorrowBalance: asset.maxBorrowBalance.toString(),
+                currentSupplyBalance: asset.currentSupplyBalance.toString(),
+                currentBorrowBalance: asset.currentBorrowBalance.toString(),
+                netDeposits: asset.netDeposits.toString(),
+                netBorrows: asset.netBorrows.toString()
             }))
         }));
 
@@ -1518,16 +1502,21 @@ app.get("/user/:address/monthly-portfolio-value", async (c) => {
             startDate: portfolioData.currentValue.startDate,
             endDate: portfolioData.currentValue.endDate,
             endTimestamp: portfolioData.currentValue.endTimestamp,
-            portfolioValue: portfolioData.currentValue.portfolioValue.toString(),
-            totalSupplied: portfolioData.currentValue.totalSupplied.toString(),
-            totalBorrowed: portfolioData.currentValue.totalBorrowed.toString(),
             isPartialMonth: portfolioData.currentValue.isPartialMonth,
             daysInPeriod: portfolioData.currentValue.daysInPeriod,
             assets: portfolioData.currentValue.assets.map(asset => ({
                 asset: asset.asset,
-                supplied: asset.supplied.toString(),
-                borrowed: asset.borrowed.toString(),
-                netPosition: asset.netPosition.toString()
+                totalDeposited: asset.totalDeposited.toString(),
+                totalWithdrawn: asset.totalWithdrawn.toString(),
+                totalBorrowed: asset.totalBorrowed.toString(),
+                totalRepaid: asset.totalRepaid.toString(),
+                totalYieldEarned: asset.totalYieldEarned.toString(),
+                maxSupplyBalance: asset.maxSupplyBalance.toString(),
+                maxBorrowBalance: asset.maxBorrowBalance.toString(),
+                currentSupplyBalance: asset.currentSupplyBalance.toString(),
+                currentBorrowBalance: asset.currentBorrowBalance.toString(),
+                netDeposits: asset.netDeposits.toString(),
+                netBorrows: asset.netBorrows.toString()
             }))
         } : null;
 
@@ -1538,16 +1527,8 @@ app.get("/user/:address/monthly-portfolio-value", async (c) => {
             fromDate: new Date(fromTimestamp * 1000).toISOString(),
             toDate: new Date(toTimestamp * 1000).toISOString(),
             months: portfolioData.monthlyValues.length,
-            monthlyPortfolioValues: formattedPortfolio,
+            monthlyPositions: formattedPortfolio,
             currentValue: serializedCurrentValue,
-            summary: {
-                averagePortfolioValue: averagePortfolioValue.toString(),
-                maxPortfolioValue: maxPortfolioValue.toString(),
-                minPortfolioValue: minPortfolioValue.toString(),
-                currentPortfolioValue: currentPortfolioValue.toString(),
-                totalMonths: portfolioData.monthlyValues.length,
-                hasPartialMonth: !!portfolioData.currentValue
-            },
             calculatedAt: Math.floor(Date.now() / 1000)
         });
 
@@ -1610,6 +1591,9 @@ app.get("/user/:address/monthly-portfolio-value-isolated", async (c) => {
     try {
         const context = {db};
 
+        // Import the custom period positions function
+        const { calculateCustomPeriodIsolatedPairPositions } = await import("../helpers/yield/isolatedPair/positionCalculations");
+
         // First, get the regular pool data to determine month boundaries
         const portfolioData = await calculateUserMonthlyPortfolioValue(context, userAddress, fromTimestamp, toTimestamp);
 
@@ -1620,9 +1604,6 @@ app.get("/user/:address/monthly-portfolio-value-isolated", async (c) => {
             monthName: string;
             endDate: string;
             endTimestamp: number;
-            portfolioValue: bigint;
-            totalSupplied: bigint;
-            totalBorrowed: bigint;
             pairs: Array<any>;
         }> = [];
 
@@ -1644,11 +1625,16 @@ app.get("/user/:address/monthly-portfolio-value-isolated", async (c) => {
                 const lastDayTimestamp = Math.floor((nextMonthStart - 1000) / 1000); // Last second of month
                 const endTimestamp = Math.min(lastDayTimestamp, toTimestamp);
 
-                const positions = await calculateAllIsolatedPairPositions(context, userAddress, endTimestamp, fromTimestamp);
+                // Calculate start of month timestamp
+                const monthStartTimestamp = Math.floor(Date.UTC(year, month, 1) / 1000);
 
-                const totalSupplied = positions.reduce((sum, pos) => sum + pos.collateralAmount + pos.assetAmount, 0n);
-                const totalBorrowed = positions.reduce((sum, pos) => sum + pos.borrowAmount, 0n);
-                const portfolioValue = totalSupplied - totalBorrowed;
+                // Use custom period positions to get comprehensive data including closed positions
+                const positions = await calculateCustomPeriodIsolatedPairPositions(
+                    context,
+                    userAddress,
+                    monthStartTimestamp,
+                    endTimestamp
+                );
 
                 const monthNames = ['January', 'February', 'March', 'April', 'May', 'June',
                                    'July', 'August', 'September', 'October', 'November', 'December'];
@@ -1659,14 +1645,26 @@ app.get("/user/:address/monthly-portfolio-value-isolated", async (c) => {
                     monthName: monthNames[month]!,
                     endDate: new Date(endTimestamp * 1000).toISOString().split('T')[0]!,
                     endTimestamp,
-                    portfolioValue,
-                    totalSupplied,
-                    totalBorrowed,
                     pairs: positions.map(pos => ({
                         pair: pos.pair,
-                        collateralAmount: pos.collateralAmount.toString(),
-                        assetAmount: pos.assetAmount.toString(),
-                        borrowAmount: pos.borrowAmount.toString()
+                        totalDeposited: pos.totalDeposited.toString(),
+                        totalWithdrawn: pos.totalWithdrawn.toString(),
+                        totalBorrowed: pos.totalBorrowed.toString(),
+                        totalRepaid: pos.totalRepaid.toString(),
+                        totalCollateralAdded: pos.totalCollateralAdded.toString(),
+                        totalCollateralRemoved: pos.totalCollateralRemoved.toString(),
+                        totalAssetYield: pos.totalAssetYield.toString(),
+                        totalBorrowCost: pos.totalBorrowCost.toString(),
+                        totalNetYield: pos.totalNetYield.toString(),
+                        maxAssetAmount: pos.maxAssetAmount.toString(),
+                        maxBorrowAmount: pos.maxBorrowAmount.toString(),
+                        maxCollateralAmount: pos.maxCollateralAmount.toString(),
+                        currentAssetAmount: pos.currentAssetAmount.toString(),
+                        currentBorrowAmount: pos.currentBorrowAmount.toString(),
+                        currentCollateralAmount: pos.currentCollateralAmount.toString(),
+                        netDeposits: pos.netDeposits.toString(),
+                        netBorrows: pos.netBorrows.toString(),
+                        netCollateral: pos.netCollateral.toString()
                     }))
                 });
 
@@ -1676,11 +1674,16 @@ app.get("/user/:address/monthly-portfolio-value-isolated", async (c) => {
         } else {
             // Use regular pool month boundaries
             for (const regularMonth of portfolioData.monthlyValues) {
-                const positions = await calculateAllIsolatedPairPositions(context, userAddress, regularMonth.endTimestamp, fromTimestamp);
+                // Calculate start of month timestamp
+                const monthStartTimestamp = Math.floor(Date.UTC(regularMonth.year, regularMonth.month - 1, 1) / 1000);
 
-                const totalSupplied = positions.reduce((sum, pos) => sum + pos.collateralAmount + pos.assetAmount, 0n);
-                const totalBorrowed = positions.reduce((sum, pos) => sum + pos.borrowAmount, 0n);
-                const portfolioValue = totalSupplied - totalBorrowed;
+                // Use custom period positions to get comprehensive data including closed positions
+                const positions = await calculateCustomPeriodIsolatedPairPositions(
+                    context,
+                    userAddress,
+                    monthStartTimestamp,
+                    regularMonth.endTimestamp
+                );
 
                 monthlyIsolatedPairs.push({
                     year: regularMonth.year,
@@ -1688,14 +1691,26 @@ app.get("/user/:address/monthly-portfolio-value-isolated", async (c) => {
                     monthName: regularMonth.monthName,
                     endDate: regularMonth.endDate,
                     endTimestamp: regularMonth.endTimestamp,
-                    portfolioValue,
-                    totalSupplied,
-                    totalBorrowed,
                     pairs: positions.map(pos => ({
                         pair: pos.pair,
-                        collateralAmount: pos.collateralAmount.toString(),
-                        assetAmount: pos.assetAmount.toString(),
-                        borrowAmount: pos.borrowAmount.toString()
+                        totalDeposited: pos.totalDeposited.toString(),
+                        totalWithdrawn: pos.totalWithdrawn.toString(),
+                        totalBorrowed: pos.totalBorrowed.toString(),
+                        totalRepaid: pos.totalRepaid.toString(),
+                        totalCollateralAdded: pos.totalCollateralAdded.toString(),
+                        totalCollateralRemoved: pos.totalCollateralRemoved.toString(),
+                        totalAssetYield: pos.totalAssetYield.toString(),
+                        totalBorrowCost: pos.totalBorrowCost.toString(),
+                        totalNetYield: pos.totalNetYield.toString(),
+                        maxAssetAmount: pos.maxAssetAmount.toString(),
+                        maxBorrowAmount: pos.maxBorrowAmount.toString(),
+                        maxCollateralAmount: pos.maxCollateralAmount.toString(),
+                        currentAssetAmount: pos.currentAssetAmount.toString(),
+                        currentBorrowAmount: pos.currentBorrowAmount.toString(),
+                        currentCollateralAmount: pos.currentCollateralAmount.toString(),
+                        netDeposits: pos.netDeposits.toString(),
+                        netBorrows: pos.netBorrows.toString(),
+                        netCollateral: pos.netCollateral.toString()
                     }))
                 });
             }
@@ -1708,20 +1723,22 @@ app.get("/user/:address/monthly-portfolio-value-isolated", async (c) => {
             monthName: string;
             endDate: string;
             endTimestamp: number;
-            portfolioValue: bigint;
-            totalSupplied: bigint;
-            totalBorrowed: bigint;
             isPartialMonth: boolean;
             daysInPeriod: number;
             pairs: Array<any>;
         } | undefined;
 
         if (portfolioData.currentValue) {
-            const positions = await calculateAllIsolatedPairPositions(context, userAddress, portfolioData.currentValue.endTimestamp, fromTimestamp);
+            // Calculate start of month timestamp
+            const monthStartTimestamp = Math.floor(Date.UTC(portfolioData.currentValue.year, portfolioData.currentValue.month - 1, 1) / 1000);
 
-            const totalSupplied = positions.reduce((sum, pos) => sum + pos.collateralAmount + pos.assetAmount, 0n);
-            const totalBorrowed = positions.reduce((sum, pos) => sum + pos.borrowAmount, 0n);
-            const portfolioValue = totalSupplied - totalBorrowed;
+            // Use custom period positions to get comprehensive data including closed positions
+            const positions = await calculateCustomPeriodIsolatedPairPositions(
+                context,
+                userAddress,
+                monthStartTimestamp,
+                portfolioData.currentValue.endTimestamp
+            );
 
             currentValue = {
                 year: portfolioData.currentValue.year,
@@ -1729,16 +1746,28 @@ app.get("/user/:address/monthly-portfolio-value-isolated", async (c) => {
                 monthName: portfolioData.currentValue.monthName,
                 endDate: portfolioData.currentValue.endDate,
                 endTimestamp: portfolioData.currentValue.endTimestamp,
-                portfolioValue,
-                totalSupplied,
-                totalBorrowed,
                 isPartialMonth: portfolioData.currentValue.isPartialMonth,
                 daysInPeriod: portfolioData.currentValue.daysInPeriod,
                 pairs: positions.map(pos => ({
                     pair: pos.pair,
-                    collateralAmount: pos.collateralAmount.toString(),
-                    assetAmount: pos.assetAmount.toString(),
-                    borrowAmount: pos.borrowAmount.toString()
+                    totalDeposited: pos.totalDeposited.toString(),
+                    totalWithdrawn: pos.totalWithdrawn.toString(),
+                    totalBorrowed: pos.totalBorrowed.toString(),
+                    totalRepaid: pos.totalRepaid.toString(),
+                    totalCollateralAdded: pos.totalCollateralAdded.toString(),
+                    totalCollateralRemoved: pos.totalCollateralRemoved.toString(),
+                    totalAssetYield: pos.totalAssetYield.toString(),
+                    totalBorrowCost: pos.totalBorrowCost.toString(),
+                    totalNetYield: pos.totalNetYield.toString(),
+                    maxAssetAmount: pos.maxAssetAmount.toString(),
+                    maxBorrowAmount: pos.maxBorrowAmount.toString(),
+                    maxCollateralAmount: pos.maxCollateralAmount.toString(),
+                    currentAssetAmount: pos.currentAssetAmount.toString(),
+                    currentBorrowAmount: pos.currentBorrowAmount.toString(),
+                    currentCollateralAmount: pos.currentCollateralAmount.toString(),
+                    netDeposits: pos.netDeposits.toString(),
+                    netBorrows: pos.netBorrows.toString(),
+                    netCollateral: pos.netCollateral.toString()
                 }))
             };
         }
@@ -1753,31 +1782,10 @@ app.get("/user/:address/monthly-portfolio-value-isolated", async (c) => {
                 months: 0,
                 monthlyPortfolioValues: [],
                 currentValue: null,
-                summary: {
-                    averagePortfolioValue: "0",
-                    maxPortfolioValue: "0",
-                    minPortfolioValue: "0",
-                    currentPortfolioValue: "0",
-                    totalMonths: 0,
-                    hasPartialMonth: false
-                },
                 calculatedAt: Math.floor(Date.now() / 1000),
                 message: "No isolated pair positions found for this user during the specified period"
             });
         }
-
-        // Calculate summary statistics for isolated pairs
-        // Include currentValue in calculations if present
-        const allValues = [...monthlyIsolatedPairs];
-        if (currentValue) {
-            allValues.push(currentValue);
-        }
-
-        const totalPortfolioValue = allValues.reduce((sum, month) => sum + month.portfolioValue, 0n);
-        const averagePortfolioValue = allValues.length > 0 ? totalPortfolioValue / BigInt(allValues.length) : 0n;
-        const maxPortfolioValue = allValues.reduce((max, month) => month.portfolioValue > max ? month.portfolioValue : max, 0n);
-        const minPortfolioValue = allValues.reduce((min, month) => month.portfolioValue < min ? month.portfolioValue : min, allValues[0]?.portfolioValue || 0n);
-        const currentPortfolioValue = currentValue?.portfolioValue || allValues[allValues.length - 1]?.portfolioValue || 0n;
 
         // Format the response data
         const formattedPortfolio = monthlyIsolatedPairs.map(month => ({
@@ -1786,9 +1794,6 @@ app.get("/user/:address/monthly-portfolio-value-isolated", async (c) => {
             monthName: month.monthName,
             endDate: month.endDate,
             endTimestamp: month.endTimestamp,
-            portfolioValue: month.portfolioValue.toString(),
-            totalSupplied: month.totalSupplied.toString(),
-            totalBorrowed: month.totalBorrowed.toString(),
             pairs: month.pairs
         }));
 
@@ -1799,9 +1804,6 @@ app.get("/user/:address/monthly-portfolio-value-isolated", async (c) => {
             monthName: currentValue.monthName,
             endDate: currentValue.endDate,
             endTimestamp: currentValue.endTimestamp,
-            portfolioValue: currentValue.portfolioValue.toString(),
-            totalSupplied: currentValue.totalSupplied.toString(),
-            totalBorrowed: currentValue.totalBorrowed.toString(),
             isPartialMonth: currentValue.isPartialMonth,
             daysInPeriod: currentValue.daysInPeriod,
             pairs: currentValue.pairs
@@ -1816,14 +1818,6 @@ app.get("/user/:address/monthly-portfolio-value-isolated", async (c) => {
             months: monthlyIsolatedPairs.length,
             monthlyPortfolioValues: formattedPortfolio,
             currentValue: serializedCurrentValue,
-            summary: {
-                averagePortfolioValue: averagePortfolioValue.toString(),
-                maxPortfolioValue: maxPortfolioValue.toString(),
-                minPortfolioValue: minPortfolioValue.toString(),
-                currentPortfolioValue: currentPortfolioValue.toString(),
-                totalMonths: monthlyIsolatedPairs.length,
-                hasPartialMonth: !!currentValue
-            },
             calculatedAt: Math.floor(Date.now() / 1000)
         });
 
