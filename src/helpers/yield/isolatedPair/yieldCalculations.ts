@@ -17,6 +17,8 @@ import { getUserIsolatedPairs } from "./pairTracking";
 import { EXCHANGE_PRECISION } from "./constants";
 import { ExchangeRateCache } from "./exchangeRateCache";
 import { IsolatedPairBalanceCache } from "./balanceCache";
+import { DepositIsolated, WithdrawIsolated, BorrowAssetIsolated, RepayAssetIsolated } from "ponder:schema";
+import { eq, and, gte, lte } from "ponder";
 
 /**
  * Yield data for a single isolated pair over a time period
@@ -24,7 +26,7 @@ import { IsolatedPairBalanceCache } from "./balanceCache";
 export interface IsolatedPairYield {
     pair: string;
     assetYield: bigint;
-    borrowYield: bigint;
+    borrowCost: bigint;
     netYield: bigint;
     startAssetShares: bigint;
     endAssetShares: bigint;
@@ -78,7 +80,7 @@ export interface IsolatedPairYield {
  * // Returns: {
  * //   pair: "0xPair...",
  * //   assetYield: 50000000000000000n,    // 50 tokens earned
- * //   borrowYield: 15000000000000000n,   // 15 tokens interest cost
+ * //   borrowCost: 15000000000000000n,    // 15 tokens interest cost
  * //   netYield: 35000000000000000n,      // 35 tokens net profit
  * //   startAssetShares: 1000n,
  * //   endAssetShares: 1200n,
@@ -190,7 +192,7 @@ export async function calculateIsolatedPairYield(
     return {
         pair,
         assetYield: totalAssetYield,
-        borrowYield: totalBorrowYield,
+        borrowCost: totalBorrowYield,
         netYield,
         startAssetShares,
         endAssetShares,
@@ -238,8 +240,8 @@ export async function calculateIsolatedPairYield(
  *   exchangeRateCache, balanceCache
  * );
  * // Returns: [
- * //   { pair: "0xPair1...", assetYield: 50n, borrowYield: 15n, netYield: 35n, ... },
- * //   { pair: "0xPair2...", assetYield: 30n, borrowYield: 10n, netYield: 20n, ... }
+ * //   { pair: "0xPair1...", assetYield: 50n, borrowCost: 15n, netYield: 35n, ... },
+ * //   { pair: "0xPair2...", assetYield: 30n, borrowCost: 10n, netYield: 20n, ... }
  * // ]
  * ```
  */
@@ -291,5 +293,321 @@ export async function calculateAllIsolatedPairYields(
         y.endCollateralBalance > 0n ||
         y.netYield !== 0n
     );
+}
+
+/**
+ * Calculate segmented yield for an isolated pair with detailed breakdown
+ * Similar to calculateSegmentedCustomPeriodYield but for isolated pairs using exchange rates
+ *
+ * @param context - Ponder context with database access
+ * @param user - User address
+ * @param pair - Isolated pair address
+ * @param startTimestamp - Start of time period
+ * @param endTimestamp - End of time period
+ * @param exchangeRateCache - Optional cache to avoid redundant exchange rate queries
+ */
+export async function calculateSegmentedIsolatedPairYield(
+    context: any,
+    user: string,
+    pair: string,
+    startTimestamp: number,
+    endTimestamp: number,
+    exchangeRateCache?: ExchangeRateCache
+): Promise<{
+    totalYield: bigint;
+    segments: Array<{
+        startTime: number;
+        endTime: number;
+        startDate: string;
+        endDate: string;
+        assetShares: bigint;
+        actualAssetAmount: bigint;
+        startExchangeRate: bigint;
+        endExchangeRate: bigint;
+        segmentYield: bigint;
+        durationDays: number;
+    }>;
+}> {
+    // Get all deposit and withdraw events during the period, ordered chronologically
+    const dbQuery = context.db.sql || context.db;
+
+    const [depositEvents, withdrawEvents] = await Promise.all([
+        dbQuery.select().from(DepositIsolated).where(
+            and(
+                eq(DepositIsolated.owner, user as `0x${string}`),
+                eq(DepositIsolated.pair, pair as `0x${string}`),
+                gte(DepositIsolated.timestamp, startTimestamp),
+                lte(DepositIsolated.timestamp, endTimestamp)
+            )
+        ).orderBy(DepositIsolated.timestamp),
+        dbQuery.select().from(WithdrawIsolated).where(
+            and(
+                eq(WithdrawIsolated.owner, user as `0x${string}`),
+                eq(WithdrawIsolated.pair, pair as `0x${string}`),
+                gte(WithdrawIsolated.timestamp, startTimestamp),
+                lte(WithdrawIsolated.timestamp, endTimestamp)
+            )
+        ).orderBy(WithdrawIsolated.timestamp)
+    ]);
+
+    // Combine and sort events
+    const allEvents = [
+        ...depositEvents.map((e: any) => ({ ...e, eventType: 'deposit' as const, sharesDelta: e.shares })),
+        ...withdrawEvents.map((e: any) => ({ ...e, eventType: 'withdraw' as const, sharesDelta: 0n - e.shares }))
+    ].sort((a, b) => Number(a.timestamp) - Number(b.timestamp));
+
+    // Get starting asset shares
+    const startAssetShares = await getIsolatedPairAssetShares(context, user, pair, startTimestamp);
+
+    // Create time segments
+    const segments = [];
+    let currentShares = startAssetShares;
+    let previousTime = startTimestamp;
+
+    // If no events during period, create single segment
+    if (allEvents.length === 0) {
+        if (startAssetShares > 0n) {
+            segments.push({
+                startTime: startTimestamp,
+                endTime: endTimestamp,
+                assetShares: startAssetShares
+            });
+        }
+    } else {
+        // Create segments between events
+        for (const event of allEvents) {
+            // Ensure timestamp is a number (not BigInt)
+            const eventTimestamp = Number(event.timestamp);
+
+            // Add segment before this event (if there's time and shares)
+            if (eventTimestamp > previousTime && currentShares > 0n) {
+                segments.push({
+                    startTime: previousTime,
+                    endTime: eventTimestamp,
+                    assetShares: currentShares
+                });
+            }
+
+            // Update shares based on event
+            currentShares += event.sharesDelta;
+            previousTime = eventTimestamp;
+        }
+
+        // Add final segment from last event to end of period
+        if (previousTime < endTimestamp && currentShares > 0n) {
+            segments.push({
+                startTime: previousTime,
+                endTime: endTimestamp,
+                assetShares: currentShares
+            });
+        }
+    }
+
+    // Create cache if not provided
+    const rateCache = exchangeRateCache || new ExchangeRateCache();
+
+    // Prefetch all exchange rates for segments
+    const prefetchList = segments.flatMap(seg => [
+        { pair, timestamp: seg.startTime },
+        { pair, timestamp: seg.endTime }
+    ]);
+    await rateCache.prefetch(context, prefetchList);
+
+    // Calculate yield for each segment and collect detailed information
+    let totalYield = 0n;
+    const detailedSegments = [];
+
+    for (const segment of segments) {
+        // Get exchange rates at start and end of segment (use cache)
+        const [startExchangeRate, endExchangeRate] = await Promise.all([
+            rateCache.get(context, pair, segment.startTime),
+            rateCache.get(context, pair, segment.endTime)
+        ]);
+
+        // Calculate yield for this segment
+        // yield = shares × (endRate - startRate) / EXCHANGE_PRECISION
+        const exchangeRateChange = endExchangeRate - startExchangeRate;
+        const segmentYield = (segment.assetShares * exchangeRateChange + EXCHANGE_PRECISION / 2n) / EXCHANGE_PRECISION;
+        totalYield += segmentYield;
+
+        const actualAssetAmount = convertSharesToAssets(segment.assetShares, startExchangeRate);
+        const durationDays = (Number(segment.endTime) - Number(segment.startTime)) / (24 * 60 * 60);
+
+        detailedSegments.push({
+            startTime: Number(segment.startTime),
+            endTime: Number(segment.endTime),
+            startDate: new Date(Number(segment.startTime) * 1000).toISOString(),
+            endDate: new Date(Number(segment.endTime) * 1000).toISOString(),
+            assetShares: segment.assetShares,
+            actualAssetAmount,
+            startExchangeRate,
+            endExchangeRate,
+            segmentYield,
+            durationDays: Math.round(durationDays * 100) / 100
+        });
+    }
+
+    return {
+        totalYield,
+        segments: detailedSegments
+    };
+}
+
+/**
+ * Calculate segmented borrow cost for an isolated pair with detailed breakdown
+ * Similar to calculateSegmentedCustomPeriodBorrowCost but for isolated pairs using exchange rates
+ *
+ * @param context - Ponder context with database access
+ * @param user - User address
+ * @param pair - Isolated pair address
+ * @param startTimestamp - Start of time period
+ * @param endTimestamp - End of time period
+ * @param exchangeRateCache - Optional cache to avoid redundant exchange rate queries
+ */
+export async function calculateSegmentedIsolatedPairBorrowCost(
+    context: any,
+    user: string,
+    pair: string,
+    startTimestamp: number,
+    endTimestamp: number,
+    exchangeRateCache?: ExchangeRateCache
+): Promise<{
+    totalBorrowCost: bigint;
+    segments: Array<{
+        startTime: number;
+        endTime: number;
+        startDate: string;
+        endDate: string;
+        borrowShares: bigint;
+        actualBorrowAmount: bigint;
+        startExchangeRate: bigint;
+        endExchangeRate: bigint;
+        segmentBorrowCost: bigint;
+        durationDays: number;
+    }>;
+}> {
+    // Get all borrow and repay events during the period, ordered chronologically
+    const dbQuery = context.db.sql || context.db;
+
+    const [borrowEvents, repayEvents] = await Promise.all([
+        dbQuery.select().from(BorrowAssetIsolated).where(
+            and(
+                eq(BorrowAssetIsolated.borrower, user as `0x${string}`),
+                eq(BorrowAssetIsolated.pair, pair as `0x${string}`),
+                gte(BorrowAssetIsolated.timestamp, startTimestamp),
+                lte(BorrowAssetIsolated.timestamp, endTimestamp)
+            )
+        ).orderBy(BorrowAssetIsolated.timestamp),
+        dbQuery.select().from(RepayAssetIsolated).where(
+            and(
+                eq(RepayAssetIsolated.borrower, user as `0x${string}`),
+                eq(RepayAssetIsolated.pair, pair as `0x${string}`),
+                gte(RepayAssetIsolated.timestamp, startTimestamp),
+                lte(RepayAssetIsolated.timestamp, endTimestamp)
+            )
+        ).orderBy(RepayAssetIsolated.timestamp)
+    ]);
+
+    // Combine and sort events
+    const allEvents = [
+        ...borrowEvents.map((e: any) => ({ ...e, eventType: 'borrow' as const, sharesDelta: e.sharesAdded })),
+        ...repayEvents.map((e: any) => ({ ...e, eventType: 'repay' as const, sharesDelta: 0n - e.shares }))
+    ].sort((a, b) => Number(a.timestamp) - Number(b.timestamp));
+
+    // Get starting borrow shares
+    const startBorrowShares = await getIsolatedPairBorrowShares(context, user, pair, startTimestamp);
+
+    // Create time segments
+    const segments = [];
+    let currentShares = startBorrowShares;
+    let previousTime = startTimestamp;
+
+    // If no events during period, create single segment
+    if (allEvents.length === 0) {
+        if (startBorrowShares > 0n) {
+            segments.push({
+                startTime: startTimestamp,
+                endTime: endTimestamp,
+                borrowShares: startBorrowShares
+            });
+        }
+    } else {
+        // Create segments between events
+        for (const event of allEvents) {
+            // Ensure timestamp is a number (not BigInt)
+            const eventTimestamp = Number(event.timestamp);
+
+            // Add segment before this event (if there's time and shares)
+            if (eventTimestamp > previousTime && currentShares > 0n) {
+                segments.push({
+                    startTime: previousTime,
+                    endTime: eventTimestamp,
+                    borrowShares: currentShares
+                });
+            }
+
+            // Update shares based on event
+            currentShares += event.sharesDelta;
+            previousTime = eventTimestamp;
+        }
+
+        // Add final segment from last event to end of period
+        if (previousTime < endTimestamp && currentShares > 0n) {
+            segments.push({
+                startTime: previousTime,
+                endTime: endTimestamp,
+                borrowShares: currentShares
+            });
+        }
+    }
+
+    // Create cache if not provided
+    const rateCache = exchangeRateCache || new ExchangeRateCache();
+
+    // Prefetch all exchange rates for segments
+    const prefetchList = segments.flatMap(seg => [
+        { pair, timestamp: seg.startTime },
+        { pair, timestamp: seg.endTime }
+    ]);
+    await rateCache.prefetch(context, prefetchList);
+
+    // Calculate borrow cost for each segment and collect detailed information
+    let totalBorrowCost = 0n;
+    const detailedSegments = [];
+
+    for (const segment of segments) {
+        // Get exchange rates at start and end of segment (use cache)
+        const [startExchangeRate, endExchangeRate] = await Promise.all([
+            rateCache.get(context, pair, segment.startTime),
+            rateCache.get(context, pair, segment.endTime)
+        ]);
+
+        // Calculate borrow cost for this segment
+        // cost = shares × (endRate - startRate) / EXCHANGE_PRECISION
+        const exchangeRateChange = endExchangeRate - startExchangeRate;
+        const segmentBorrowCost = (segment.borrowShares * exchangeRateChange + EXCHANGE_PRECISION / 2n) / EXCHANGE_PRECISION;
+        totalBorrowCost += segmentBorrowCost;
+
+        const actualBorrowAmount = convertSharesToAssets(segment.borrowShares, startExchangeRate);
+        const durationDays = (Number(segment.endTime) - Number(segment.startTime)) / (24 * 60 * 60);
+
+        detailedSegments.push({
+            startTime: Number(segment.startTime),
+            endTime: Number(segment.endTime),
+            startDate: new Date(Number(segment.startTime) * 1000).toISOString(),
+            endDate: new Date(Number(segment.endTime) * 1000).toISOString(),
+            borrowShares: segment.borrowShares,
+            actualBorrowAmount,
+            startExchangeRate,
+            endExchangeRate,
+            segmentBorrowCost,
+            durationDays: Math.round(durationDays * 100) / 100
+        });
+    }
+
+    return {
+        totalBorrowCost,
+        segments: detailedSegments
+    };
 }
 

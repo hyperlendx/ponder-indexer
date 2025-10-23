@@ -10,7 +10,11 @@ import {
     getIsolatedPairCollateralBalance,
     getIsolatedPairAssetShares,
     getIsolatedPairBorrowShares,
-    convertSharesToAssets
+    getIsolatedPairAssetSharesWithEvents,
+    getIsolatedPairBorrowSharesWithEvents,
+    getIsolatedPairCollateralBalanceWithEvents,
+    convertSharesToAssets,
+    BalanceWithEvents
 } from "./balanceQueries";
 import { getIsolatedPairExchangeRate } from "./exchangeRate";
 import { getUserIsolatedPairs } from "./pairTracking";
@@ -23,6 +27,17 @@ import {
     calculateTotalCollateralAdded,
     calculateTotalCollateralRemoved
 } from "./transactionAggregations";
+import {
+    BorrowAssetIsolated,
+    RepayAssetIsolated,
+    AddCollateralIsolated,
+    RemoveCollateralIsolated,
+    DepositIsolated,
+    WithdrawIsolated
+} from "ponder:schema";
+import { eq, and, gte, lte } from "ponder";
+import { calculateSegmentedIsolatedPairYield, calculateSegmentedIsolatedPairBorrowCost } from "./yieldCalculations";
+import { ExchangeRateCache } from "./exchangeRateCache";
 
 /**
  * Position data for a single isolated pair
@@ -356,5 +371,691 @@ export async function calculateCustomPeriodIsolatedPairPositions(
             pos.maxCollateralAmount > 0n
     );
 
+    return activePositions;
+}
+
+/**
+ * Event detail for isolated pair transactions
+ */
+export interface IsolatedPairEventDetail {
+    eventType: 'deposit' | 'withdraw' | 'borrow' | 'repay' | 'collateral_add' | 'collateral_remove';
+    timestamp: number;
+    date: string;
+    amount: string;
+    txHash: string;
+}
+
+/**
+ * Simplified isolated pair position data with only activity metrics and event details
+ */
+export interface SimplifiedIsolatedPairPosition {
+    pair: string;
+    totalDeposited: bigint;
+    totalWithdrawn: bigint;
+    totalBorrowed: bigint;
+    totalRepaid: bigint;
+    totalCollateralAdded: bigint;
+    totalCollateralRemoved: bigint;
+    events: IsolatedPairEventDetail[];
+}
+
+/**
+ * Calculate simplified isolated pair positions with only activity metrics and event details
+ *
+ * This is an optimized version that:
+ * - Returns only the 6 core activity metrics (deposits, withdrawals, borrows, repays, collateral add/remove)
+ * - Includes all event details for transparency and verification
+ * - Skips expensive calculations (yield, balances, exchange rates for end state)
+ * - Properly accounts for positions active before the period started
+ *
+ * IMPORTANT: Activity metrics show total capital active during the period:
+ * - totalDeposited = asset balance at START of period + deposits DURING period
+ * - totalWithdrawn = withdrawals DURING period
+ * - totalBorrowed = borrow balance at START of period + borrows DURING period
+ * - totalRepaid = repayments DURING period
+ * - totalCollateralAdded = collateral balance at START of period + collateral added DURING period
+ * - totalCollateralRemoved = collateral removed DURING period
+ *
+ * This allows users to see how much capital was working for them during the period.
+ *
+ * Example: User deposited 1000 tokens on Jan 1, withdrew 500 on Feb 15
+ * Query period: Feb 1 - Feb 28
+ * Result: totalDeposited=1000, totalWithdrawn=500
+ * (Shows 1000 was active during Feb, 500 was withdrawn)
+ *
+ * @param context - Ponder context with database access
+ * @param user - User address
+ * @param startTimestamp - Start of the time period (Unix timestamp)
+ * @param endTimestamp - End of the time period (Unix timestamp)
+ * @returns Array of simplified isolated pair position data with event details
+ */
+export async function calculateUserActivityIsolatedPairPositions(
+    context: any,
+    user: string,
+    startTimestamp: number,
+    endTimestamp: number
+): Promise<SimplifiedIsolatedPairPosition[]> {
+    const dbQuery = context.db.sql || context.db;
+
+    // Get all pairs where user had activity during the period
+    const pairs = await getUserIsolatedPairsForPeriod(context, user, startTimestamp, endTimestamp);
+
+    if (pairs.length === 0) {
+        return [];
+    }
+
+    // Calculate activity metrics for each pair in parallel
+    const positions = await Promise.all(
+        pairs.map(async (pair) => {
+            // Fetch data in parallel for performance
+            const [
+                // Events during the period
+                depositEvents,
+                withdrawEvents,
+                borrowEvents,
+                repayEvents,
+                addCollateralEvents,
+                removeCollateralEvents,
+                // Starting balances
+                startAssetShares,
+                startBorrowShares,
+                startCollateralAmount,
+                // Exchange rates at start
+                startExchangeRate
+            ] = await Promise.all([
+                // Fetch all deposit events during the period
+                dbQuery.select().from(DepositIsolated).where(
+                    and(
+                        eq(DepositIsolated.owner, user as `0x${string}`),
+                        eq(DepositIsolated.pair, pair as `0x${string}`),
+                        gte(DepositIsolated.timestamp, startTimestamp),
+                        lte(DepositIsolated.timestamp, endTimestamp)
+                    )
+                ),
+                // Fetch all withdraw events during the period
+                dbQuery.select().from(WithdrawIsolated).where(
+                    and(
+                        eq(WithdrawIsolated.owner, user as `0x${string}`),
+                        eq(WithdrawIsolated.pair, pair as `0x${string}`),
+                        gte(WithdrawIsolated.timestamp, startTimestamp),
+                        lte(WithdrawIsolated.timestamp, endTimestamp)
+                    )
+                ),
+                // Fetch all borrow events during the period
+                dbQuery.select().from(BorrowAssetIsolated).where(
+                    and(
+                        eq(BorrowAssetIsolated.borrower, user as `0x${string}`),
+                        eq(BorrowAssetIsolated.pair, pair as `0x${string}`),
+                        gte(BorrowAssetIsolated.timestamp, startTimestamp),
+                        lte(BorrowAssetIsolated.timestamp, endTimestamp)
+                    )
+                ),
+                // Fetch all repay events during the period
+                dbQuery.select().from(RepayAssetIsolated).where(
+                    and(
+                        eq(RepayAssetIsolated.borrower, user as `0x${string}`),
+                        eq(RepayAssetIsolated.pair, pair as `0x${string}`),
+                        gte(RepayAssetIsolated.timestamp, startTimestamp),
+                        lte(RepayAssetIsolated.timestamp, endTimestamp)
+                    )
+                ),
+                // Fetch all add collateral events during the period
+                dbQuery.select().from(AddCollateralIsolated).where(
+                    and(
+                        eq(AddCollateralIsolated.borrower, user as `0x${string}`),
+                        eq(AddCollateralIsolated.pair, pair as `0x${string}`),
+                        gte(AddCollateralIsolated.timestamp, startTimestamp),
+                        lte(AddCollateralIsolated.timestamp, endTimestamp)
+                    )
+                ),
+                // Fetch all remove collateral events during the period
+                dbQuery.select().from(RemoveCollateralIsolated).where(
+                    and(
+                        eq(RemoveCollateralIsolated.borrower, user as `0x${string}`),
+                        eq(RemoveCollateralIsolated.pair, pair as `0x${string}`),
+                        gte(RemoveCollateralIsolated.timestamp, startTimestamp),
+                        lte(RemoveCollateralIsolated.timestamp, endTimestamp)
+                    )
+                ),
+                // Get balances at start of period
+                getIsolatedPairAssetShares(context, user, pair, startTimestamp),
+                getIsolatedPairBorrowShares(context, user, pair, startTimestamp),
+                getIsolatedPairCollateralBalance(context, user, pair, startTimestamp),
+                // Get exchange rate at start of period
+                getIsolatedPairExchangeRate(context, pair, startTimestamp)
+            ]);
+
+            // Calculate starting balances (capital that was already active at period start)
+            const startAssetAmount = convertSharesToAssets(startAssetShares, startExchangeRate);
+            const startBorrowAmount = convertSharesToAssets(startBorrowShares, startExchangeRate);
+
+            // Initialize totals with starting balances
+            let totalDeposited = startAssetAmount;
+            let totalBorrowed = startBorrowAmount;
+            let totalCollateralAdded = startCollateralAmount;
+            let totalWithdrawn = 0n;
+            let totalRepaid = 0n;
+            let totalCollateralRemoved = 0n;
+            const events: IsolatedPairEventDetail[] = [];
+
+            // Add synthetic events for starting balances if non-zero
+            if (startAssetAmount > 0n) {
+                events.push({
+                    eventType: 'deposit',
+                    timestamp: startTimestamp,
+                    date: new Date(startTimestamp * 1000).toISOString(),
+                    amount: startAssetAmount.toString(),
+                    txHash: '0x0000000000000000000000000000000000000000000000000000000000000000'
+                });
+            }
+
+            if (startBorrowAmount > 0n) {
+                events.push({
+                    eventType: 'borrow',
+                    timestamp: startTimestamp,
+                    date: new Date(startTimestamp * 1000).toISOString(),
+                    amount: startBorrowAmount.toString(),
+                    txHash: '0x0000000000000000000000000000000000000000000000000000000000000000'
+                });
+            }
+
+            // Note: startCollateralAmount represents existing collateral from before the period
+            // We don't add it as an event since it's not a transaction during this period
+
+            // Process deposit events during the period
+            for (const event of depositEvents) {
+                const assetAmount = convertSharesToAssets(event.shares, event.exchangeRate);
+                totalDeposited += assetAmount;
+                events.push({
+                    eventType: 'deposit',
+                    timestamp: Number(event.timestamp),
+                    date: new Date(Number(event.timestamp) * 1000).toISOString(),
+                    amount: assetAmount.toString(),
+                    txHash: event.txHash
+                });
+            }
+
+            // Process withdraw events during the period
+            for (const event of withdrawEvents) {
+                const assetAmount = convertSharesToAssets(event.shares, event.exchangeRate);
+                totalWithdrawn += assetAmount;
+                events.push({
+                    eventType: 'withdraw',
+                    timestamp: Number(event.timestamp),
+                    date: new Date(Number(event.timestamp) * 1000).toISOString(),
+                    amount: assetAmount.toString(),
+                    txHash: event.txHash
+                });
+            }
+
+            // Process borrow events during the period
+            for (const event of borrowEvents) {
+                const assetAmount = convertSharesToAssets(event.sharesAdded, event.exchangeRate);
+                totalBorrowed += assetAmount;
+                events.push({
+                    eventType: 'borrow',
+                    timestamp: Number(event.timestamp),
+                    date: new Date(Number(event.timestamp) * 1000).toISOString(),
+                    amount: assetAmount.toString(),
+                    txHash: event.txHash
+                });
+            }
+
+            // Process repay events during the period
+            for (const event of repayEvents) {
+                const assetAmount = convertSharesToAssets(event.shares, event.exchangeRate);
+                totalRepaid += assetAmount;
+                events.push({
+                    eventType: 'repay',
+                    timestamp: Number(event.timestamp),
+                    date: new Date(Number(event.timestamp) * 1000).toISOString(),
+                    amount: assetAmount.toString(),
+                    txHash: event.txHash
+                });
+            }
+
+            // Process add collateral events during the period
+            for (const event of addCollateralEvents) {
+                totalCollateralAdded += event.collateralAmount;
+                events.push({
+                    eventType: 'collateral_add',
+                    timestamp: Number(event.timestamp),
+                    date: new Date(Number(event.timestamp) * 1000).toISOString(),
+                    amount: event.collateralAmount.toString(),
+                    txHash: event.txHash
+                });
+            }
+
+            // Process remove collateral events during the period
+            for (const event of removeCollateralEvents) {
+                totalCollateralRemoved += event.collateralAmount;
+                events.push({
+                    eventType: 'collateral_remove',
+                    timestamp: Number(event.timestamp),
+                    date: new Date(Number(event.timestamp) * 1000).toISOString(),
+                    amount: event.collateralAmount.toString(),
+                    txHash: event.txHash
+                });
+            }
+
+            // Sort events by timestamp for better readability
+            events.sort((a, b) => a.timestamp - b.timestamp);
+
+            return {
+                pair,
+                totalDeposited,
+                totalWithdrawn,
+                totalBorrowed,
+                totalRepaid,
+                totalCollateralAdded,
+                totalCollateralRemoved,
+                events
+            };
+        })
+    );
+
+    // Filter to only positions with activity during the period
+    const activePositions = positions.filter(
+        pos =>
+            pos.totalDeposited > 0n ||
+            pos.totalWithdrawn > 0n ||
+            pos.totalBorrowed > 0n ||
+            pos.totalRepaid > 0n ||
+            pos.totalCollateralAdded > 0n ||
+            pos.totalCollateralRemoved > 0n
+    );
+
+    return activePositions;
+}
+
+/**
+ * Event detail for isolated pair transactions
+ */
+export interface IsolatedPairEventDetail {
+    eventType: 'deposit' | 'withdraw' | 'borrow' | 'repay' | 'collateral_add' | 'collateral_remove';
+    timestamp: number;
+    date: string;
+    amount: string;
+    txHash: string;
+}
+
+/**
+ * Yield segment detail for isolated pairs
+ */
+export interface IsolatedPairYieldSegmentDetail {
+    startTime: number;
+    endTime: number;
+    startDate: string;
+    endDate: string;
+    assetShares: bigint;
+    actualAssetAmount: bigint;
+    startExchangeRate: bigint;
+    endExchangeRate: bigint;
+    segmentYield: bigint;
+    durationDays: number;
+}
+
+/**
+ * Borrow cost segment detail for isolated pairs
+ */
+export interface IsolatedPairBorrowCostSegmentDetail {
+    startTime: number;
+    endTime: number;
+    startDate: string;
+    endDate: string;
+    borrowShares: bigint;
+    actualBorrowAmount: bigint;
+    startExchangeRate: bigint;
+    endExchangeRate: bigint;
+    segmentBorrowCost: bigint;
+    durationDays: number;
+}
+
+/**
+ * Simplified isolated pair yield position with activity metrics and detailed breakdowns
+ */
+export interface SimplifiedIsolatedPairYieldPosition {
+    pair: string;
+    totalYieldEarned: bigint;
+    totalBorrowCost: bigint;
+    totalDeposited: bigint;
+    totalWithdrawn: bigint;
+    totalBorrowed: bigint;
+    totalRepaid: bigint;
+    totalCollateralAdded: bigint;
+    totalCollateralRemoved: bigint;
+    netDeposits: bigint;
+    netBorrows: bigint;
+    netCollateral: bigint;
+    events: IsolatedPairEventDetail[];
+    events_before_period: IsolatedPairEventDetail[];
+    starting_balances: {
+        collateral: bigint;
+        deposits: bigint;
+        borrows: bigint;
+    };
+    yieldSegments: IsolatedPairYieldSegmentDetail[];
+    borrowCostSegments: IsolatedPairBorrowCostSegmentDetail[];
+}
+
+/**
+ * Calculate simplified isolated pair yield positions with activity metrics and detailed yield breakdown
+ *
+ * This function provides:
+ * - Core activity metrics (deposits, withdrawals, borrows, repays, collateral changes)
+ * - Yield calculations (totalYieldEarned, totalBorrowCost)
+ * - Complete event details for transparency
+ * - Detailed yield calculation segments for manual verification
+ * - Detailed borrow cost calculation segments for manual verification
+ *
+ * IMPORTANT: Activity metrics show total capital active during the period:
+ * - totalDeposited = vault balance at START of period + deposits DURING period
+ * - totalWithdrawn = withdrawals DURING period
+ * - totalBorrowed = borrow balance at START of period + borrows DURING period
+ * - totalRepaid = repayments DURING period
+ * - totalCollateralAdded = collateral at START of period + collateral added DURING period
+ * - totalCollateralRemoved = collateral removed DURING period
+ *
+ * Yield Calculation:
+ * - Uses segmented calculation that breaks down the period by share balance changes
+ * - Each segment shows: asset shares, actual amount, exchange rates, yield earned
+ * - Allows manual verification: segmentYield = shares * (endRate - startRate) / EXCHANGE_PRECISION
+ *
+ * Borrow Cost Calculation:
+ * - Uses segmented calculation that breaks down the period by borrow share changes
+ * - Each segment shows: borrow shares, actual amount, exchange rates, cost accrued
+ * - Allows manual verification: segmentCost = shares * (endRate - startRate) / EXCHANGE_PRECISION
+ *
+ * @param context - Ponder context with database access
+ * @param user - User address
+ * @param startTimestamp - Start of the time period (Unix timestamp)
+ * @param endTimestamp - End of the time period (Unix timestamp)
+ * @returns Array of simplified isolated pair yield position data with detailed breakdowns
+ */
+export async function calculateUserIsolatedYieldPositions(
+    context: any,
+    user: string,
+    startTimestamp: number,
+    endTimestamp: number
+): Promise<SimplifiedIsolatedPairYieldPosition[]> {
+    const { db } = context;
+    const dbQuery = db.sql || db;
+
+    // Get all pairs where user had positions
+    const pairs = await getUserIsolatedPairsForPeriod(context, user, startTimestamp, endTimestamp);
+
+    if (pairs.length === 0) {
+        return [];
+    }
+
+    // Create cache for performance optimization
+    const exchangeRateCache = new ExchangeRateCache();
+
+    // Calculate yield positions for each pair in parallel
+    const positions = await Promise.all(
+        pairs.map(async (pair) => {
+            // Fetch data in parallel for performance
+            const [
+                // Events during the period
+                depositEvents,
+                withdrawEvents,
+                borrowEvents,
+                repayEvents,
+                collateralAddEvents,
+                collateralRemoveEvents,
+                // Starting balances with events
+                startAssetResult,
+                startBorrowResult,
+                startCollateralResult,
+                // Exchange rate at start
+                startExchangeRate,
+                // Segmented yield and borrow cost calculations
+                yieldResult,
+                borrowCostResult
+            ] = await Promise.all([
+                // Fetch all deposit events during the period
+                dbQuery.select().from(DepositIsolated).where(
+                    and(
+                        eq(DepositIsolated.caller, user as `0x${string}`),
+                        eq(DepositIsolated.pair, pair as `0x${string}`),
+                        gte(DepositIsolated.timestamp, startTimestamp),
+                        lte(DepositIsolated.timestamp, endTimestamp)
+                    )
+                ),
+                // Fetch all withdraw events during the period
+                dbQuery.select().from(WithdrawIsolated).where(
+                    and(
+                        eq(WithdrawIsolated.caller, user as `0x${string}`),
+                        eq(WithdrawIsolated.pair, pair as `0x${string}`),
+                        gte(WithdrawIsolated.timestamp, startTimestamp),
+                        lte(WithdrawIsolated.timestamp, endTimestamp)
+                    )
+                ),
+                // Fetch all borrow events during the period
+                dbQuery.select().from(BorrowAssetIsolated).where(
+                    and(
+                        eq(BorrowAssetIsolated.borrower, user as `0x${string}`),
+                        eq(BorrowAssetIsolated.pair, pair as `0x${string}`),
+                        gte(BorrowAssetIsolated.timestamp, startTimestamp),
+                        lte(BorrowAssetIsolated.timestamp, endTimestamp)
+                    )
+                ),
+                // Fetch all repay events during the period
+                dbQuery.select().from(RepayAssetIsolated).where(
+                    and(
+                        eq(RepayAssetIsolated.borrower, user as `0x${string}`),
+                        eq(RepayAssetIsolated.pair, pair as `0x${string}`),
+                        gte(RepayAssetIsolated.timestamp, startTimestamp),
+                        lte(RepayAssetIsolated.timestamp, endTimestamp)
+                    )
+                ),
+                // Fetch all collateral add events during the period
+                dbQuery.select().from(AddCollateralIsolated).where(
+                    and(
+                        eq(AddCollateralIsolated.borrower, user as `0x${string}`),
+                        eq(AddCollateralIsolated.pair, pair as `0x${string}`),
+                        gte(AddCollateralIsolated.timestamp, startTimestamp),
+                        lte(AddCollateralIsolated.timestamp, endTimestamp)
+                    )
+                ),
+                // Fetch all collateral remove events during the period
+                dbQuery.select().from(RemoveCollateralIsolated).where(
+                    and(
+                        eq(RemoveCollateralIsolated.borrower, user as `0x${string}`),
+                        eq(RemoveCollateralIsolated.pair, pair as `0x${string}`),
+                        gte(RemoveCollateralIsolated.timestamp, startTimestamp),
+                        lte(RemoveCollateralIsolated.timestamp, endTimestamp)
+                    )
+                ),
+                // Get balances and events at start of period
+                getIsolatedPairAssetSharesWithEvents(context, user, pair, startTimestamp),
+                getIsolatedPairBorrowSharesWithEvents(context, user, pair, startTimestamp),
+                getIsolatedPairCollateralBalanceWithEvents(context, user, pair, startTimestamp),
+                // Get exchange rate at start of period
+                getIsolatedPairExchangeRate(context, pair, startTimestamp),
+                // Calculate segmented yield and borrow cost (with caching for performance)
+                calculateSegmentedIsolatedPairYield(context, user, pair, startTimestamp, endTimestamp, exchangeRateCache),
+                calculateSegmentedIsolatedPairBorrowCost(context, user, pair, startTimestamp, endTimestamp, exchangeRateCache)
+            ]);
+
+            // Extract balances and events from enhanced results
+            const startAssetShares = startAssetResult.balance;
+            const startBorrowShares = startBorrowResult.balance;
+            const startCollateralBalance = startCollateralResult.balance;
+
+            // Calculate starting balances (capital that was already active at period start)
+            const startAssetAmount = convertSharesToAssets(startAssetShares, startExchangeRate);
+            const startBorrowAmount = convertSharesToAssets(startBorrowShares, startExchangeRate);
+
+            // Collect all events that contributed to starting balances
+            const events_before_period: IsolatedPairEventDetail[] = [
+                ...startAssetResult.events,
+                ...startBorrowResult.events,
+                ...startCollateralResult.events
+            ].sort((a, b) => a.timestamp - b.timestamp);
+
+            // Initialize totals with starting balances
+            let totalDeposited = startAssetAmount;
+            let totalBorrowed = startBorrowAmount;
+            let totalCollateralAdded = startCollateralBalance;
+            let totalWithdrawn = 0n;
+            let totalRepaid = 0n;
+            let totalCollateralRemoved = 0n;
+            const events: IsolatedPairEventDetail[] = [];
+
+            // Process deposit events during the period
+            for (const event of depositEvents) {
+                const assetAmount = convertSharesToAssets(event.shares, event.exchangeRate);
+                totalDeposited += assetAmount;
+                events.push({
+                    eventType: 'deposit',
+                    timestamp: Number(event.timestamp),
+                    date: new Date(Number(event.timestamp) * 1000).toISOString(),
+                    amount: assetAmount.toString(),
+                    txHash: event.txHash
+                });
+            }
+
+            // Process withdraw events during the period
+            for (const event of withdrawEvents) {
+                const assetAmount = convertSharesToAssets(event.shares, event.exchangeRate);
+                totalWithdrawn += assetAmount;
+                events.push({
+                    eventType: 'withdraw',
+                    timestamp: Number(event.timestamp),
+                    date: new Date(Number(event.timestamp) * 1000).toISOString(),
+                    amount: assetAmount.toString(),
+                    txHash: event.txHash
+                });
+            }
+
+            // Process borrow events during the period
+            for (const event of borrowEvents) {
+                const borrowAmount = convertSharesToAssets(event.sharesAdded, event.exchangeRate);
+                totalBorrowed += borrowAmount;
+                events.push({
+                    eventType: 'borrow',
+                    timestamp: Number(event.timestamp),
+                    date: new Date(Number(event.timestamp) * 1000).toISOString(),
+                    amount: borrowAmount.toString(),
+                    txHash: event.txHash
+                });
+            }
+
+            // Process repay events during the period
+            for (const event of repayEvents) {
+                const repayAmount = convertSharesToAssets(event.shares, event.exchangeRate);
+                totalRepaid += repayAmount;
+                events.push({
+                    eventType: 'repay',
+                    timestamp: Number(event.timestamp),
+                    date: new Date(Number(event.timestamp) * 1000).toISOString(),
+                    amount: repayAmount.toString(),
+                    txHash: event.txHash
+                });
+            }
+
+            // Process collateral add events during the period
+            for (const event of collateralAddEvents) {
+                totalCollateralAdded += event.collateralAmount;
+                events.push({
+                    eventType: 'collateral_add',
+                    timestamp: Number(event.timestamp),
+                    date: new Date(Number(event.timestamp) * 1000).toISOString(),
+                    amount: event.collateralAmount.toString(),
+                    txHash: event.txHash
+                });
+            }
+
+            // Process collateral remove events during the period
+            for (const event of collateralRemoveEvents) {
+                totalCollateralRemoved += event.collateralAmount;
+                events.push({
+                    eventType: 'collateral_remove',
+                    timestamp: Number(event.timestamp),
+                    date: new Date(Number(event.timestamp) * 1000).toISOString(),
+                    amount: event.collateralAmount.toString(),
+                    txHash: event.txHash
+                });
+            }
+
+            // Sort events by timestamp for better readability
+            events.sort((a, b) => a.timestamp - b.timestamp);
+
+            // Calculate net metrics
+            const netDeposits = totalDeposited - totalWithdrawn;
+            const netBorrows = totalBorrowed - totalRepaid;
+            const netCollateral = totalCollateralAdded - totalCollateralRemoved;
+
+            // Convert segment data to the interface format
+            const yieldSegments: IsolatedPairYieldSegmentDetail[] = yieldResult.segments.map(seg => ({
+                startTime: seg.startTime,
+                endTime: seg.endTime,
+                startDate: seg.startDate,
+                endDate: seg.endDate,
+                assetShares: seg.assetShares,
+                actualAssetAmount: seg.actualAssetAmount,
+                startExchangeRate: seg.startExchangeRate,
+                endExchangeRate: seg.endExchangeRate,
+                segmentYield: seg.segmentYield,
+                durationDays: seg.durationDays
+            }));
+
+            const borrowCostSegments: IsolatedPairBorrowCostSegmentDetail[] = borrowCostResult.segments.map(seg => ({
+                startTime: seg.startTime,
+                endTime: seg.endTime,
+                startDate: seg.startDate,
+                endDate: seg.endDate,
+                borrowShares: seg.borrowShares,
+                actualBorrowAmount: seg.actualBorrowAmount,
+                startExchangeRate: seg.startExchangeRate,
+                endExchangeRate: seg.endExchangeRate,
+                segmentBorrowCost: seg.segmentBorrowCost,
+                durationDays: seg.durationDays
+            }));
+
+            return {
+                pair,
+                totalYieldEarned: yieldResult.totalYield,
+                totalBorrowCost: borrowCostResult.totalBorrowCost,
+                totalDeposited,
+                totalWithdrawn,
+                totalBorrowed,
+                totalRepaid,
+                totalCollateralAdded,
+                totalCollateralRemoved,
+                netDeposits,
+                netBorrows,
+                netCollateral,
+                events,
+                events_before_period,
+                starting_balances: {
+                    collateral: startCollateralBalance,
+                    deposits: startAssetAmount,
+                    borrows: startBorrowAmount
+                },
+                yieldSegments,
+                borrowCostSegments
+            };
+        })
+    );
+
+    console.log(`Before filtering: ${positions.length} positions`);
+    positions.forEach((pos, i) => {
+        console.log(`Position ${i}: pair=${pos.pair}, deposited=${pos.totalDeposited}, borrowed=${pos.totalBorrowed}, collateral=${pos.totalCollateralAdded}`);
+    });
+
+    // Filter to only positions with activity during the period
+    const activePositions = positions.filter(
+        pos =>
+            pos.totalDeposited > 0n ||
+            pos.totalWithdrawn > 0n ||
+            pos.totalBorrowed > 0n ||
+            pos.totalRepaid > 0n ||
+            pos.totalCollateralAdded > 0n ||
+            pos.totalCollateralRemoved > 0n
+    );
+
+    console.log(`After filtering: ${activePositions.length} active positions`);
     return activePositions;
 }

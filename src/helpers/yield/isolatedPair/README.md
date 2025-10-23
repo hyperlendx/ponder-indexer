@@ -112,8 +112,8 @@ import { calculateAllIsolatedPairYields } from "./isolatedPair";
 
 const yields = await calculateAllIsolatedPairYields(context, "0x123...", 1000, 2000);
 // Returns: [
-//   { pair: "0xPair1...", assetYield: 50n, borrowYield: 15n, netYield: 35n, ... },
-//   { pair: "0xPair2...", assetYield: 30n, borrowYield: 10n, netYield: 20n, ... }
+//   { pair: "0xPair1...", assetYield: 50n, borrowCost: 15n, netYield: 35n, ... },
+//   { pair: "0xPair2...", assetYield: 30n, borrowCost: 10n, netYield: 20n, ... }
 // ]
 ```
 

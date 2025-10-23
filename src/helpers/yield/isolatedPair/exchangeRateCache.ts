@@ -208,7 +208,7 @@ export class ExchangeRateCache {
             }
         }
 
-        return results.sort((a, b) => a.timestamp - b.timestamp);
+        return results.sort((a, b) => Number(a.timestamp) - Number(b.timestamp));
     }
     
     /**

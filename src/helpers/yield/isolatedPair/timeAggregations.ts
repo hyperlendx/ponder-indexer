@@ -8,7 +8,7 @@
  * for multi-day/month calculations (90-97% faster than without caching).
  */
 
-import { calculateIsolatedPairYield } from "./yieldCalculations";
+import { calculateIsolatedPairYield, calculateSegmentedIsolatedPairYield, calculateSegmentedIsolatedPairBorrowCost } from "./yieldCalculations";
 import { getUserIsolatedPairs } from "./pairTracking";
 import { ExchangeRateCache } from "./exchangeRateCache";
 import { IsolatedPairBalanceCache } from "./balanceCache";
@@ -23,7 +23,7 @@ export interface DailyIsolatedPairYield {
     pairs: Array<{
         pair: string;
         assetYield: bigint;
-        borrowYield: bigint;
+        borrowCost: bigint;
         netYield: bigint;
     }>;
 }
@@ -41,7 +41,7 @@ export interface MonthlyIsolatedPairYield {
     pairs: Array<{
         pair: string;
         assetYield: bigint;
-        borrowYield: bigint;
+        borrowCost: bigint;
         netYield: bigint;
     }>;
 }
@@ -142,39 +142,87 @@ export async function calculateDailyIsolatedPairYields(
     // Now calculate yields for each complete day (all queries use cached data - FAST!)
     currentDayStart = startTimestamp;
 
-    while (currentDayStart < endTimestampForDays) {
-        const currentDayEnd = Math.min(currentDayStart + oneDaySeconds, endTimestampForDays);
+    // FIXED: Calculate yield for entire period once, then break down by day
+    // This avoids double-counting compound interest that occurred in the previous version
 
-        // Calculate yield for each pair for this day (uses cached data)
-        const pairYields = await Promise.all(
-            pairs.map(pair => calculateIsolatedPairYield(
-                context, user, pair, currentDayStart, currentDayEnd,
-                exchangeRateCache,  // Pass cache
-                balanceCache        // Pass cache
-            ))
-        );
+    // Initialize daily results map
+    const dailyResults = new Map<string, {
+        date: string;
+        timestamp: number;
+        dailyYield: bigint;
+        pairs: Map<string, {
+            pair: string;
+            assetYield: bigint;
+            borrowCost: bigint;
+            netYield: bigint;
+        }>;
+    }>();
 
-        // Filter out pairs with zero yield
-        const nonZeroPairYields = pairYields
-            .filter(py => py.netYield !== 0n)
-            .map(py => ({
-                pair: py.pair,
-                assetYield: py.assetYield,
-                borrowYield: py.borrowYield,
-                netYield: py.netYield
-            }));
+    // Initialize all days with zero yield
+    let dayIterator = startTimestamp;
+    while (dayIterator < endTimestampForDays) {
+        const dateStr = new Date(dayIterator * 1000).toISOString().split('T')[0]!;
+        dailyResults.set(dateStr, {
+            date: dateStr,
+            timestamp: dayIterator,
+            dailyYield: 0n,
+            pairs: new Map()
+        });
+        dayIterator += oneDaySeconds;
+    }
+
+    // Process each pair and assign yield to appropriate days
+    for (const pair of pairs) {
+        try {
+            // Initialize this pair in all days with zero yield
+            for (const [dateStr, dayData] of dailyResults) {
+                dayData.pairs.set(pair, {
+                    pair,
+                    assetYield: 0n,
+                    borrowCost: 0n,
+                    netYield: 0n
+                });
+            }
+
+            // Get segmented yield data for this pair over the entire period
+            const segmentedAssetResult = await calculateSegmentedIsolatedPairYield(
+                context, user, pair, startTimestamp, endTimestampForDays, exchangeRateCache
+            );
+            const segmentedBorrowResult = await calculateSegmentedIsolatedPairBorrowCost(
+                context, user, pair, startTimestamp, endTimestampForDays, exchangeRateCache
+            );
+
+            // Process asset yield segments and assign to appropriate days
+            for (const segment of segmentedAssetResult.segments) {
+                assignSegmentYieldToDays(segment, dailyResults, pair, 'asset');
+            }
+
+            // Process borrow cost segments and assign to appropriate days
+            for (const segment of segmentedBorrowResult.segments) {
+                assignSegmentYieldToDays(segment, dailyResults, pair, 'borrow');
+            }
+
+        } catch (error) {
+            console.error(`Error processing pair ${pair}:`, error);
+            // Continue with other pairs
+        }
+    }
+
+    // Convert results to array format and filter out zero-yield pairs
+    for (const [dateStr, dayData] of dailyResults) {
+        const nonZeroPairYields = Array.from(dayData.pairs.values())
+            .filter(py => py.netYield !== 0n);
 
         // Calculate total daily yield
-        const dailyYield = pairYields.reduce((sum, py) => sum + py.netYield, 0n);
+        const dailyYield = Array.from(dayData.pairs.values())
+            .reduce((sum, py) => sum + py.netYield, 0n);
 
         dailyYields.push({
-            date: new Date(currentDayStart * 1000).toISOString().split('T')[0]!,
-            timestamp: currentDayStart,
+            date: dayData.date,
+            timestamp: dayData.timestamp,
             dailyYield,
             pairs: nonZeroPairYields
         });
-
-        currentDayStart = currentDayEnd;
     }
 
     // Calculate current value if partial day
@@ -196,7 +244,7 @@ export async function calculateDailyIsolatedPairYields(
             .map(py => ({
                 pair: py.pair,
                 assetYield: py.assetYield,
-                borrowYield: py.borrowYield,
+                borrowCost: py.borrowCost,
                 netYield: py.netYield
             }));
 
@@ -216,6 +264,76 @@ export async function calculateDailyIsolatedPairYields(
         dailyValues: dailyYields,
         currentValue
     };
+}
+
+/**
+ * Helper function to assign a segment's yield to the appropriate day(s)
+ * Handles segments that span multiple days by proportionally distributing yield
+ */
+function assignSegmentYieldToDays(
+    segment: any,
+    dailyResults: Map<string, any>,
+    pair: string,
+    yieldType: 'asset' | 'borrow'
+) {
+    const segmentStartDate = new Date(segment.startTime * 1000);
+    const segmentEndDate = new Date(segment.endTime * 1000);
+
+    // If segment is within a single day, assign all yield to that day
+    const segmentStartDay = segmentStartDate.toISOString().split('T')[0]!;
+    const segmentEndDay = segmentEndDate.toISOString().split('T')[0]!;
+
+    if (segmentStartDay === segmentEndDay) {
+        // Segment is within a single day
+        const dayData = dailyResults.get(segmentStartDay);
+        if (dayData && dayData.pairs.has(pair)) {
+            const pairData = dayData.pairs.get(pair)!;
+            if (yieldType === 'asset') {
+                pairData.assetYield += segment.segmentYield;
+                pairData.netYield += segment.segmentYield;
+            } else {
+                pairData.borrowCost += segment.segmentBorrowCost;
+                pairData.netYield -= segment.segmentBorrowCost;
+            }
+            dayData.dailyYield += (yieldType === 'asset' ? segment.segmentYield : -segment.segmentBorrowCost);
+        }
+    } else {
+        // Segment spans multiple days - distribute proportionally by time
+        const totalDuration = segment.endTime - segment.startTime;
+        const segmentYieldValue = yieldType === 'asset' ? segment.segmentYield : segment.segmentBorrowCost;
+
+        // Calculate how much of the segment falls into each day
+        const segmentDays = Math.ceil((segmentEndDate.getTime() - segmentStartDate.getTime()) / (24 * 60 * 60 * 1000)) + 1;
+
+        for (let dayOffset = 0; dayOffset < segmentDays; dayOffset++) {
+            const currentDate = new Date(segmentStartDate);
+            currentDate.setDate(segmentStartDate.getDate() + dayOffset);
+            const currentDateStr = currentDate.toISOString().split('T')[0]!;
+            const dayData = dailyResults.get(currentDateStr);
+            if (!dayData || !dayData.pairs.has(pair)) continue;
+
+            const dayStart = Math.floor(new Date(currentDate.getFullYear(), currentDate.getMonth(), currentDate.getDate()).getTime() / 1000);
+            const dayEnd = dayStart + 24 * 60 * 60;
+            const overlapStart = Math.max(segment.startTime, dayStart);
+            const overlapEnd = Math.min(segment.endTime, dayEnd);
+
+            if (overlapEnd > overlapStart) {
+                const overlapDuration = overlapEnd - overlapStart;
+                const proportionalYield = (segmentYieldValue * BigInt(overlapDuration)) / BigInt(totalDuration);
+
+                const pairData = dayData.pairs.get(pair)!;
+                if (yieldType === 'asset') {
+                    pairData.assetYield += proportionalYield;
+                    pairData.netYield += proportionalYield;
+                    dayData.dailyYield += proportionalYield;
+                } else {
+                    pairData.borrowCost += proportionalYield;
+                    pairData.netYield -= proportionalYield;
+                    dayData.dailyYield -= proportionalYield;
+                }
+            }
+        }
+    }
 }
 
 /**
@@ -356,7 +474,7 @@ export async function calculateMonthlyIsolatedPairYields(
             .map(py => ({
                 pair: py.pair,
                 assetYield: py.assetYield,
-                borrowYield: py.borrowYield,
+                borrowCost: py.borrowCost,
                 netYield: py.netYield
             }));
 
@@ -403,7 +521,7 @@ export async function calculateMonthlyIsolatedPairYields(
                 .map(py => ({
                     pair: py.pair,
                     assetYield: py.assetYield,
-                    borrowYield: py.borrowYield,
+                    borrowCost: py.borrowCost,
                     netYield: py.netYield
                 }));
 

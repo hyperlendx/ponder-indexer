@@ -4,6 +4,20 @@ import { calculateVariableBorrowIndexAtTimestamp } from "../aave/borrowIndex";
 import { calculateActualBalance } from "../aave";
 
 /**
+ * Enhanced balance result that includes both balance and contributing events
+ */
+export interface BalanceWithEvents {
+    balance: bigint;
+    events: Array<{
+        eventType: 'deposit' | 'withdraw' | 'transfer_in' | 'transfer_out' | 'borrow' | 'repay';
+        timestamp: number;
+        date: string;
+        amount: string;
+        txHash: string;
+    }>;
+}
+
+/**
  * Get scaled balance at a specific timestamp by looking at balance events
  * Finds the most recent UserBalanceEvent at or before the target timestamp
  * and returns the scaled balance from that event.
@@ -330,7 +344,7 @@ export async function getMaxBorrowBalanceDuringPeriod(
         const allEvents = [
             ...borrowEvents.map((e: any) => ({ timestamp: e.timestamp, amount: e.amount, type: 'borrow' })),
             ...repayEvents.map((e: any) => ({ timestamp: e.timestamp, amount: e.amount, type: 'repay' }))
-        ].sort((a, b) => a.timestamp - b.timestamp);
+        ].sort((a, b) => Number(a.timestamp) - Number(b.timestamp));
 
         // Calculate running balance after each event
         let currentBalance = startBorrowBalance;
@@ -609,5 +623,143 @@ export async function getUserBorrowedAssets(
     } catch (error) {
         console.error(`❌ Error getting user borrowed assets for period:`, error);
         return [];
+    }
+}
+
+/**
+ * Enhanced version of getScaledBalanceAtTimestamp that also returns contributing events
+ *
+ * @param context - Ponder context
+ * @param user - User address
+ * @param asset - Asset address
+ * @param timestamp - Target timestamp
+ * @returns Scaled balance and contributing events
+ */
+export async function getScaledBalanceWithEvents(
+    context: any,
+    user: string,
+    asset: string,
+    timestamp: number
+): Promise<BalanceWithEvents> {
+    const { db } = context;
+    const dbQuery = db.sql || db;
+
+    try {
+        // Get all balance events up to timestamp
+        const events = await dbQuery
+            .select()
+            .from(UserBalanceEvent)
+            .where(
+                and(
+                    eq(UserBalanceEvent.user, user as `0x${string}`),
+                    eq(UserBalanceEvent.asset, asset as `0x${string}`),
+                    lte(UserBalanceEvent.timestamp, timestamp)
+                )
+            )
+            .orderBy(desc(UserBalanceEvent.timestamp));
+
+        if (!events || events.length === 0) {
+            return { balance: 0n, events: [] };
+        }
+
+        // Get the most recent balance
+        const balance = BigInt(events[0].scaledBalance);
+
+        // Format all events for response
+        const formattedEvents = events.map(event => ({
+            eventType: event.eventType as 'deposit' | 'withdraw' | 'transfer_in' | 'transfer_out' | 'borrow' | 'repay',
+            timestamp: Number(event.timestamp),
+            date: new Date(Number(event.timestamp) * 1000).toISOString(),
+            amount: event.transactionAmount.toString(),
+            txHash: event.txHash
+        })).sort((a, b) => a.timestamp - b.timestamp);
+
+        return { balance, events: formattedEvents };
+
+    } catch (error) {
+        console.error(`❌ Error getting scaled balance with events for user ${user}, asset ${asset}:`, error);
+        return { balance: 0n, events: [] };
+    }
+}
+
+/**
+ * Enhanced version of getScaledBorrowBalanceAtTimestamp that also returns contributing events
+ *
+ * @param context - Ponder context
+ * @param user - User address
+ * @param asset - Asset address
+ * @param timestamp - Target timestamp
+ * @returns Scaled borrow balance and contributing events
+ */
+export async function getScaledBorrowBalanceWithEvents(
+    context: any,
+    user: string,
+    asset: string,
+    timestamp: number
+): Promise<BalanceWithEvents> {
+    const { db } = context;
+    const dbQuery = db.sql || db;
+
+    try {
+        // Get all borrow and repay events up to timestamp
+        const [borrowEvents, repayEvents] = await Promise.all([
+            dbQuery
+                .select()
+                .from(Borrow)
+                .where(
+                    and(
+                        eq(Borrow.onBehalfOf, user as `0x${string}`),
+                        eq(Borrow.reserve, asset as `0x${string}`),
+                        lte(Borrow.timestamp, timestamp)
+                    )
+                ),
+            dbQuery
+                .select()
+                .from(Repay)
+                .where(
+                    and(
+                        eq(Repay.user, user as `0x${string}`),
+                        eq(Repay.reserve, asset as `0x${string}`),
+                        lte(Repay.timestamp, timestamp)
+                    )
+                )
+        ]);
+
+        // Calculate scaled borrow balance
+        let balance = 0n;
+        const events: BalanceWithEvents['events'] = [];
+
+        // Add borrow events
+        for (const event of borrowEvents) {
+            balance += event.amount;
+            events.push({
+                eventType: 'borrow',
+                timestamp: Number(event.timestamp),
+                date: new Date(Number(event.timestamp) * 1000).toISOString(),
+                amount: event.amount.toString(),
+                txHash: event.txHash
+            });
+        }
+
+        // Subtract repay events
+        for (const event of repayEvents) {
+            balance -= event.amount;
+            events.push({
+                eventType: 'repay',
+                timestamp: Number(event.timestamp),
+                date: new Date(Number(event.timestamp) * 1000).toISOString(),
+                amount: event.amount.toString(),
+                txHash: event.txHash
+            });
+        }
+
+        // Sort events by timestamp
+        events.sort((a, b) => a.timestamp - b.timestamp);
+
+        return { balance, events };
+
+    } catch (error) {
+        console.error(`❌ Error getting scaled borrow balance with events for user ${user}, asset ${asset}:`, error);
+        return { balance: 0n, events: [] };
     }
 }

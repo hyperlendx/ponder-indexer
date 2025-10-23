@@ -18,6 +18,20 @@ import { eq, and, lte } from "ponder";
 import { EXCHANGE_PRECISION } from "./constants";
 
 /**
+ * Enhanced balance result that includes both balance and contributing events
+ */
+export interface BalanceWithEvents {
+    balance: bigint;
+    events: Array<{
+        eventType: 'collateral_add' | 'collateral_remove' | 'deposit' | 'withdraw' | 'borrow' | 'repay';
+        timestamp: number;
+        date: string;
+        amount: string;
+        txHash: string;
+    }>;
+}
+
+/**
  * Get collateral balance for a user in an isolated pair at a specific timestamp
  * 
  * Collateral = Σ(AddCollateral) - Σ(RemoveCollateral)
@@ -231,5 +245,212 @@ export function convertSharesToAssets(
     // assets = shares × exchangeRate / EXCHANGE_PRECISION
     // Add rounding: (shares × exchangeRate + EXCHANGE_PRECISION/2) / EXCHANGE_PRECISION
     return (shares * exchangeRate + EXCHANGE_PRECISION / 2n) / EXCHANGE_PRECISION;
+}
+
+/**
+ * Enhanced version of getIsolatedPairCollateralBalance that also returns contributing events
+ *
+ * @param context - Ponder context
+ * @param user - User address
+ * @param pair - Isolated pair address
+ * @param timestamp - Target timestamp
+ * @returns Balance and contributing events
+ */
+export async function getIsolatedPairCollateralBalanceWithEvents(
+    context: any,
+    user: string,
+    pair: string,
+    timestamp: number
+): Promise<BalanceWithEvents> {
+    const dbQuery = context.db.sql || context.db;
+
+    // Get all collateral events up to timestamp
+    const [addEvents, removeEvents] = await Promise.all([
+        dbQuery.select().from(AddCollateralIsolated).where(
+            and(
+                eq(AddCollateralIsolated.borrower, user as `0x${string}`),
+                eq(AddCollateralIsolated.pair, pair as `0x${string}`),
+                lte(AddCollateralIsolated.timestamp, timestamp)
+            )
+        ),
+        dbQuery.select().from(RemoveCollateralIsolated).where(
+            and(
+                eq(RemoveCollateralIsolated.borrower, user as `0x${string}`),
+                eq(RemoveCollateralIsolated.pair, pair as `0x${string}`),
+                lte(RemoveCollateralIsolated.timestamp, timestamp)
+            )
+        )
+    ]);
+
+    // Calculate balance
+    let balance = 0n;
+    const events: BalanceWithEvents['events'] = [];
+
+    // Add collateral events
+    for (const event of addEvents) {
+        balance += event.collateralAmount;
+        events.push({
+            eventType: 'collateral_add',
+            timestamp: Number(event.timestamp),
+            date: new Date(Number(event.timestamp) * 1000).toISOString(),
+            amount: event.collateralAmount.toString(),
+            txHash: event.txHash
+        });
+    }
+
+    // Remove collateral events
+    for (const event of removeEvents) {
+        balance -= event.collateralAmount;
+        events.push({
+            eventType: 'collateral_remove',
+            timestamp: Number(event.timestamp),
+            date: new Date(Number(event.timestamp) * 1000).toISOString(),
+            amount: event.collateralAmount.toString(),
+            txHash: event.txHash
+        });
+    }
+
+    // Sort events by timestamp
+    events.sort((a, b) => a.timestamp - b.timestamp);
+
+    return { balance, events };
+}
+
+/**
+ * Enhanced version of getIsolatedPairAssetShares that also returns contributing events
+ *
+ * @param context - Ponder context
+ * @param user - User address
+ * @param pair - Isolated pair address
+ * @param timestamp - Target timestamp
+ * @returns Asset shares balance and contributing events
+ */
+export async function getIsolatedPairAssetSharesWithEvents(
+    context: any,
+    user: string,
+    pair: string,
+    timestamp: number
+): Promise<BalanceWithEvents> {
+    const dbQuery = context.db.sql || context.db;
+
+    // Get all asset events up to timestamp
+    const [depositEvents, withdrawEvents] = await Promise.all([
+        dbQuery.select().from(DepositIsolated).where(
+            and(
+                eq(DepositIsolated.owner, user as `0x${string}`),
+                eq(DepositIsolated.pair, pair as `0x${string}`),
+                lte(DepositIsolated.timestamp, timestamp)
+            )
+        ),
+        dbQuery.select().from(WithdrawIsolated).where(
+            and(
+                eq(WithdrawIsolated.owner, user as `0x${string}`),
+                eq(WithdrawIsolated.pair, pair as `0x${string}`),
+                lte(WithdrawIsolated.timestamp, timestamp)
+            )
+        )
+    ]);
+
+    // Calculate balance
+    let balance = 0n;
+    const events: BalanceWithEvents['events'] = [];
+
+    // Deposit events
+    for (const event of depositEvents) {
+        balance += event.shares;
+        events.push({
+            eventType: 'deposit',
+            timestamp: Number(event.timestamp),
+            date: new Date(Number(event.timestamp) * 1000).toISOString(),
+            amount: event.assets.toString(),
+            txHash: event.txHash
+        });
+    }
+
+    // Withdraw events
+    for (const event of withdrawEvents) {
+        balance -= event.shares;
+        events.push({
+            eventType: 'withdraw',
+            timestamp: Number(event.timestamp),
+            date: new Date(Number(event.timestamp) * 1000).toISOString(),
+            amount: event.assets.toString(),
+            txHash: event.txHash
+        });
+    }
+
+    // Sort events by timestamp
+    events.sort((a, b) => a.timestamp - b.timestamp);
+
+    return { balance, events };
+}
+
+/**
+ * Enhanced version of getIsolatedPairBorrowShares that also returns contributing events
+ *
+ * @param context - Ponder context
+ * @param user - User address
+ * @param pair - Isolated pair address
+ * @param timestamp - Target timestamp
+ * @returns Borrow shares balance and contributing events
+ */
+export async function getIsolatedPairBorrowSharesWithEvents(
+    context: any,
+    user: string,
+    pair: string,
+    timestamp: number
+): Promise<BalanceWithEvents> {
+    const dbQuery = context.db.sql || context.db;
+
+    // Get all borrow events up to timestamp
+    const [borrowEvents, repayEvents] = await Promise.all([
+        dbQuery.select().from(BorrowAssetIsolated).where(
+            and(
+                eq(BorrowAssetIsolated.borrower, user as `0x${string}`),
+                eq(BorrowAssetIsolated.pair, pair as `0x${string}`),
+                lte(BorrowAssetIsolated.timestamp, timestamp)
+            )
+        ),
+        dbQuery.select().from(RepayAssetIsolated).where(
+            and(
+                eq(RepayAssetIsolated.borrower, user as `0x${string}`),
+                eq(RepayAssetIsolated.pair, pair as `0x${string}`),
+                lte(RepayAssetIsolated.timestamp, timestamp)
+            )
+        )
+    ]);
+
+    // Calculate balance
+    let balance = 0n;
+    const events: BalanceWithEvents['events'] = [];
+
+    // Borrow events
+    for (const event of borrowEvents) {
+        balance += event.sharesAdded;
+        events.push({
+            eventType: 'borrow',
+            timestamp: Number(event.timestamp),
+            date: new Date(Number(event.timestamp) * 1000).toISOString(),
+            amount: event.assets.toString(),
+            txHash: event.txHash
+        });
+    }
+
+    // Repay events
+    for (const event of repayEvents) {
+        balance -= event.shares;
+        events.push({
+            eventType: 'repay',
+            timestamp: Number(event.timestamp),
+            date: new Date(Number(event.timestamp) * 1000).toISOString(),
+            amount: event.assets.toString(),
+            txHash: event.txHash
+        });
+    }
+
+    // Sort events by timestamp
+    events.sort((a, b) => a.timestamp - b.timestamp);
+
+    return { balance, events };
 }
 

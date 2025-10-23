@@ -107,7 +107,7 @@ export async function getUserPairEvents(
     // Process deposits: add asset shares
     for (const deposit of deposits) {
         events.push({
-            timestamp: deposit.timestamp,
+            timestamp: Number(deposit.timestamp),
             type: 'deposit',
             assetSharesDelta: deposit.shares, // Positive - adding shares
             borrowSharesDelta: 0n,
@@ -118,7 +118,7 @@ export async function getUserPairEvents(
     // Process withdraws: remove asset shares
     for (const withdraw of withdraws) {
         events.push({
-            timestamp: withdraw.timestamp,
+            timestamp: Number(withdraw.timestamp),
             type: 'withdraw',
             assetSharesDelta: 0n - withdraw.shares, // Negative - removing shares
             borrowSharesDelta: 0n,
@@ -129,7 +129,7 @@ export async function getUserPairEvents(
     // Process borrows: add borrow shares (debt)
     for (const borrow of borrows) {
         events.push({
-            timestamp: borrow.timestamp,
+            timestamp: Number(borrow.timestamp),
             type: 'borrow',
             assetSharesDelta: 0n,
             borrowSharesDelta: borrow.sharesAdded, // Positive - adding debt
@@ -140,7 +140,7 @@ export async function getUserPairEvents(
     // Process repays: remove borrow shares (reduce debt)
     for (const repay of repays) {
         events.push({
-            timestamp: repay.timestamp,
+            timestamp: Number(repay.timestamp),
             type: 'repay',
             assetSharesDelta: 0n,
             borrowSharesDelta: 0n - repay.shares, // Negative - reducing debt

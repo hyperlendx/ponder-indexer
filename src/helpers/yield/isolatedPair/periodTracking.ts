@@ -53,17 +53,22 @@ export async function getUserIsolatedPairsForPeriod(
     const dbQuery = context.db.sql || context.db;
 
     try {
+        console.log(`getUserIsolatedPairsForPeriod: user=${user}, start=${startTimestamp}, end=${endTimestamp}`);
+
         // Step 1: Get all pairs user has EVER interacted with (from tracking table)
         const trackingRecords = await dbQuery
             .select()
             .from(UserIsolatedPairTracking)
             .where(eq(UserIsolatedPairTracking.user, user as `0x${string}`));
 
+        console.log(`Found ${trackingRecords.length} tracking records`);
+
         if (trackingRecords.length === 0) {
             return [];
         }
 
         const allPairs = trackingRecords.map((record: any) => record.pair as string);
+        console.log(`All pairs for user: ${allPairs.join(', ')}`);
 
         // Step 2: Batch check for activity during the period (OPTIMIZED)
         // Instead of checking each pair individually, check all pairs at once
@@ -75,6 +80,7 @@ export async function getUserIsolatedPairsForPeriod(
             endTimestamp
         );
 
+        console.log(`Pairs with activity during period: ${pairsWithActivity.join(', ')}`);
         return pairsWithActivity;
 
     } catch (error: any) {
