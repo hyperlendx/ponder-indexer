@@ -531,7 +531,7 @@ export const StrategyDeployed = onchainTable(
 );
 
 
-// Store reserve data events for liquidityIndex tracking
+// Store reserve data events for liquidityIndex and variableBorrowIndex tracking
 export const ReserveDataEvent = onchainTable(
     "reserve_data_event",
     (t) => ({
@@ -540,6 +540,8 @@ export const ReserveDataEvent = onchainTable(
         reserve: t.hex(),
         liquidityIndex: t.bigint(),
         liquidityRate: t.bigint(),
+        variableBorrowIndex: t.bigint(),
+        variableBorrowRate: t.bigint(),
         timestamp: t.integer(),
         blockNumber: t.bigint(),
     }),

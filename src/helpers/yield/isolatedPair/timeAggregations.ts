@@ -97,10 +97,11 @@ export async function calculateDailyIsolatedPairYields(
         };
     }
 
-    // Check if endTimestamp is at a day boundary (midnight UTC)
+    // Always calculate only complete days (exclude partial day at the end)
+    // This ensures daily breakdown totals match custom-period-yield totals
     const endDate = new Date(endTimestamp * 1000);
     const endDayStart = Date.UTC(endDate.getUTCFullYear(), endDate.getUTCMonth(), endDate.getUTCDate()) / 1000;
-    const isPartialDay = endTimestamp !== endDayStart;
+    const endTimestampForDays = endDayStart; // Always use start of last day
 
     // Create caches for this request
     const exchangeRateCache = new ExchangeRateCache();
@@ -109,7 +110,6 @@ export async function calculateDailyIsolatedPairYields(
     // Build list of all timestamps we'll need (day boundaries for complete days only)
     const timestamps: number[] = [];
     const oneDaySeconds = 24 * 60 * 60;
-    const endTimestampForDays = isPartialDay ? endDayStart : endTimestamp;
     let currentDayStart = startTimestamp;
 
     while (currentDayStart < endTimestampForDays) {
@@ -117,11 +117,6 @@ export async function calculateDailyIsolatedPairYields(
         const currentDayEnd = Math.min(currentDayStart + oneDaySeconds, endTimestampForDays);
         timestamps.push(currentDayEnd);
         currentDayStart = currentDayEnd;
-    }
-
-    // If partial day, add endTimestamp to prefetch list
-    if (isPartialDay) {
-        timestamps.push(endTimestamp);
     }
 
     // Prefetch all exchange rates for all pairs at all timestamps (parallel queries)
@@ -132,9 +127,6 @@ export async function calculateDailyIsolatedPairYields(
 
     // Prefetch all balances for all pairs at start and end (parallel queries)
     const prefetchTimestamps = [startTimestamp, endTimestampForDays];
-    if (isPartialDay) {
-        prefetchTimestamps.push(endTimestamp);
-    }
     await balanceCache.prefetchAll(context, user, pairs, prefetchTimestamps);
 
     const dailyYields: DailyIsolatedPairYield[] = [];
@@ -159,16 +151,23 @@ export async function calculateDailyIsolatedPairYields(
     }>();
 
     // Initialize all days with zero yield
-    let dayIterator = startTimestamp;
-    while (dayIterator < endTimestampForDays) {
-        const dateStr = new Date(dayIterator * 1000).toISOString().split('T')[0]!;
+    // Days should be aligned to midnight UTC, not to startTimestamp
+    const periodStartDate = new Date(startTimestamp * 1000);
+    const periodEndDate = new Date(endTimestampForDays * 1000);
+
+    let currentDate = new Date(Date.UTC(periodStartDate.getUTCFullYear(), periodStartDate.getUTCMonth(), periodStartDate.getUTCDate()));
+    const endDateMidnight = new Date(Date.UTC(periodEndDate.getUTCFullYear(), periodEndDate.getUTCMonth(), periodEndDate.getUTCDate()));
+
+    while (currentDate <= endDateMidnight) {
+        const dateStr = currentDate.toISOString().split('T')[0]!;
+        const dayTimestamp = Math.floor(currentDate.getTime() / 1000);
         dailyResults.set(dateStr, {
             date: dateStr,
-            timestamp: dayIterator,
+            timestamp: dayTimestamp,
             dailyYield: 0n,
             pairs: new Map()
         });
-        dayIterator += oneDaySeconds;
+        currentDate.setUTCDate(currentDate.getUTCDate() + 1);
     }
 
     // Process each pair and assign yield to appropriate days
@@ -225,44 +224,11 @@ export async function calculateDailyIsolatedPairYields(
         });
     }
 
-    // Calculate current value if partial day
-    let currentValue: (DailyIsolatedPairYield & { isPartialDay: boolean }) | undefined;
-
-    if (isPartialDay) {
-        // Calculate yield from start of current day to endTimestamp
-        const pairYields = await Promise.all(
-            pairs.map(pair => calculateIsolatedPairYield(
-                context, user, pair, endDayStart, endTimestamp,
-                exchangeRateCache,  // Pass cache
-                balanceCache        // Pass cache
-            ))
-        );
-
-        // Filter out pairs with zero yield
-        const nonZeroPairYields = pairYields
-            .filter(py => py.netYield !== 0n)
-            .map(py => ({
-                pair: py.pair,
-                assetYield: py.assetYield,
-                borrowCost: py.borrowCost,
-                netYield: py.netYield
-            }));
-
-        // Calculate total current yield
-        const dailyYield = pairYields.reduce((sum, py) => sum + py.netYield, 0n);
-
-        currentValue = {
-            date: endDate.toISOString().split('T')[0]!,
-            timestamp: endTimestamp,
-            dailyYield,
-            pairs: nonZeroPairYields,
-            isPartialDay: true
-        };
-    }
-
+    // No partial day support - only return complete days
+    // This ensures totals match custom-period-yield when queried for the same period
     return {
         dailyValues: dailyYields,
-        currentValue
+        currentValue: undefined
     };
 }
 

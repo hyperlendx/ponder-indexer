@@ -341,13 +341,15 @@ ponder.on("CorePool:ReserveDataUpdated", async ({ event, context }) => {
         price: reservePrice,
     });
 
-    // Insert ReserveDataEvent for interest calculations
+    // Insert ReserveDataEvent for interest calculations (both supply and borrow)
     await context.db.insert(ReserveDataEvent).values({
         id: `${event.transaction.hash}_${event.log.logIndex}_${event.args.reserve}`,
         txHash: event.transaction.hash,
         reserve: event.args.reserve,
         liquidityIndex: event.args.liquidityIndex,
         liquidityRate: event.args.liquidityRate,
+        variableBorrowIndex: event.args.variableBorrowIndex,
+        variableBorrowRate: event.args.variableBorrowRate,
         timestamp: timestamp,
         blockNumber: blockNumber,
     });

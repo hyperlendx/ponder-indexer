@@ -907,7 +907,10 @@ export async function calculateUserDailyYieldBreakdown(
 }> {
     try {
         // Get all assets user had positions in during this period
-        const assets = await getUserAssetsForPeriod(context, user, startTimestamp, endTimestamp);
+        // Include both supply assets AND borrow-only assets
+        const supplyAssets = await getUserAssetsForPeriod(context, user, startTimestamp, endTimestamp);
+        const borrowAssets = await getUserBorrowedAssets(context, user, startTimestamp, endTimestamp);
+        const assets = [...new Set([...supplyAssets, ...borrowAssets])];
 
         if (assets.length === 0) {
             return {
@@ -916,13 +919,11 @@ export async function calculateUserDailyYieldBreakdown(
             };
         }
 
-        // Check if endTimestamp is at a day boundary (midnight UTC)
+        // Always calculate only complete days (exclude partial day at the end)
+        // This ensures daily breakdown totals match custom-period-yield totals
         const endDate = new Date(endTimestamp * 1000);
         const endDayStart = Date.UTC(endDate.getUTCFullYear(), endDate.getUTCMonth(), endDate.getUTCDate()) / 1000;
-        const isPartialDay = endTimestamp !== endDayStart;
-
-        // Calculate the end timestamp for complete days
-        const endTimestampForDays = isPartialDay ? endDayStart : endTimestamp;
+        const endTimestampForDays = endDayStart; // Always use start of last day
 
         // Create daily time buckets
         const dailyResults = new Map<string, {
@@ -1253,10 +1254,10 @@ export async function calculateUserDailyYieldBreakdown(
             }))
             .sort((a, b) => a.timestamp - b.timestamp); // Sort chronologically
 
-        // Calculate current value if partial day
-        let currentValue: (DailyYieldData & { isPartialDay: boolean }) | undefined;
+        // No partial day support - only return complete days
+        // This ensures totals match custom-period-yield when queried for the same period
 
-        if (isPartialDay) {
+        if (false) { // Disabled partial day calculation
             // Calculate yield from start of current day to endTimestamp
             const currentDayAssets = new Map<string, {
                 asset: string;
@@ -1390,7 +1391,7 @@ export async function calculateUserDailyYieldBreakdown(
 
         return {
             dailyValues: formattedResults,
-            currentValue
+            currentValue: undefined // No partial day support
         };
 
     } catch (error) {
