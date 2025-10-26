@@ -15,6 +15,27 @@ import { IsolatedPairBalanceCache } from "./balanceCache";
 
 /**
  * Daily yield data structure
+ *
+ * IMPORTANT: assetYield and borrowCost represent VALUE CHANGES and can be negative:
+ * - assetYield: Change in deposit value (positive = gain, negative = loss)
+ * - borrowCost: Change in borrow value (positive = cost increase, negative = cost decrease/gain)
+ * - netYield: assetYield - borrowCost (total profit/loss)
+ *
+ * Example scenarios:
+ * 1. Exchange rate increases:
+ *    - assetYield = +100 (deposits grew)
+ *    - borrowCost = +50 (debt grew)
+ *    - netYield = +50 (net profit)
+ *
+ * 2. Exchange rate decreases (rare but possible):
+ *    - assetYield = -100 (deposits shrunk)
+ *    - borrowCost = -50 (debt shrunk - this is a gain!)
+ *    - netYield = -50 (net loss)
+ *
+ * 3. Short position with rate decrease:
+ *    - assetYield = -10 (small deposit loss)
+ *    - borrowCost = -100 (large debt reduction - gain!)
+ *    - netYield = +90 (net profit from short position)
  */
 export interface DailyIsolatedPairYield {
     date: string;
@@ -22,14 +43,17 @@ export interface DailyIsolatedPairYield {
     dailyYield: bigint;
     pairs: Array<{
         pair: string;
-        assetYield: bigint;
-        borrowCost: bigint;
-        netYield: bigint;
+        assetYield: bigint;      // Can be negative (value loss)
+        borrowCost: bigint;      // Can be negative (debt reduction = gain)
+        netYield: bigint;        // assetYield - borrowCost
     }>;
 }
 
 /**
  * Monthly yield data structure
+ *
+ * IMPORTANT: assetYield and borrowCost represent VALUE CHANGES and can be negative.
+ * See DailyIsolatedPairYield documentation for detailed explanation.
  */
 export interface MonthlyIsolatedPairYield {
     year: number;
@@ -40,9 +64,9 @@ export interface MonthlyIsolatedPairYield {
     monthlyYield: bigint;
     pairs: Array<{
         pair: string;
-        assetYield: bigint;
-        borrowCost: bigint;
-        netYield: bigint;
+        assetYield: bigint;      // Can be negative (value loss)
+        borrowCost: bigint;      // Can be negative (debt reduction = gain)
+        netYield: bigint;        // assetYield - borrowCost
     }>;
 }
 

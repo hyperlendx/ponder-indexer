@@ -431,7 +431,7 @@ export async function getIsolatedPairBorrowSharesWithEvents(
             eventType: 'borrow',
             timestamp: Number(event.timestamp),
             date: new Date(Number(event.timestamp) * 1000).toISOString(),
-            amount: event.assets.toString(),
+            amount: event.borrowAmount.toString(),
             txHash: event.txHash
         });
     }
@@ -443,7 +443,7 @@ export async function getIsolatedPairBorrowSharesWithEvents(
             eventType: 'repay',
             timestamp: Number(event.timestamp),
             date: new Date(Number(event.timestamp) * 1000).toISOString(),
-            amount: event.assets.toString(),
+            amount: event.amountToRepay.toString(),
             txHash: event.txHash
         });
     }

@@ -350,10 +350,22 @@ export async function calculateSegmentedIsolatedPairYield(
         ).orderBy(WithdrawIsolated.timestamp)
     ]);
 
-    // Combine and sort events
+    // Combine and sort events with validation
     const allEvents = [
-        ...depositEvents.map((e: any) => ({ ...e, eventType: 'deposit' as const, sharesDelta: e.shares })),
-        ...withdrawEvents.map((e: any) => ({ ...e, eventType: 'withdraw' as const, sharesDelta: 0n - e.shares }))
+        ...depositEvents.map((e: any) => {
+            if (e.shares === undefined || e.shares === null) {
+                console.error(`DepositIsolated event has undefined shares:`, e);
+                throw new Error(`Invalid DepositIsolated event: shares is ${e.shares}`);
+            }
+            return { ...e, eventType: 'deposit' as const, sharesDelta: e.shares };
+        }),
+        ...withdrawEvents.map((e: any) => {
+            if (e.shares === undefined || e.shares === null) {
+                console.error(`WithdrawIsolated event has undefined shares:`, e);
+                throw new Error(`Invalid WithdrawIsolated event: shares is ${e.shares}`);
+            }
+            return { ...e, eventType: 'withdraw' as const, sharesDelta: 0n - e.shares };
+        })
     ].sort((a, b) => Number(a.timestamp) - Number(b.timestamp));
 
     // Get starting asset shares
@@ -508,10 +520,22 @@ export async function calculateSegmentedIsolatedPairBorrowCost(
         ).orderBy(RepayAssetIsolated.timestamp)
     ]);
 
-    // Combine and sort events
+    // Combine and sort events with validation
     const allEvents = [
-        ...borrowEvents.map((e: any) => ({ ...e, eventType: 'borrow' as const, sharesDelta: e.sharesAdded })),
-        ...repayEvents.map((e: any) => ({ ...e, eventType: 'repay' as const, sharesDelta: 0n - e.shares }))
+        ...borrowEvents.map((e: any) => {
+            if (e.sharesAdded === undefined || e.sharesAdded === null) {
+                console.error(`BorrowAssetIsolated event has undefined sharesAdded:`, e);
+                throw new Error(`Invalid BorrowAssetIsolated event: sharesAdded is ${e.sharesAdded}`);
+            }
+            return { ...e, eventType: 'borrow' as const, sharesDelta: e.sharesAdded };
+        }),
+        ...repayEvents.map((e: any) => {
+            if (e.shares === undefined || e.shares === null) {
+                console.error(`RepayAssetIsolated event has undefined shares:`, e);
+                throw new Error(`Invalid RepayAssetIsolated event: shares is ${e.shares}`);
+            }
+            return { ...e, eventType: 'repay' as const, sharesDelta: 0n - e.shares };
+        })
     ].sort((a, b) => Number(a.timestamp) - Number(b.timestamp));
 
     // Get starting borrow shares

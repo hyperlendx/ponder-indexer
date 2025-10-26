@@ -1,18 +1,15 @@
-import { UserBalanceEvent } from "ponder:schema";
-import { eq, and, gte, lte } from "ponder";
+import {UserBalanceEvent} from "ponder:schema";
+import {eq, and, gte, lte} from "ponder";
 import {
     getMonthTimestamps,
     calculateLiquidityIndexAtTimestamp,
     calculateActualBalance
 } from "../aave";
-import { calculateNetDeposits } from "../userPositionManager";
+import {calculateNetDeposits} from "../userPositionManager";
 import {
     getScaledBalanceAtTimestamp,
     getUserAssetsForMonth,
     getUserAssetsForPeriod,
-    getMaxBalanceDuringMonth,
-    getMaxBalanceDuringPeriod,
-    getBorrowedBalanceAtTimestamp,
     getScaledBorrowBalanceAtTimestamp,
     getUserBorrowedAssets
 } from "./balanceQueries";
@@ -21,9 +18,9 @@ import {
     calculateSegmentedCustomPeriodYield,
     calculateSegmentedCustomPeriodBorrowCost
 } from "./yieldCalculations";
-import { LiquidityIndexCache } from "./liquidityIndexCache";
-import { BorrowIndexCache } from "./borrowIndexCache";
-import { getCachedMonthlyYield, cacheMonthlyYield, isCompletedMonth } from "./monthlyAggregationCache";
+import {LiquidityIndexCache} from "./liquidityIndexCache";
+import {BorrowIndexCache} from "./borrowIndexCache";
+import {getCachedMonthlyYield, cacheMonthlyYield, isCompletedMonth} from "./monthlyAggregationCache";
 
 /**
  * Calculate monthly yield data for a specific user and month
@@ -49,9 +46,6 @@ export async function calculateUserMonthlyYield(
     netDeposits: bigint;
     startTimestamp: number;
     endTimestamp: number;
-    hadPositionDuringMonth: boolean;
-    maxBalanceDuringMonth: bigint;
-    transactionCount: number;
     segments?: Array<{
         startTime: number;
         endTime: number;
@@ -67,7 +61,7 @@ export async function calculateUserMonthlyYield(
 }>> {
     try {
         // Get month boundaries
-        const { startTimestamp, endTimestamp } = getMonthTimestamps(year, month);
+        const {startTimestamp, endTimestamp} = getMonthTimestamps(year, month);
 
         // Get all assets user had positions in during this month
         const assets = await getUserAssetsForMonth(context, user, startTimestamp, endTimestamp);
@@ -108,8 +102,8 @@ export async function calculateUserMonthlyYield(
         const indexPrefetchList = [];
         for (const asset of assets) {
             indexPrefetchList.push(
-                { asset, timestamp: startTimestamp },
-                { asset, timestamp: endTimestamp }
+                {asset, timestamp: startTimestamp},
+                {asset, timestamp: endTimestamp}
             );
         }
         await indexCache.prefetch(context, indexPrefetchList);
@@ -155,11 +149,8 @@ export async function calculateUserMonthlyYield(
                 // Get monthly events for this asset from pre-fetched data
                 const monthlyEvents = eventsByAsset.get(asset) || [];
 
-                // Calculate net deposits and max balance in parallel
-                const [netDeposits, maxBalanceDuringMonth] = await Promise.all([
-                    calculateNetDeposits(context, user, asset, startTimestamp, endTimestamp),
-                    getMaxBalanceDuringMonth(context, user, asset, startTimestamp, endTimestamp)
-                ]);
+                // Calculate net deposits
+                const netDeposits = await calculateNetDeposits(context, user, asset, startTimestamp, endTimestamp);
 
                 // Enhanced calculation: Handle intra-month positions
                 const segmentedResult = await calculateSegmentedMonthlyYield(
@@ -173,9 +164,6 @@ export async function calculateUserMonthlyYield(
 
                 const monthlyYield = segmentedResult.totalYield;
                 const segments = segmentedResult.segments;
-
-                // Calculate additional metrics
-                const hadPositionDuringMonth = monthlyEvents.length > 0 || startScaledBalance > 0n;
 
                 const result = {
                     user,
@@ -192,9 +180,6 @@ export async function calculateUserMonthlyYield(
                     netDeposits,
                     startTimestamp,
                     endTimestamp,
-                    hadPositionDuringMonth,
-                    maxBalanceDuringMonth,
-                    transactionCount: monthlyEvents.length,
                     segments
                 };
 
@@ -248,9 +233,6 @@ export async function calculateUserCustomPeriodYield(
     borrowedAmount: bigint;
     startTimestamp: number;
     endTimestamp: number;
-    hadPositionDuringPeriod: boolean;
-    maxBalanceDuringPeriod: bigint;
-    transactionCount: number;
     segments?: Array<{
         startTime: number;
         endTime: number;
@@ -302,8 +284,8 @@ export async function calculateUserCustomPeriodYield(
         const indexPrefetchList = [];
         for (const asset of assets) {
             indexPrefetchList.push(
-                { asset, timestamp: startTimestamp },
-                { asset, timestamp: endTimestamp }
+                {asset, timestamp: startTimestamp},
+                {asset, timestamp: endTimestamp}
             );
         }
         await Promise.all([
@@ -333,13 +315,10 @@ export async function calculateUserCustomPeriodYield(
                 // Get period events for this asset from pre-fetched data
                 const periodEvents = eventsByAsset.get(asset) || [];
 
-                // Calculate metrics in parallel
+                // Calculate net deposits
                 // Note: For supplied/borrowed amounts, we use the actual balance at the end of the period
                 // This includes both existing positions from before the period AND new positions during the period
-                const [netDeposits, maxBalanceDuringPeriod] = await Promise.all([
-                    calculateNetDeposits(context, user, asset, startTimestamp, endTimestamp),
-                    getMaxBalanceDuringPeriod(context, user, asset, startTimestamp, endTimestamp)
-                ]);
+                const netDeposits = await calculateNetDeposits(context, user, asset, startTimestamp, endTimestamp);
 
                 // For supplied amount, use the actual balance at the end of the period
                 // This represents the total amount supplied (including positions opened before the period)
@@ -363,9 +342,6 @@ export async function calculateUserCustomPeriodYield(
                 const periodYield = segmentedResult.totalYield;
                 const segments = segmentedResult.segments;
 
-                // Calculate additional metrics
-                const hadPositionDuringPeriod = periodEvents.length > 0 || startScaledBalance > 0n;
-
                 return {
                     user,
                     asset,
@@ -381,9 +357,6 @@ export async function calculateUserCustomPeriodYield(
                     borrowedAmount,
                     startTimestamp,
                     endTimestamp,
-                    hadPositionDuringPeriod,
-                    maxBalanceDuringPeriod,
-                    transactionCount: periodEvents.length,
                     segments
                 };
 
@@ -423,7 +396,7 @@ function getMonthsInRange(fromTimestamp: number, toTimestamp: number): Array<{ y
 
     // Iterate through all months in the range
     while (currentYear < endYear || (currentYear === endYear && currentMonth <= endMonth)) {
-        months.push({ year: currentYear, month: currentMonth });
+        months.push({year: currentYear, month: currentMonth});
 
         // Move to next month
         currentMonth++;
@@ -441,7 +414,7 @@ function getMonthsInRange(fromTimestamp: number, toTimestamp: number): Array<{ y
  */
 function getMonthName(year: number, month: number): string {
     const date = new Date(Date.UTC(year, month - 1, 1));
-    return date.toLocaleDateString('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' });
+    return date.toLocaleDateString('en-US', {month: 'long', year: 'numeric', timeZone: 'UTC'});
 }
 
 /**
@@ -466,13 +439,10 @@ export async function calculateUserMonthlyYieldBreakdown(
         monthName: string;
         startDate: string;
         endDate: string;
-        totalYield: bigint;
         assets: Array<{
             asset: string;
             monthlyYield: bigint;
             netDeposits: bigint;
-            hadPositionDuringMonth: boolean;
-            maxBalanceDuringMonth: bigint;
         }>;
     }>;
     currentValue?: {
@@ -481,15 +451,12 @@ export async function calculateUserMonthlyYieldBreakdown(
         monthName: string;
         startDate: string;
         endDate: string;
-        totalYield: bigint;
         isPartialMonth: boolean;
         daysInPeriod: number;
         assets: Array<{
             asset: string;
             monthlyYield: bigint;
             netDeposits: bigint;
-            hadPositionDuringMonth: boolean;
-            maxBalanceDuringMonth: bigint;
         }>;
     };
 }> {
@@ -510,15 +477,12 @@ export async function calculateUserMonthlyYieldBreakdown(
 
         // Calculate yield for each month in parallel
         const monthlyResults = await Promise.all(
-            months.map(async ({ year, month }) => {
+            months.map(async ({year, month}) => {
                 try {
                     // Use existing calculateUserMonthlyYield which leverages caching
                     const yieldData = await calculateUserMonthlyYield(context, user, year, month);
 
-                    const { startTimestamp, endTimestamp } = getMonthTimestamps(year, month);
-
-                    // Aggregate yield across all assets for this month
-                    const totalYield = yieldData.reduce((sum, asset) => sum + asset.monthlyYield, 0n);
+                    const {startTimestamp, endTimestamp} = getMonthTimestamps(year, month);
 
                     return {
                         year,
@@ -526,26 +490,22 @@ export async function calculateUserMonthlyYieldBreakdown(
                         monthName: getMonthName(year, month),
                         startDate: new Date(startTimestamp * 1000).toISOString(),
                         endDate: new Date(endTimestamp * 1000).toISOString(),
-                        totalYield,
                         assets: yieldData.map(asset => ({
                             asset: asset.asset,
                             monthlyYield: asset.monthlyYield,
-                            netDeposits: asset.netDeposits,
-                            hadPositionDuringMonth: asset.hadPositionDuringMonth,
-                            maxBalanceDuringMonth: asset.maxBalanceDuringMonth
+                            netDeposits: asset.netDeposits
                         }))
                     };
                 } catch (error) {
                     console.error(`❌ Error calculating yield for ${year}-${month}:`, error);
                     // Return empty result for this month on error
-                    const { startTimestamp, endTimestamp } = getMonthTimestamps(year, month);
+                    const {startTimestamp, endTimestamp} = getMonthTimestamps(year, month);
                     return {
                         year,
                         month,
                         monthName: getMonthName(year, month),
                         startDate: new Date(startTimestamp * 1000).toISOString(),
                         endDate: new Date(endTimestamp * 1000).toISOString(),
-                        totalYield: 0n,
                         assets: []
                     };
                 }
@@ -559,15 +519,12 @@ export async function calculateUserMonthlyYieldBreakdown(
             monthName: string;
             startDate: string;
             endDate: string;
-            totalYield: bigint;
             isPartialMonth: boolean;
             daysInPeriod: number;
             assets: Array<{
                 asset: string;
                 monthlyYield: bigint;
                 netDeposits: bigint;
-                hadPositionDuringMonth: boolean;
-                maxBalanceDuringMonth: bigint;
             }>;
         } | undefined;
 
@@ -580,9 +537,6 @@ export async function calculateUserMonthlyYieldBreakdown(
                 // Calculate yield for current partial month using custom period calculation
                 const yieldData = await calculateUserCustomPeriodYield(context, user, currentMonthStartTimestamp, toTimestamp);
 
-                // Aggregate yield across all assets
-                const totalYield = yieldData.reduce((sum, asset) => sum + asset.periodYield, 0n);
-
                 // Calculate days in partial month period
                 const daysInPeriod = Math.ceil((toTimestamp - currentMonthStartTimestamp) / (24 * 60 * 60));
 
@@ -592,15 +546,12 @@ export async function calculateUserMonthlyYieldBreakdown(
                     monthName: getMonthName(currentYear, currentMonth),
                     startDate: currentMonthStart.toISOString().split('T')[0]!,
                     endDate: endDate.toISOString().split('T')[0]!,
-                    totalYield,
                     isPartialMonth: true,
                     daysInPeriod,
                     assets: yieldData.map(asset => ({
                         asset: asset.asset,
                         monthlyYield: asset.periodYield,
-                        netDeposits: asset.netDeposits,
-                        hadPositionDuringMonth: asset.hadPositionDuringPeriod,
-                        maxBalanceDuringMonth: asset.maxBalanceDuringPeriod
+                        netDeposits: asset.netDeposits
                     }))
                 };
             } catch (error) {
@@ -685,7 +636,7 @@ export async function calculateUserMonthlyPortfolioValue(
 }> {
     try {
         // Import the position calculation function
-        const { calculateUserCustomPeriodPositions } = await import("./positionCalculations");
+        const {calculateUserCustomPeriodPositions} = await import("./positionCalculations");
 
         // Check if endTimestamp is at a month boundary (first day of next month at midnight UTC)
         const endDate = new Date(toTimestamp * 1000);
@@ -709,9 +660,9 @@ export async function calculateUserMonthlyPortfolioValue(
 
         // Calculate positions for each month in parallel
         const monthlyResults = await Promise.all(
-            months.map(async ({ year, month }) => {
+            months.map(async ({year, month}) => {
                 try {
-                    const { startTimestamp, endTimestamp } = getMonthTimestamps(year, month);
+                    const {startTimestamp, endTimestamp} = getMonthTimestamps(year, month);
 
                     // Use the same calculation logic as custom-period-positions
                     const positions = await calculateUserCustomPeriodPositions(
@@ -745,7 +696,7 @@ export async function calculateUserMonthlyPortfolioValue(
                 } catch (error) {
                     console.error(`❌ Error calculating positions for ${year}-${month}:`, error);
                     // Return empty result for this month on error
-                    const { endTimestamp } = getMonthTimestamps(year, month);
+                    const {endTimestamp} = getMonthTimestamps(year, month);
                     return {
                         year,
                         month,
@@ -929,15 +880,26 @@ export async function calculateUserDailyYieldBreakdown(
         const dailyResults = new Map<string, {
             date: string;
             timestamp: number;
-            dailyYield: bigint;
+            assetYield: bigint;
+            borrowCost: bigint;
+            netYield: bigint;
             assets: Map<string, {
                 asset: string;
-                dailyYield: bigint;
+                assetYield: bigint;
+                borrowCost: bigint;
+                netYield: bigint;
                 segments: Array<{
                     startTime: number;
                     endTime: number;
                     scaledBalance: bigint;
                     segmentYield: bigint;
+                    durationHours: number;
+                }>;
+                borrowSegments: Array<{
+                    startTime: number;
+                    endTime: number;
+                    scaledBorrowBalance: bigint;
+                    segmentBorrowCost: bigint;
                     durationHours: number;
                 }>;
             }>;
@@ -1051,7 +1013,7 @@ export async function calculateUserDailyYieldBreakdown(
                         const segmentDays = Math.ceil((segmentEndDate.getTime() - segmentStartDate.getTime()) / (24 * 60 * 60 * 1000)) + 1;
 
                         // First pass: collect all timestamps we need
-                        const dayOverlaps: Array<{dateStr: string, overlapStart: number, overlapEnd: number}> = [];
+                        const dayOverlaps: Array<{ dateStr: string, overlapStart: number, overlapEnd: number }> = [];
                         for (let dayOffset = 0; dayOffset < segmentDays; dayOffset++) {
                             const currentDate = new Date(segmentStartDate);
                             currentDate.setDate(segmentStartDate.getDate() + dayOffset);
@@ -1222,8 +1184,6 @@ export async function calculateUserDailyYieldBreakdown(
             }
         }
 
-        // Convert Map results to array format for complete days
-        // Include ALL days in the period, even those with zero yield for continuous time-series
         const formattedResults = Array.from(dailyResults.values())
             .map(dayData => ({
                 date: dayData.date,
@@ -1254,144 +1214,8 @@ export async function calculateUserDailyYieldBreakdown(
             }))
             .sort((a, b) => a.timestamp - b.timestamp); // Sort chronologically
 
-        // No partial day support - only return complete days
-        // This ensures totals match custom-period-yield when queried for the same period
-
-        if (false) { // Disabled partial day calculation
-            // Calculate yield from start of current day to endTimestamp
-            const currentDayAssets = new Map<string, {
-                asset: string;
-                assetYield: bigint;
-                borrowCost: bigint;
-                netYield: bigint;
-                segments: Array<{
-                    startTime: number;
-                    endTime: number;
-                    scaledBalance: bigint;
-                    segmentYield: bigint;
-                    durationHours: number;
-                }>;
-                borrowSegments: Array<{
-                    startTime: number;
-                    endTime: number;
-                    scaledBorrowBalance: bigint;
-                    segmentBorrowCost: bigint;
-                    durationHours: number;
-                }>;
-            }>();
-
-            // Initialize all assets with zero yield
-            for (const asset of assets) {
-                currentDayAssets.set(asset, {
-                    asset,
-                    assetYield: 0n,
-                    borrowCost: 0n,
-                    netYield: 0n,
-                    segments: [],
-                    borrowSegments: []
-                });
-            }
-
-            let totalCurrentYield = 0n;
-            let totalCurrentBorrowCost = 0n;
-
-            // Process each asset for the partial day
-            for (const asset of assets) {
-                try {
-                    // Get segmented yield data for this asset for the partial day
-                    const segmentedResult = await calculateSegmentedCustomPeriodYield(
-                        context,
-                        user,
-                        asset,
-                        endDayStart,
-                        endTimestamp
-                    );
-
-                    const assetData = currentDayAssets.get(asset)!;
-
-                    // Process each segment
-                    for (const segment of segmentedResult.segments) {
-                        assetData.assetYield += segment.segmentYield;
-                        assetData.segments.push({
-                            startTime: segment.startTime,
-                            endTime: segment.endTime,
-                            scaledBalance: segment.scaledBalance,
-                            segmentYield: segment.segmentYield,
-                            durationHours: segment.durationDays * 24
-                        });
-                    }
-
-                    totalCurrentYield += assetData.assetYield;
-
-                    // Get segmented borrow cost data for this asset for the partial day
-                    const borrowCostResult = await calculateSegmentedCustomPeriodBorrowCost(
-                        context,
-                        user,
-                        asset,
-                        endDayStart,
-                        endTimestamp
-                    );
-
-                    // Process each borrow cost segment
-                    for (const segment of borrowCostResult.segments) {
-                        assetData.borrowCost += segment.segmentBorrowCost;
-                        assetData.borrowSegments.push({
-                            startTime: segment.startTime,
-                            endTime: segment.endTime,
-                            scaledBorrowBalance: segment.scaledBorrowBalance,
-                            segmentBorrowCost: segment.segmentBorrowCost,
-                            durationHours: segment.durationDays * 24
-                        });
-                    }
-
-                    totalCurrentBorrowCost += assetData.borrowCost;
-                    // Net yield will be calculated after all processing is complete
-
-                } catch (error) {
-                    console.error(`❌ Error processing asset ${asset} for partial day:`, error);
-                    // Continue with other assets even if one fails
-                }
-            }
-
-            // Calculate net yield for all assets after both yield and borrow cost processing
-            for (const [asset, assetData] of currentDayAssets) {
-                assetData.netYield = assetData.assetYield - assetData.borrowCost;
-            }
-
-            // Format current value
-            currentValue = {
-                date: endDate.toISOString().split('T')[0]!,
-                timestamp: endTimestamp,
-                assetYield: totalCurrentYield,
-                borrowCost: totalCurrentBorrowCost,
-                netYield: totalCurrentYield - totalCurrentBorrowCost,
-                assets: Array.from(currentDayAssets.values()).map(assetData => ({
-                    asset: assetData.asset,
-                    assetYield: assetData.assetYield,
-                    borrowCost: assetData.borrowCost,
-                    netYield: assetData.netYield,
-                    segments: assetData.segments.map(seg => ({
-                        startTime: seg.startTime,
-                        endTime: seg.endTime,
-                        scaledBalance: seg.scaledBalance.toString(),
-                        segmentYield: seg.segmentYield.toString(),
-                        durationHours: seg.durationHours
-                    })),
-                    borrowSegments: assetData.borrowSegments.map(seg => ({
-                        startTime: seg.startTime,
-                        endTime: seg.endTime,
-                        scaledBorrowBalance: seg.scaledBorrowBalance.toString(),
-                        segmentBorrowCost: seg.segmentBorrowCost.toString(),
-                        durationHours: seg.durationHours
-                    }))
-                })),
-                isPartialDay: true
-            };
-        }
-
         return {
             dailyValues: formattedResults,
-            currentValue: undefined // No partial day support
         };
 
     } catch (error) {
@@ -1632,7 +1456,7 @@ export async function calculateUserDailyPortfolioValue(
 
         // Batch fetch ALL balance events for ALL assets in ONE query
         const dbQuery = context.db.sql || context.db;
-        const { Borrow, Repay } = await import("ponder:schema");
+        const {Borrow, Repay} = await import("ponder:schema");
 
         const [allBalanceEvents, allBorrows, allRepays] = await Promise.all([
             dbQuery
@@ -1717,7 +1541,7 @@ export async function calculateUserDailyPortfolioValue(
         const indexPrefetchList = [];
         for (const asset of allAssets) {
             for (const dayEndTimestamp of dayTimestamps) {
-                indexPrefetchList.push({ asset, timestamp: dayEndTimestamp });
+                indexPrefetchList.push({asset, timestamp: dayEndTimestamp});
             }
         }
         await Promise.all([
@@ -1805,7 +1629,7 @@ export async function calculateUserDailyPortfolioValue(
 
         if (isPartialDay) {
             // Prefetch indices for current timestamp
-            const currentIndexPrefetchList = allAssets.map(asset => ({ asset, timestamp: endTimestamp }));
+            const currentIndexPrefetchList = allAssets.map(asset => ({asset, timestamp: endTimestamp}));
             await Promise.all([
                 indexCache.prefetch(context, currentIndexPrefetchList),
                 borrowIndexCache.prefetch(context, currentIndexPrefetchList)

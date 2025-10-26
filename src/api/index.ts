@@ -235,51 +235,65 @@ app.get("/user/:address/custom-period-yield-isolated", async (c) => {
         }
 
         // Format the response data - only activity metrics, yield calculations, and detailed breakdowns
-        const formattedPairs = positions.map(pos => ({
+        const formattedPairs = positions.map((pos) => {
+            return {
             pair: pos.pair,
-            totalYieldEarned: pos.totalYieldEarned.toString(),
-            totalBorrowCost: pos.totalBorrowCost.toString(),
-            totalDeposited: pos.totalDeposited.toString(),
-            totalWithdrawn: pos.totalWithdrawn.toString(),
-            totalBorrowed: pos.totalBorrowed.toString(),
-            totalRepaid: pos.totalRepaid.toString(),
-            totalCollateralAdded: pos.totalCollateralAdded.toString(),
-            totalCollateralRemoved: pos.totalCollateralRemoved.toString(),
-            netDeposits: pos.netDeposits.toString(),
-            netBorrows: pos.netBorrows.toString(),
-            netCollateral: pos.netCollateral.toString(),
-            events: pos.events, // Already formatted with string amounts
-            events_before_period: pos.events_before_period, // Events that contributed to starting balances
+            totalYieldEarned: pos.totalYieldEarned?.toString() ?? '0',
+            totalBorrowCost: pos.totalBorrowCost?.toString() ?? '0',
+            totalDeposited: pos.totalDeposited?.toString() ?? '0',
+            totalWithdrawn: pos.totalWithdrawn?.toString() ?? '0',
+            totalBorrowed: pos.totalBorrowed?.toString() ?? '0',
+            totalRepaid: pos.totalRepaid?.toString() ?? '0',
+            totalCollateralAdded: pos.totalCollateralAdded?.toString() ?? '0',
+            totalCollateralRemoved: pos.totalCollateralRemoved?.toString() ?? '0',
+            netDeposits: pos.netDeposits?.toString() ?? '0',
+            netBorrows: pos.netBorrows?.toString() ?? '0',
+            netCollateral: pos.netCollateral?.toString() ?? '0',
+            events: pos.events ?? [], // Already formatted with string amounts
+            events_before_period: pos.events_before_period ?? [], // Events that contributed to starting balances
             starting_balances: {
-                collateral: pos.starting_balances.collateral.toString(),
-                deposits: pos.starting_balances.deposits.toString(),
-                borrows: pos.starting_balances.borrows.toString()
+                collateral: pos.starting_balances?.collateral?.toString() ?? '0',
+                deposits: pos.starting_balances?.deposits?.toString() ?? '0',
+                borrows: pos.starting_balances?.borrows?.toString() ?? '0'
             },
-            yieldSegments: pos.yieldSegments.map(seg => ({
-                startTime: seg.startTime,
-                endTime: seg.endTime,
-                startDate: seg.startDate,
-                endDate: seg.endDate,
-                assetShares: seg.assetShares.toString(),
-                actualAssetAmount: seg.actualAssetAmount.toString(),
-                startExchangeRate: seg.startExchangeRate.toString(),
-                endExchangeRate: seg.endExchangeRate.toString(),
-                segmentYield: seg.segmentYield.toString(),
-                durationDays: seg.durationDays
-            })),
-            borrowCostSegments: pos.borrowCostSegments.map(seg => ({
-                startTime: seg.startTime,
-                endTime: seg.endTime,
-                startDate: seg.startDate,
-                endDate: seg.endDate,
-                borrowShares: seg.borrowShares.toString(),
-                actualBorrowAmount: seg.actualBorrowAmount.toString(),
-                startExchangeRate: seg.startExchangeRate.toString(),
-                endExchangeRate: seg.endExchangeRate.toString(),
-                segmentBorrowCost: seg.segmentBorrowCost.toString(),
-                durationDays: seg.durationDays
-            }))
-        }));
+            yieldSegments: (pos.yieldSegments ?? []).map((seg) => {
+                if (!seg) {
+                    console.error(`yieldSegment is null/undefined!`);
+                    throw new Error(`yieldSegment is null/undefined`);
+                }
+                return {
+                    startTime: seg.startTime,
+                    endTime: seg.endTime,
+                    startDate: seg.startDate,
+                    endDate: seg.endDate,
+                    assetShares: seg.assetShares?.toString() ?? '0',
+                    actualAssetAmount: seg.actualAssetAmount?.toString() ?? '0',
+                    startExchangeRate: seg.startExchangeRate?.toString() ?? '0',
+                    endExchangeRate: seg.endExchangeRate?.toString() ?? '0',
+                    segmentYield: seg.segmentYield?.toString() ?? '0',
+                    durationDays: seg.durationDays ?? 0
+                };
+            }),
+            borrowCostSegments: (pos.borrowCostSegments ?? []).map((seg) => {
+                if (!seg) {
+                    console.error(`borrowCostSegment is null/undefined!`);
+                    throw new Error(`borrowCostSegment is null/undefined`);
+                }
+                return {
+                    startTime: seg.startTime,
+                    endTime: seg.endTime,
+                    startDate: seg.startDate,
+                    endDate: seg.endDate,
+                    borrowShares: seg.borrowShares?.toString() ?? '0',
+                    actualBorrowAmount: seg.actualBorrowAmount?.toString() ?? '0',
+                    startExchangeRate: seg.startExchangeRate?.toString() ?? '0',
+                    endExchangeRate: seg.endExchangeRate?.toString() ?? '0',
+                    segmentBorrowCost: seg.segmentBorrowCost?.toString() ?? '0',
+                    durationDays: seg.durationDays ?? 0
+                };
+            })
+        };
+        });
 
         return c.json({
             user: userAddress,
@@ -295,10 +309,11 @@ app.get("/user/:address/custom-period-yield-isolated", async (c) => {
 
     } catch (error) {
         console.error("Error calculating isolated pair yield:", error);
+        // @ts-ignore
         console.error("Error details:", error.message);
-        console.error("Stack trace:", error.stack);
         return c.json({
             error: "Failed to calculate isolated pair yield data",
+            // @ts-ignore
             details: error.message,
             user: userAddress,
             fromTimestamp,
@@ -584,9 +599,6 @@ app.get("/user/:address/daily-yield-breakdown", async (c) => {
         const serializedBreakdown = yieldData.dailyValues.map(day => ({
             date: day.date,
             timestamp: day.timestamp,
-            assetYield: day.assetYield.toString(),
-            borrowCost: day.borrowCost.toString(),
-            netYield: day.netYield.toString(),
             assets: day.assets.map(asset => ({
                 asset: asset.asset,
                 assetYield: asset.assetYield.toString(),
@@ -601,9 +613,6 @@ app.get("/user/:address/daily-yield-breakdown", async (c) => {
         const serializedCurrentValue = yieldData.currentValue ? {
             date: yieldData.currentValue.date,
             timestamp: yieldData.currentValue.timestamp,
-            assetYield: yieldData.currentValue.assetYield.toString(),
-            borrowCost: yieldData.currentValue.borrowCost.toString(),
-            netYield: yieldData.currentValue.netYield.toString(),
             isPartialDay: yieldData.currentValue.isPartialDay,
             assets: yieldData.currentValue.assets.map(asset => ({
                 asset: asset.asset,
@@ -714,7 +723,6 @@ app.get("/user/:address/daily-yield-breakdown-isolated", async (c) => {
         const serializedBreakdown = yieldData.dailyValues.map(day => ({
             date: day.date,
             timestamp: day.timestamp,
-            dailyYield: day.dailyYield.toString(),
             pairs: day.pairs.map(pair => ({
                 pair: pair.pair,
                 assetYield: pair.assetYield.toString(),
@@ -727,7 +735,6 @@ app.get("/user/:address/daily-yield-breakdown-isolated", async (c) => {
         const serializedCurrentValue = yieldData.currentValue ? {
             date: yieldData.currentValue.date,
             timestamp: yieldData.currentValue.timestamp,
-            dailyYield: yieldData.currentValue.dailyYield.toString(),
             isPartialDay: yieldData.currentValue.isPartialDay,
             pairs: yieldData.currentValue.pairs.map(pair => ({
                 pair: pair.pair,
@@ -751,7 +758,7 @@ app.get("/user/:address/daily-yield-breakdown-isolated", async (c) => {
                 hasPartialDay: !!yieldData.currentValue
             },
             calculatedAt: Math.floor(Date.now() / 1000),
-            note: "To calculate total yield in USD, sum (assetYield / 10^decimals * price) for each asset using current oracle prices"
+            note: "IMPORTANT: assetYield and borrowCost can be NEGATIVE. They represent value changes: assetYield = change in deposit value (can be negative if exchange rate drops), borrowCost = change in debt value (can be negative if debt shrinks, which is a gain). netYield = assetYield - borrowCost. To calculate in USD: sum ((assetYield - borrowCost) / 10^decimals * price) for each pair."
         });
 
     } catch (error) {
@@ -824,9 +831,6 @@ app.get("/user/:address/daily-portfolio-value", async (c) => {
                 dailyPortfolioValues: [],
                 currentValue: null,
                 summary: {
-                    averagePortfolioValue: "0",
-                    maxPortfolioValue: "0",
-                    minPortfolioValue: "0",
                     totalDaysInPeriod: expectedDays,
                     hasPartialDay: false
                 },
@@ -835,25 +839,10 @@ app.get("/user/:address/daily-portfolio-value", async (c) => {
             });
         }
 
-        // Calculate summary statistics for regular pool
-        // Include currentValue in calculations if present
-        const allValues = [...portfolioData.dailyValues];
-        if (portfolioData.currentValue) {
-            allValues.push(portfolioData.currentValue);
-        }
-
-        const totalPortfolioValue = allValues.reduce((sum, day) => sum + day.portfolioValue, 0n);
-        const averagePortfolioValue = allValues.length > 0 ? totalPortfolioValue / BigInt(allValues.length) : 0n;
-        const maxPortfolioValue = allValues.reduce((max, day) => day.portfolioValue > max ? day.portfolioValue : max, allValues[0]?.portfolioValue || 0n);
-        const minPortfolioValue = allValues.reduce((min, day) => day.portfolioValue < min ? day.portfolioValue : min, allValues[0]?.portfolioValue || 0n);
-
         // Convert all BigInt values to strings for JSON serialization
         const serializedPortfolio = portfolioData.dailyValues.map(day => ({
             date: day.date,
             timestamp: day.timestamp,
-            portfolioValue: day.portfolioValue.toString(),
-            totalSupplied: day.totalSupplied.toString(),
-            totalBorrowed: day.totalBorrowed.toString(),
             assets: day.assets.map(asset => ({
                 asset: asset.asset,
                 supplied: asset.supplied.toString(),
@@ -866,9 +855,6 @@ app.get("/user/:address/daily-portfolio-value", async (c) => {
         const serializedCurrentValue = portfolioData.currentValue ? {
             date: portfolioData.currentValue.date,
             timestamp: portfolioData.currentValue.timestamp,
-            portfolioValue: portfolioData.currentValue.portfolioValue.toString(),
-            totalSupplied: portfolioData.currentValue.totalSupplied.toString(),
-            totalBorrowed: portfolioData.currentValue.totalBorrowed.toString(),
             isPartialDay: portfolioData.currentValue.isPartialDay,
             assets: portfolioData.currentValue.assets.map(asset => ({
                 asset: asset.asset,
@@ -888,13 +874,11 @@ app.get("/user/:address/daily-portfolio-value", async (c) => {
             dailyPortfolioValues: serializedPortfolio,
             currentValue: serializedCurrentValue,
             summary: {
-                averagePortfolioValue: averagePortfolioValue.toString(),
-                maxPortfolioValue: maxPortfolioValue.toString(),
-                minPortfolioValue: minPortfolioValue.toString(),
                 totalDaysInPeriod: portfolioData.dailyValues.length,
                 hasPartialDay: !!portfolioData.currentValue
             },
-            calculatedAt: Math.floor(Date.now() / 1000)
+            calculatedAt: Math.floor(Date.now() / 1000),
+            note: "To calculate total portfolio value in USD, sum ((supplied - borrowed) / 10^decimals * price) for each asset using current oracle prices"
         });
 
     } catch (error) {
@@ -959,9 +943,6 @@ app.get("/user/:address/daily-portfolio-value-isolated", async (c) => {
         const dailyIsolatedPairs: Array<{
             date: string;
             timestamp: number;
-            portfolioValue: bigint;
-            totalSupplied: bigint;
-            totalBorrowed: bigint;
             pairs: Array<any>;
         }> = [];
 
@@ -973,16 +954,9 @@ app.get("/user/:address/daily-portfolio-value-isolated", async (c) => {
             const dayTimestamp = Math.min(ts, endTimestampForDays);
             const positions = await calculateAllIsolatedPairPositions(context, userAddress, dayTimestamp, fromTimestamp);
 
-            const totalSupplied = positions.reduce((sum, pos) => sum + pos.collateralAmount + pos.assetAmount, 0n);
-            const totalBorrowed = positions.reduce((sum, pos) => sum + pos.borrowAmount, 0n);
-            const portfolioValue = totalSupplied - totalBorrowed;
-
             dailyIsolatedPairs.push({
                 date: new Date(dayTimestamp * 1000).toISOString().split('T')[0]!,
                 timestamp: dayTimestamp,
-                portfolioValue,
-                totalSupplied,
-                totalBorrowed,
                 pairs: positions.map(pos => ({
                     pair: pos.pair,
                     collateralAmount: pos.collateralAmount.toString(),
@@ -996,25 +970,16 @@ app.get("/user/:address/daily-portfolio-value-isolated", async (c) => {
         let currentValue: {
             date: string;
             timestamp: number;
-            portfolioValue: string;
-            totalSupplied: string;
-            totalBorrowed: string;
             isPartialDay: boolean;
             pairs: Array<any>;
         } | null = null;
 
         if (isPartialDay) {
             const currentPositions = await calculateAllIsolatedPairPositions(context, userAddress, toTimestamp, fromTimestamp);
-            const currentTotalSupplied = currentPositions.reduce((sum, pos) => sum + pos.collateralAmount + pos.assetAmount, 0n);
-            const currentTotalBorrowed = currentPositions.reduce((sum, pos) => sum + pos.borrowAmount, 0n);
-            const currentPortfolioValue = currentTotalSupplied - currentTotalBorrowed;
 
             currentValue = {
                 date: endDate.toISOString().split('T')[0]!,
                 timestamp: toTimestamp,
-                portfolioValue: currentPortfolioValue.toString(),
-                totalSupplied: currentTotalSupplied.toString(),
-                totalBorrowed: currentTotalBorrowed.toString(),
                 isPartialDay: true,
                 pairs: currentPositions.map(pos => ({
                     pair: pos.pair,
@@ -1037,9 +1002,6 @@ app.get("/user/:address/daily-portfolio-value-isolated", async (c) => {
                 dailyPortfolioValues: [],
                 currentValue: null,
                 summary: {
-                    averagePortfolioValue: "0",
-                    maxPortfolioValue: "0",
-                    minPortfolioValue: "0",
                     totalDaysInPeriod: expectedDays,
                     hasPartialDay: false
                 },
@@ -1048,37 +1010,6 @@ app.get("/user/:address/daily-portfolio-value-isolated", async (c) => {
             });
         }
 
-        // Calculate summary statistics for isolated pairs
-        // Include currentValue in calculations if present
-        let totalPortfolioValue = dailyIsolatedPairs.reduce((sum, day) => sum + day.portfolioValue, 0n);
-        let maxPortfolioValue = dailyIsolatedPairs.length > 0
-            ? dailyIsolatedPairs.reduce((max, day) => day.portfolioValue > max ? day.portfolioValue : max, 0n)
-            : 0n;
-        let minPortfolioValue = dailyIsolatedPairs.length > 0
-            ? dailyIsolatedPairs.reduce((min, day) => day.portfolioValue < min ? day.portfolioValue : min, dailyIsolatedPairs[0]?.portfolioValue || 0n)
-            : 0n;
-
-        let valueCount = dailyIsolatedPairs.length;
-        if (currentValue) {
-            const currentPortfolioValueBigInt = BigInt(currentValue.portfolioValue);
-            totalPortfolioValue += currentPortfolioValueBigInt;
-            maxPortfolioValue = currentPortfolioValueBigInt > maxPortfolioValue ? currentPortfolioValueBigInt : maxPortfolioValue;
-            minPortfolioValue = valueCount === 0 ? currentPortfolioValueBigInt : (currentPortfolioValueBigInt < minPortfolioValue ? currentPortfolioValueBigInt : minPortfolioValue);
-            valueCount++;
-        }
-
-        const averagePortfolioValue = valueCount > 0 ? totalPortfolioValue / BigInt(valueCount) : 0n;
-
-        // Convert all BigInt values to strings for JSON serialization
-        const serializedPortfolio = dailyIsolatedPairs.map(day => ({
-            date: day.date,
-            timestamp: day.timestamp,
-            portfolioValue: day.portfolioValue.toString(),
-            totalSupplied: day.totalSupplied.toString(),
-            totalBorrowed: day.totalBorrowed.toString(),
-            pairs: day.pairs
-        }));
-
         return c.json({
             user: userAddress,
             fromTimestamp,
@@ -1086,16 +1017,14 @@ app.get("/user/:address/daily-portfolio-value-isolated", async (c) => {
             fromDate: new Date(fromTimestamp * 1000).toISOString(),
             toDate: new Date(toTimestamp * 1000).toISOString(),
             days: Math.round((toTimestamp - fromTimestamp) / (24 * 60 * 60) * 100) / 100,
-            dailyPortfolioValues: serializedPortfolio,
+            dailyPortfolioValues: dailyIsolatedPairs,
             currentValue: currentValue,
             summary: {
-                averagePortfolioValue: averagePortfolioValue.toString(),
-                maxPortfolioValue: maxPortfolioValue.toString(),
-                minPortfolioValue: minPortfolioValue.toString(),
                 totalDaysInPeriod: dailyIsolatedPairs.length,
                 hasPartialDay: !!currentValue
             },
-            calculatedAt: Math.floor(Date.now() / 1000)
+            calculatedAt: Math.floor(Date.now() / 1000),
+            note: "To calculate total portfolio value in USD, sum ((collateralAmount + assetAmount - borrowAmount) / 10^decimals * price) for each pair using current oracle prices"
         });
 
     } catch (error) {
@@ -1188,13 +1117,10 @@ app.get("/user/:address/monthly-yield-breakdown", async (c) => {
             monthName: month.monthName,
             startDate: month.startDate,
             endDate: month.endDate,
-            totalYield: month.totalYield.toString(),
             assets: month.assets.map(asset => ({
                 asset: asset.asset,
-                monthlyYield: asset.monthlyYield.toString(),
-                netDeposits: asset.netDeposits.toString(),
-                hadPositionDuringMonth: asset.hadPositionDuringMonth,
-                maxBalanceDuringMonth: asset.maxBalanceDuringMonth.toString()
+                assetYield: asset.monthlyYield.toString(),
+                netDeposits: asset.netDeposits.toString()
             }))
         }));
 
@@ -1205,15 +1131,12 @@ app.get("/user/:address/monthly-yield-breakdown", async (c) => {
             monthName: yieldData.currentValue.monthName,
             startDate: yieldData.currentValue.startDate,
             endDate: yieldData.currentValue.endDate,
-            totalYield: yieldData.currentValue.totalYield.toString(),
             isPartialMonth: yieldData.currentValue.isPartialMonth,
             daysInPeriod: yieldData.currentValue.daysInPeriod,
             assets: yieldData.currentValue.assets.map(asset => ({
                 asset: asset.asset,
-                monthlyYield: asset.monthlyYield.toString(),
-                netDeposits: asset.netDeposits.toString(),
-                hadPositionDuringMonth: asset.hadPositionDuringMonth,
-                maxBalanceDuringMonth: asset.maxBalanceDuringMonth.toString()
+                assetYield: asset.monthlyYield.toString(),
+                netDeposits: asset.netDeposits.toString()
             }))
         } : null;
 
@@ -1323,7 +1246,6 @@ app.get("/user/:address/monthly-yield-breakdown-isolated", async (c) => {
             monthName: month.monthName,
             startDate: month.startDate,
             endDate: month.endDate,
-            monthlyYield: month.monthlyYield.toString(),
             pairs: month.pairs.map(pair => ({
                 pair: pair.pair,
                 assetYield: pair.assetYield.toString(),
@@ -1339,7 +1261,6 @@ app.get("/user/:address/monthly-yield-breakdown-isolated", async (c) => {
             monthName: yieldData.currentValue.monthName,
             startDate: yieldData.currentValue.startDate,
             endDate: yieldData.currentValue.endDate,
-            monthlyYield: yieldData.currentValue.monthlyYield.toString(),
             isPartialMonth: yieldData.currentValue.isPartialMonth,
             daysInPeriod: yieldData.currentValue.daysInPeriod,
             pairs: yieldData.currentValue.pairs.map(pair => ({
@@ -1364,7 +1285,7 @@ app.get("/user/:address/monthly-yield-breakdown-isolated", async (c) => {
                 hasPartialMonth: !!yieldData.currentValue
             },
             calculatedAt: Math.floor(Date.now() / 1000),
-            note: "To calculate total yield in USD, sum (assetYield / 10^decimals * price) for each asset using current oracle prices"
+            note: "IMPORTANT: assetYield and borrowCost can be NEGATIVE. They represent value changes: assetYield = change in deposit value (can be negative if exchange rate drops), borrowCost = change in debt value (can be negative if debt shrinks, which is a gain). netYield = assetYield - borrowCost. To calculate in USD: sum ((assetYield - borrowCost) / 10^decimals * price) for each pair."
         });
 
     } catch (error) {
@@ -1798,133 +1719,6 @@ app.get("/user/:address/monthly-portfolio-value-isolated", async (c) => {
     } catch (error) {
         console.error("Error calculating isolated pair monthly portfolio values:", error);
         return c.json({error: "Failed to calculate isolated pair monthly portfolio values"}, 500);
-    }
-});
-
-// Custom health check endpoint
-app.get("/custom-health", async (c) => {
-    return c.json({status: "ok", timestamp: Date.now()});
-});
-
-// Debug endpoint to check what isolated pairs are being tracked
-app.get("/debug/isolated-pairs", async (c) => {
-    try {
-        const {UserIsolatedPairTracking} = await import("../../ponder.schema");
-        const dbQuery = db.sql || db;
-
-        const trackingRecords = await dbQuery
-            .select()
-            .from(UserIsolatedPairTracking)
-            .limit(100);
-
-        const uniquePairs = [...new Set(trackingRecords.map((record: any) => record.pair))];
-
-        return c.json({
-            totalTrackingRecords: trackingRecords.length,
-            uniquePairs: uniquePairs.length,
-            pairs: uniquePairs,
-            sampleRecords: trackingRecords.slice(0, 10)
-        });
-    } catch (error) {
-        console.error("Error fetching isolated pairs:", error);
-        return c.json({error: "Failed to fetch isolated pairs"}, 500);
-    }
-});
-
-// Debug endpoint to test period tracking
-app.get("/debug/period-tracking/:address", async (c) => {
-    try {
-        const userAddress = c.req.param("address");
-        const fromTimestamp = parseInt(c.req.query("fromTimestamp") || "0");
-        const toTimestamp = parseInt(c.req.query("toTimestamp") || "0");
-
-        const {getUserIsolatedPairsForPeriod} = await import("../helpers/yield/isolatedPair/periodTracking");
-        const context = {db};
-
-        const pairs = await getUserIsolatedPairsForPeriod(context, userAddress, fromTimestamp, toTimestamp);
-
-        return c.json({
-            user: userAddress,
-            fromTimestamp,
-            toTimestamp,
-            pairsFound: pairs.length,
-            pairs
-        });
-    } catch (error) {
-        console.error("Error testing period tracking:", error);
-        return c.json({error: "Failed to test period tracking", details: error.message}, 500);
-    }
-});
-
-// Debug endpoint to check raw collateral events
-app.get("/debug/collateral-events/:address/:pair", async (c) => {
-    try {
-        const userAddress = c.req.param("address");
-        const pairAddress = c.req.param("pair");
-        const fromTimestamp = parseInt(c.req.query("fromTimestamp") || "0");
-        const toTimestamp = parseInt(c.req.query("toTimestamp") || "0");
-
-        const {AddCollateralIsolated} = await import("../../ponder.schema");
-        const {eq, and, gte, lte} = await import("ponder");
-        const dbQuery = db.sql || db;
-
-        const events = await dbQuery
-            .select()
-            .from(AddCollateralIsolated)
-            .where(
-                and(
-                    eq(AddCollateralIsolated.borrower, userAddress as `0x${string}`),
-                    eq(AddCollateralIsolated.pair, pairAddress as `0x${string}`),
-                    gte(AddCollateralIsolated.timestamp, fromTimestamp),
-                    lte(AddCollateralIsolated.timestamp, toTimestamp)
-                )
-            )
-            .orderBy(AddCollateralIsolated.timestamp);
-
-        // Also check for any events with null transaction hashes
-        const nullTxEvents = await dbQuery
-            .select()
-            .from(AddCollateralIsolated)
-            .where(
-                and(
-                    eq(AddCollateralIsolated.borrower, userAddress as `0x${string}`),
-                    eq(AddCollateralIsolated.pair, pairAddress as `0x${string}`),
-                    eq(AddCollateralIsolated.txHash, '0x0000000000000000000000000000000000000000000000000000000000000000' as `0x${string}`)
-                )
-            );
-
-        // Convert BigInt values to strings for JSON serialization
-        const serializedEvents = events.map((event: any) => ({
-            ...event,
-            collateralAmount: event.collateralAmount?.toString(),
-            price: event.price?.toString()
-        }));
-
-        const serializedNullTxEvents = nullTxEvents.map((event: any) => ({
-            ...event,
-            collateralAmount: event.collateralAmount?.toString(),
-            price: event.price?.toString()
-        }));
-
-        // Also check starting collateral balance
-        const {getIsolatedPairCollateralBalance} = await import("../helpers/yield/isolatedPair/balanceQueries");
-        const context = {db};
-        const startingCollateral = await getIsolatedPairCollateralBalance(context, userAddress, pairAddress, fromTimestamp);
-
-        return c.json({
-            user: userAddress,
-            pair: pairAddress,
-            fromTimestamp,
-            toTimestamp,
-            eventsFound: events.length,
-            events: serializedEvents,
-            nullTxEventsFound: nullTxEvents.length,
-            nullTxEvents: serializedNullTxEvents,
-            startingCollateralBalance: startingCollateral.toString()
-        });
-    } catch (error) {
-        console.error("Error fetching collateral events:", error);
-        return c.json({error: "Failed to fetch collateral events", details: error.message}, 500);
     }
 });
 

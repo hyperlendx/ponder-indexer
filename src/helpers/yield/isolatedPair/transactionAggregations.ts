@@ -173,7 +173,7 @@ export async function calculateTotalRepaid(
     
     for (const repay of repays) {
         // Convert shares to asset amount using the exchange rate at time of repay
-        const assetAmount = convertSharesToAssets(repay.sharesRemoved, repay.exchangeRate);
+        const assetAmount = convertSharesToAssets(repay.shares, repay.exchangeRate);
         totalRepaid += assetAmount;
     }
     

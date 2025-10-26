@@ -987,32 +987,82 @@ export async function calculateUserIsolatedYieldPositions(
             const netBorrows = totalBorrowed - totalRepaid;
             const netCollateral = totalCollateralAdded - totalCollateralRemoved;
 
-            // Convert segment data to the interface format
-            const yieldSegments: IsolatedPairYieldSegmentDetail[] = yieldResult.segments.map(seg => ({
-                startTime: seg.startTime,
-                endTime: seg.endTime,
-                startDate: seg.startDate,
-                endDate: seg.endDate,
-                assetShares: seg.assetShares,
-                actualAssetAmount: seg.actualAssetAmount,
-                startExchangeRate: seg.startExchangeRate,
-                endExchangeRate: seg.endExchangeRate,
-                segmentYield: seg.segmentYield,
-                durationDays: seg.durationDays
-            }));
+            // Validate yield and borrow cost results
+            if (!yieldResult) {
+                console.error(`yieldResult is undefined for pair ${pair}`);
+                throw new Error(`Failed to calculate yield for pair ${pair}: yieldResult is undefined`);
+            }
+            if (!borrowCostResult) {
+                console.error(`borrowCostResult is undefined for pair ${pair}`);
+                throw new Error(`Failed to calculate borrow cost for pair ${pair}: borrowCostResult is undefined`);
+            }
+            if (!yieldResult.segments) {
+                console.error(`yieldResult.segments is undefined for pair ${pair}`, yieldResult);
+                throw new Error(`Failed to calculate yield for pair ${pair}: segments is undefined`);
+            }
+            if (!borrowCostResult.segments) {
+                console.error(`borrowCostResult.segments is undefined for pair ${pair}`, borrowCostResult);
+                throw new Error(`Failed to calculate borrow cost for pair ${pair}: segments is undefined`);
+            }
 
-            const borrowCostSegments: IsolatedPairBorrowCostSegmentDetail[] = borrowCostResult.segments.map(seg => ({
-                startTime: seg.startTime,
-                endTime: seg.endTime,
-                startDate: seg.startDate,
-                endDate: seg.endDate,
-                borrowShares: seg.borrowShares,
-                actualBorrowAmount: seg.actualBorrowAmount,
-                startExchangeRate: seg.startExchangeRate,
-                endExchangeRate: seg.endExchangeRate,
-                segmentBorrowCost: seg.segmentBorrowCost,
-                durationDays: seg.durationDays
-            }));
+            // Convert segment data to the interface format with defensive null checks
+            const yieldSegments: IsolatedPairYieldSegmentDetail[] = yieldResult.segments.map(seg => {
+                // Validate segment has all required properties
+                if (!seg) {
+                    console.error(`Null segment in yieldResult for pair ${pair}`);
+                    throw new Error(`Invalid yield segment: segment is null or undefined`);
+                }
+                if (seg.startTime === undefined || seg.endTime === undefined) {
+                    console.error(`Invalid segment times for pair ${pair}:`, seg);
+                    throw new Error(`Invalid yield segment: missing startTime or endTime`);
+                }
+                if (seg.assetShares === undefined || seg.segmentYield === undefined) {
+                    console.error(`Invalid segment values for pair ${pair}:`, seg);
+                    throw new Error(`Invalid yield segment: missing assetShares or segmentYield`);
+                }
+
+                return {
+                    startTime: seg.startTime,
+                    endTime: seg.endTime,
+                    startDate: seg.startDate || new Date(seg.startTime * 1000).toISOString(),
+                    endDate: seg.endDate || new Date(seg.endTime * 1000).toISOString(),
+                    assetShares: seg.assetShares,
+                    actualAssetAmount: seg.actualAssetAmount ?? 0n,
+                    startExchangeRate: seg.startExchangeRate ?? 0n,
+                    endExchangeRate: seg.endExchangeRate ?? 0n,
+                    segmentYield: seg.segmentYield,
+                    durationDays: seg.durationDays ?? 0
+                };
+            });
+
+            const borrowCostSegments: IsolatedPairBorrowCostSegmentDetail[] = borrowCostResult.segments.map(seg => {
+                // Validate segment has all required properties
+                if (!seg) {
+                    console.error(`Null segment in borrowCostResult for pair ${pair}`);
+                    throw new Error(`Invalid borrow cost segment: segment is null or undefined`);
+                }
+                if (seg.startTime === undefined || seg.endTime === undefined) {
+                    console.error(`Invalid segment times for pair ${pair}:`, seg);
+                    throw new Error(`Invalid borrow cost segment: missing startTime or endTime`);
+                }
+                if (seg.borrowShares === undefined || seg.segmentBorrowCost === undefined) {
+                    console.error(`Invalid segment values for pair ${pair}:`, seg);
+                    throw new Error(`Invalid borrow cost segment: missing borrowShares or segmentBorrowCost`);
+                }
+
+                return {
+                    startTime: seg.startTime,
+                    endTime: seg.endTime,
+                    startDate: seg.startDate || new Date(seg.startTime * 1000).toISOString(),
+                    endDate: seg.endDate || new Date(seg.endTime * 1000).toISOString(),
+                    borrowShares: seg.borrowShares,
+                    actualBorrowAmount: seg.actualBorrowAmount ?? 0n,
+                    startExchangeRate: seg.startExchangeRate ?? 0n,
+                    endExchangeRate: seg.endExchangeRate ?? 0n,
+                    segmentBorrowCost: seg.segmentBorrowCost,
+                    durationDays: seg.durationDays ?? 0
+                };
+            });
 
             return {
                 pair,
@@ -1037,13 +1087,13 @@ export async function calculateUserIsolatedYieldPositions(
                 yieldSegments,
                 borrowCostSegments
             };
+            } catch (error) {
+                console.error(`Error calculating yield for pair ${pair}:`, error);
+                // @ts-ignore
+                throw new Error(`Failed to calculate yield for pair ${pair}: ${error.message}`);
+            }
         })
     );
-
-    console.log(`Before filtering: ${positions.length} positions`);
-    positions.forEach((pos, i) => {
-        console.log(`Position ${i}: pair=${pos.pair}, deposited=${pos.totalDeposited}, borrowed=${pos.totalBorrowed}, collateral=${pos.totalCollateralAdded}`);
-    });
 
     // Filter to only positions with activity during the period
     const activePositions = positions.filter(
@@ -1056,6 +1106,5 @@ export async function calculateUserIsolatedYieldPositions(
             pos.totalCollateralRemoved > 0n
     );
 
-    console.log(`After filtering: ${activePositions.length} active positions`);
     return activePositions;
 }
