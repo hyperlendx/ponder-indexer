@@ -794,6 +794,7 @@ export async function calculateUserIsolatedYieldPositions(
     // Calculate yield positions for each pair in parallel
     const positions = await Promise.all(
         pairs.map(async (pair) => {
+            try {
             // Fetch data in parallel for performance
             const [
                 // Events during the period
