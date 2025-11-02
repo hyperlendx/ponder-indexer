@@ -702,6 +702,10 @@ app.get("/user/:address/daily-yield-breakdown-isolated", async (c) => {
     try {
         const context = {db};
 
+        // Clear exchange rate cache for this request to prevent stale data
+        const {clearExchangeRateCache} = await import("../helpers/yield/isolatedPair/exchangeRate");
+        clearExchangeRateCache();
+
         // Calculate daily yield for isolated pairs
         const yieldData = await calculateDailyIsolatedPairYields(context, userAddress, fromTimestamp, toTimestamp);
 
@@ -918,6 +922,10 @@ app.get("/user/:address/daily-portfolio-value-isolated", async (c) => {
 
     try {
         const context = {db};
+
+        // Clear exchange rate cache for this request to prevent stale data
+        const {clearExchangeRateCache} = await import("../helpers/yield/isolatedPair/exchangeRate");
+        clearExchangeRateCache();
 
         // Calculate isolated pair positions for each complete day
         const dailyIsolatedPairs: Array<{
