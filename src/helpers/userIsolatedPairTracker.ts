@@ -15,14 +15,14 @@ import { UserIsolatedPairTracking } from "ponder:schema";
  * @param user - User address
  * @param pair - Isolated pair address
  * @param timestamp - Timestamp of the interaction
- * @param interactionType - Type of interaction (deposit, withdraw, borrow, repay, addCollateral, removeCollateral)
+ * @param interactionType - Type of interaction (deposit, withdraw, borrow, repay, addCollateral, removeCollateral, liquidate)
  */
 export async function updateUserIsolatedPairTracking(
     context: any,
     user: string,
     pair: string,
     timestamp: number,
-    interactionType: 'deposit' | 'withdraw' | 'borrow' | 'repay' | 'addCollateral' | 'removeCollateral'
+    interactionType: 'deposit' | 'withdraw' | 'borrow' | 'repay' | 'addCollateral' | 'removeCollateral' | 'liquidate'
 ): Promise<void> {
     const trackingId = `${user}_${pair}`;
     
@@ -56,6 +56,9 @@ export async function updateUserIsolatedPairTracking(
                 case 'removeCollateral':
                     updates.hasCollateralRemoved = true;
                     break;
+                case 'liquidate':
+                    updates.hasLiquidations = true;
+                    break;
             }
             
             await context.db.update(UserIsolatedPairTracking, { id: trackingId }).set(updates);
@@ -71,6 +74,7 @@ export async function updateUserIsolatedPairTracking(
                 hasRepays: interactionType === 'repay',
                 hasCollateralAdded: interactionType === 'addCollateral',
                 hasCollateralRemoved: interactionType === 'removeCollateral',
+                hasLiquidations: interactionType === 'liquidate',
                 firstInteraction: timestamp,
                 lastInteraction: timestamp,
             };

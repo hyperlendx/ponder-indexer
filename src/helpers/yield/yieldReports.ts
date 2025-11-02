@@ -874,7 +874,8 @@ export async function calculateUserDailyYieldBreakdown(
         // This ensures daily breakdown totals match custom-period-yield totals
         const endDate = new Date(endTimestamp * 1000);
         const endDayStart = Date.UTC(endDate.getUTCFullYear(), endDate.getUTCMonth(), endDate.getUTCDate()) / 1000;
-        const endTimestampForDays = endDayStart; // Always use start of last day
+        // Use end of last complete day (next day's midnight) to include full 24 hours of the last day
+        const endTimestampForDays = endDayStart + 24 * 60 * 60;
 
         // Create daily time buckets
         const dailyResults = new Map<string, {
@@ -908,12 +909,13 @@ export async function calculateUserDailyYieldBreakdown(
         // Initialize daily buckets for complete days only
         const startDate = new Date(startTimestamp * 1000);
 
-        // Calculate number of complete days to iterate
-        const totalDays = Math.ceil((endTimestampForDays - startTimestamp) / (24 * 60 * 60)) + 1;
+        // Calculate number of complete days to iterate (use endDayStart, not endTimestampForDays)
+        // endDayStart represents the last day in the query period
+        const totalDays = Math.ceil((endDayStart - startTimestamp) / (24 * 60 * 60)) + 1;
 
         for (let dayOffset = 0; dayOffset < totalDays; dayOffset++) {
             const currentDate = new Date(startDate);
-            currentDate.setDate(startDate.getDate() + dayOffset);
+            currentDate.setUTCDate(startDate.getUTCDate() + dayOffset);
 
             const dateStr = currentDate.toISOString().split('T')[0]!; // YYYY-MM-DD format
             // Use UTC to ensure consistent day boundaries regardless of server timezone
@@ -1016,12 +1018,12 @@ export async function calculateUserDailyYieldBreakdown(
                         const dayOverlaps: Array<{ dateStr: string, overlapStart: number, overlapEnd: number }> = [];
                         for (let dayOffset = 0; dayOffset < segmentDays; dayOffset++) {
                             const currentDate = new Date(segmentStartDate);
-                            currentDate.setDate(segmentStartDate.getDate() + dayOffset);
+                            currentDate.setUTCDate(segmentStartDate.getUTCDate() + dayOffset);
                             const currentDateStr = currentDate.toISOString().split('T')[0]!;
                             const dayData = dailyResults.get(currentDateStr);
                             if (!dayData) continue;
 
-                            const dayStart = Math.floor(new Date(currentDate.getFullYear(), currentDate.getMonth(), currentDate.getDate()).getTime() / 1000);
+                            const dayStart = Math.floor(Date.UTC(currentDate.getUTCFullYear(), currentDate.getUTCMonth(), currentDate.getUTCDate()) / 1000);
                             // Use full 86,400-second days with half-open interval [dayStart, dayEnd)
                             // This ensures each day is exactly 24 hours (86,400 seconds)
                             const dayEnd = dayStart + 24 * 60 * 60;
@@ -1127,12 +1129,12 @@ export async function calculateUserDailyYieldBreakdown(
 
                         for (let dayOffset = 0; dayOffset < segmentDays; dayOffset++) {
                             const currentDate = new Date(segmentStartDate);
-                            currentDate.setDate(segmentStartDate.getDate() + dayOffset);
+                            currentDate.setUTCDate(segmentStartDate.getUTCDate() + dayOffset);
                             const currentDateStr = currentDate.toISOString().split('T')[0]!;
                             const dayData = dailyResults.get(currentDateStr);
                             if (!dayData) continue;
 
-                            const dayStart = Math.floor(new Date(currentDate.getFullYear(), currentDate.getMonth(), currentDate.getDate()).getTime() / 1000);
+                            const dayStart = Math.floor(Date.UTC(currentDate.getUTCFullYear(), currentDate.getUTCMonth(), currentDate.getUTCDate()) / 1000);
                             const dayEnd = dayStart + 24 * 60 * 60;
                             const overlapStart = Math.max(segment.startTime, dayStart);
                             const overlapEnd = Math.min(segment.endTime, dayEnd);
@@ -1418,20 +1420,6 @@ export async function calculateUserDailyPortfolioValue(
             netPosition: bigint;
         }>;
     }>;
-    currentValue?: {
-        date: string;
-        timestamp: number;
-        portfolioValue: bigint;
-        totalSupplied: bigint;
-        totalBorrowed: bigint;
-        isPartialDay: boolean;
-        assets: Array<{
-            asset: string;
-            supplied: bigint;
-            borrowed: bigint;
-            netPosition: bigint;
-        }>;
-    };
 }> {
     try {
         // Get all assets user had positions in during this period (supplies)
@@ -1445,8 +1433,7 @@ export async function calculateUserDailyPortfolioValue(
 
         if (allAssets.length === 0) {
             return {
-                dailyValues: [],
-                currentValue: undefined
+                dailyValues: []
             };
         }
 
@@ -1514,23 +1501,26 @@ export async function calculateUserDailyPortfolioValue(
             }>;
         }>();
 
-        // Initialize daily buckets
+        // Initialize daily buckets - calculate portfolio values at START of each day (midnight UTC)
         const startDate = new Date(startTimestamp * 1000);
-        const totalDays = Math.ceil((endTimestamp - startTimestamp) / (24 * 60 * 60)) + 1;
+        const endDate = new Date(endTimestamp * 1000);
 
+        // Get the start of the first day (midnight UTC)
+        const firstDayStart = Math.floor(Date.UTC(startDate.getUTCFullYear(), startDate.getUTCMonth(), startDate.getUTCDate()) / 1000);
+
+        // Get the start of the last day (midnight UTC)
+        const lastDayStart = Math.floor(Date.UTC(endDate.getUTCFullYear(), endDate.getUTCMonth(), endDate.getUTCDate()) / 1000);
+
+        const oneDaySeconds = 24 * 60 * 60;
         const dayTimestamps: number[] = [];
-        for (let dayOffset = 0; dayOffset < totalDays; dayOffset++) {
-            const currentDate = new Date(startDate);
-            currentDate.setDate(startDate.getDate() + dayOffset);
 
-            const dateStr = currentDate.toISOString().split('T')[0]!;
-            const dayStartTimestamp = Math.floor(Date.UTC(currentDate.getUTCFullYear(), currentDate.getUTCMonth(), currentDate.getUTCDate()) / 1000);
-            const dayEndTimestamp = dayStartTimestamp + (24 * 60 * 60) - 1;
+        for (let ts = firstDayStart; ts <= lastDayStart; ts += oneDaySeconds) {
+            const dateStr = new Date(ts * 1000).toISOString().split('T')[0]!;
 
-            dayTimestamps.push(dayEndTimestamp);
+            dayTimestamps.push(ts);
             dailyResults.set(dateStr, {
                 date: dateStr,
-                timestamp: dayStartTimestamp,
+                timestamp: ts,
                 totalSupplied: 0n,
                 totalBorrowed: 0n,
                 assets: new Map()
@@ -1540,8 +1530,8 @@ export async function calculateUserDailyPortfolioValue(
         // Prefetch all liquidity indices and borrow indices we'll need (days × assets)
         const indexPrefetchList = [];
         for (const asset of allAssets) {
-            for (const dayEndTimestamp of dayTimestamps) {
-                indexPrefetchList.push({asset, timestamp: dayEndTimestamp});
+            for (const dayStartTimestamp of dayTimestamps) {
+                indexPrefetchList.push({asset, timestamp: dayStartTimestamp});
             }
         }
         await Promise.all([
@@ -1555,18 +1545,18 @@ export async function calculateUserDailyPortfolioValue(
             const borrows = borrowsByAsset.get(asset) || [];
             const repays = repaysByAsset.get(asset) || [];
 
-            // For each day, calculate supplied and borrowed balances from pre-fetched events
+            // For each day, calculate supplied and borrowed balances at START of day (midnight UTC)
             for (const [dateStr, dayData] of dailyResults) {
-                const dayEndTimestamp = dayData.timestamp + (24 * 60 * 60) - 1;
+                const dayStartTimestamp = dayData.timestamp;
 
-                // Calculate supplied balance from events (no DB query)
-                const scaledBalance = calculateBalanceFromEvents(balanceEvents, dayEndTimestamp);
-                const liquidityIndex = await indexCache.get(context, asset, dayEndTimestamp);
+                // Calculate supplied balance from events at day start (no DB query)
+                const scaledBalance = calculateBalanceFromEvents(balanceEvents, dayStartTimestamp);
+                const liquidityIndex = await indexCache.get(context, asset, dayStartTimestamp);
                 const suppliedBalance = calculateActualBalance(scaledBalance, liquidityIndex);
 
-                // Calculate borrowed balance from events with accrued interest (no DB query)
-                const variableBorrowIndex = await borrowIndexCache.get(context, asset, dayEndTimestamp);
-                const borrowedBalance = calculateBorrowedFromEvents(borrows, repays, dayEndTimestamp, variableBorrowIndex);
+                // Calculate borrowed balance from events with accrued interest at day start (no DB query)
+                const variableBorrowIndex = await borrowIndexCache.get(context, asset, dayStartTimestamp);
+                const borrowedBalance = calculateBorrowedFromEvents(borrows, repays, dayStartTimestamp, variableBorrowIndex);
 
                 // Only add to assets map if there's a non-zero position
                 if (suppliedBalance > 0n || borrowedBalance > 0n) {
@@ -1606,62 +1596,8 @@ export async function calculateUserDailyPortfolioValue(
             })
             .sort((a, b) => a.timestamp - b.timestamp);
 
-        // Check if endTimestamp is at a day boundary (midnight UTC)
-        const endDate = new Date(endTimestamp * 1000);
-        const endDayStart = Date.UTC(endDate.getUTCFullYear(), endDate.getUTCMonth(), endDate.getUTCDate()) / 1000;
-        const isPartialDay = endTimestamp !== endDayStart;
-
-        // If endTimestamp is in the middle of a day, calculate current portfolio value
-        let currentValue: {
-            date: string;
-            timestamp: number;
-            portfolioValue: bigint;
-            totalSupplied: bigint;
-            totalBorrowed: bigint;
-            isPartialDay: boolean;
-            assets: Array<{
-                asset: string;
-                supplied: bigint;
-                borrowed: bigint;
-                netPosition: bigint;
-            }>;
-        } | undefined;
-
-        if (isPartialDay) {
-            // Prefetch indices for current timestamp
-            const currentIndexPrefetchList = allAssets.map(asset => ({asset, timestamp: endTimestamp}));
-            await Promise.all([
-                indexCache.prefetch(context, currentIndexPrefetchList),
-                borrowIndexCache.prefetch(context, currentIndexPrefetchList)
-            ]);
-
-            // Calculate portfolio value at current timestamp
-            const currentPortfolio = await calculatePortfolioValueAtTimestamp(
-                context,
-                user,
-                endTimestamp,
-                allAssets,
-                balanceEventsByAsset,
-                borrowsByAsset,
-                repaysByAsset,
-                indexCache,
-                borrowIndexCache
-            );
-
-            currentValue = {
-                date: endDate.toISOString().split('T')[0]!,
-                timestamp: endTimestamp,
-                portfolioValue: currentPortfolio.portfolioValue,
-                totalSupplied: currentPortfolio.totalSupplied,
-                totalBorrowed: currentPortfolio.totalBorrowed,
-                isPartialDay: true,
-                assets: currentPortfolio.assets
-            };
-        }
-
         return {
-            dailyValues,
-            currentValue
+            dailyValues
         };
 
     } catch (error) {

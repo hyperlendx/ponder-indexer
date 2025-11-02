@@ -37,6 +37,7 @@ export async function getCurrentVaultState(
 
 /**
  * Get vault state at a specific timestamp
+ * Returns the most recent vault state at or before the target timestamp
  */
 export async function getVaultStateAtTimestamp(
     db: any,
@@ -55,7 +56,7 @@ export async function getVaultStateAtTimestamp(
                 lte(IsolatedPairVaultState.timestamp, targetTimestamp)
             )
         )
-        .orderBy(desc(IsolatedPairVaultState.timestamp))
+        .orderBy(desc(IsolatedPairVaultState.timestamp), desc(IsolatedPairVaultState.blockNumber))
         .limit(1);
 
     if (!states || states.length === 0) {
@@ -81,7 +82,7 @@ export async function updateVaultStateAfterDeposit(
     blockNumber: number,
     txHash: string,
     eventId: string
-): Promise<void> {
+): Promise<{ totalAssetAmount: bigint; totalAssetShares: bigint }> {
     const currentState = await getCurrentVaultState(db, pair);
 
     const newTotalAssetAmount = currentState
@@ -100,6 +101,12 @@ export async function updateVaultStateAfterDeposit(
         blockNumber,
         txHash: txHash as `0x${string}`,
     });
+
+
+    return {
+        totalAssetAmount: newTotalAssetAmount,
+        totalAssetShares: newTotalAssetShares,
+    };
 }
 
 /**
@@ -115,12 +122,12 @@ export async function updateVaultStateAfterWithdraw(
     blockNumber: number,
     txHash: string,
     eventId: string
-): Promise<void> {
+): Promise<{ totalAssetAmount: bigint; totalAssetShares: bigint } | null> {
     const currentState = await getCurrentVaultState(db, pair);
 
     if (!currentState) {
         console.error(`No vault state found for pair ${pair} before withdrawal`);
-        return;
+        return null;
     }
 
     const newTotalAssetAmount = currentState.totalAssetAmount - assets;
@@ -135,6 +142,11 @@ export async function updateVaultStateAfterWithdraw(
         blockNumber,
         txHash: txHash as `0x${string}`,
     });
+
+    return {
+        totalAssetAmount: newTotalAssetAmount,
+        totalAssetShares: newTotalAssetShares,
+    };
 }
 
 /**
@@ -150,12 +162,12 @@ export async function updateVaultStateAfterAddInterest(
     blockNumber: number,
     txHash: string,
     eventId: string
-): Promise<void> {
+): Promise<{ totalAssetAmount: bigint; totalAssetShares: bigint } | null> {
     const currentState = await getCurrentVaultState(db, pair);
 
     if (!currentState) {
         console.error(`No vault state found for pair ${pair} before adding interest`);
-        return;
+        return null;
     }
 
     const newTotalAssetAmount = currentState.totalAssetAmount + interestEarned;
@@ -170,6 +182,53 @@ export async function updateVaultStateAfterAddInterest(
         blockNumber,
         txHash: txHash as `0x${string}`,
     });
+
+    return {
+        totalAssetAmount: newTotalAssetAmount,
+        totalAssetShares: newTotalAssetShares,
+    };
+}
+
+/**
+ * Update vault state after liquidation
+ * Liquidation adjusts both totalAsset.amount and totalAsset.shares based on the liquidation parameters
+ */
+export async function updateVaultStateAfterLiquidation(
+    db: any,
+    pair: string,
+    sharesToAdjust: bigint,
+    amountToAdjust: bigint,
+    timestamp: number,
+    blockNumber: number,
+    txHash: string,
+    eventId: string
+): Promise<{ totalAssetAmount: bigint; totalAssetShares: bigint } | null> {
+    const currentState = await getCurrentVaultState(db, pair);
+
+    if (!currentState) {
+        console.error(`No vault state found for pair ${pair} before liquidation`);
+        return null;
+    }
+
+    // Apply the adjustments from the liquidation
+    // Note: sharesToAdjust and amountToAdjust can be positive or negative
+    const newTotalAssetAmount = currentState.totalAssetAmount + amountToAdjust;
+    const newTotalAssetShares = currentState.totalAssetShares + sharesToAdjust;
+
+    await db.insert(IsolatedPairVaultState).values({
+        id: `${pair}-${eventId}`,
+        pair: pair as `0x${string}`,
+        totalAssetAmount: newTotalAssetAmount,
+        totalAssetShares: newTotalAssetShares,
+        timestamp,
+        blockNumber,
+        txHash: txHash as `0x${string}`,
+    });
+
+    return {
+        totalAssetAmount: newTotalAssetAmount,
+        totalAssetShares: newTotalAssetShares,
+    };
 }
 
 /**

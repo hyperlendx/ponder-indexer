@@ -1,4 +1,5 @@
 import { ponder } from "ponder:registry";
+import { and, eq } from "ponder";
 import {
     Borrow,
     Repay,
@@ -506,20 +507,29 @@ ponder.on("IsolatedPair:BorrowAsset", async ({ event, context }) => {
         console.error(`Error fetching reserve price: ${e.message}`);
     }
 
-    // Calculate exchange rate from event data
-    // Exchange rate = borrowAmount / sharesAdded (in 1e18 precision)
-    const EXCHANGE_PRECISION = 1000000000000000000n; // 1e18
-    const borrowAmount = event.args._borrowAmount;
-    const sharesAdded = event.args._sharesAdded;
+    const pair = event.transaction.to || "0xNEW";
 
-    const exchangeRate = sharesAdded > 0n
-        ? (borrowAmount * EXCHANGE_PRECISION) / sharesAdded
-        : EXCHANGE_PRECISION; // Default 1:1 if no shares
+    // Import vault state functions
+    const { calculateExchangeRateFromVaultState, getVaultStateAtTimestamp } = await import("./helpers/yield/isolatedPair/vaultState");
+
+    // Get the vault exchange rate at this timestamp
+    const vaultState = await getVaultStateAtTimestamp(context.db, pair, Number(event.block.timestamp));
+    const exchangeRate = vaultState
+        ? calculateExchangeRateFromVaultState(vaultState.totalAssetAmount, vaultState.totalAssetShares)
+        : 1000000000000000000n; // Default 1:1 if no state
+
+    // Debug logging for the specific transaction we're tracking
+    if (event.transaction.hash === "0x6bbd20fdf8e170800f7c186cce5ee3dd8df668ee9fb70b6083a63cadbe079ef0") {
+        console.log(`[BorrowAsset] Transaction: ${event.transaction.hash}`);
+        console.log(`[BorrowAsset] Timestamp: ${event.block.timestamp}`);
+        console.log(`[BorrowAsset] Vault State:`, vaultState);
+        console.log(`[BorrowAsset] Exchange Rate: ${exchangeRate}`);
+    }
 
     await context.db.insert(BorrowAssetIsolated).values({
         id: event.id,
         txHash: event.transaction.hash,
-        pair: event.transaction.to || "0xNEW",
+        pair: pair as `0x${string}`,
         borrower: event.args._borrower,
         receiver: event.args._receiver,
         borrowAmount: event.args._borrowAmount,
@@ -533,7 +543,7 @@ ponder.on("IsolatedPair:BorrowAsset", async ({ event, context }) => {
     await updateUserIsolatedPairTracking(
         context,
         event.args._borrower,
-        event.transaction.to || "0xNEW",
+        pair,
         Number(event.block.timestamp),
         'borrow'
     );
@@ -548,20 +558,21 @@ ponder.on("IsolatedPair:RepayAsset", async ({ event, context }) => {
         console.error(`Error fetching reserve price: ${e.message}`);
     }
 
-    // Calculate exchange rate from event data
-    // Exchange rate = amountToRepay / shares (in 1e18 precision)
-    const EXCHANGE_PRECISION = 1000000000000000000n; // 1e18
-    const amountToRepay = event.args.amountToRepay;
-    const shares = event.args.shares;
+    const pair = event.transaction.to || "0xNEW";
 
-    const exchangeRate = shares > 0n
-        ? (amountToRepay * EXCHANGE_PRECISION) / shares
-        : EXCHANGE_PRECISION; // Default 1:1 if no shares
+    // Import vault state functions
+    const { calculateExchangeRateFromVaultState, getVaultStateAtTimestamp } = await import("./helpers/yield/isolatedPair/vaultState");
+
+    // Get the vault exchange rate at this timestamp
+    const vaultState = await getVaultStateAtTimestamp(context.db, pair, Number(event.block.timestamp));
+    const exchangeRate = vaultState
+        ? calculateExchangeRateFromVaultState(vaultState.totalAssetAmount, vaultState.totalAssetShares)
+        : 1000000000000000000n; // Default 1:1 if no state
 
     await context.db.insert(RepayAssetIsolated).values({
         id: event.id,
         txHash: event.transaction.hash,
-        pair: event.transaction.to || "0xNEW",
+        pair: pair as `0x${string}`,
         borrower: event.args.borrower,
         payer: event.args.payer,
         amountToRepay: event.args.amountToRepay,
@@ -575,7 +586,7 @@ ponder.on("IsolatedPair:RepayAsset", async ({ event, context }) => {
     await updateUserIsolatedPairTracking(
         context,
         event.args.borrower,
-        event.transaction.to || "0xNEW",
+        pair,
         Number(event.block.timestamp),
         'repay'
     );
@@ -651,10 +662,34 @@ ponder.on("IsolatedPair:Liquidate", async ({ event, context }) => {
         console.error(`Error fetching reserve price: ${e.message}`);
     }
 
+    const pair = event.transaction.to || "0xNEW";
+    const sharesToAdjust = event.args._sharesToAdjust;
+    const amountToAdjust = event.args._amountToAdjust;
+
+    // Import vault state functions
+    const { updateVaultStateAfterLiquidation, calculateExchangeRateFromVaultState } = await import("./helpers/yield/isolatedPair/vaultState");
+
+    // Update vault state and get the new state back
+    const newVaultState = await updateVaultStateAfterLiquidation(
+        context.db,
+        pair,
+        sharesToAdjust,
+        amountToAdjust,
+        Number(event.block.timestamp),
+        Number(event.block.number),
+        event.transaction.hash,
+        event.id
+    );
+
+    // Calculate exchange rate from the returned vault state
+    const exchangeRate = newVaultState
+        ? calculateExchangeRateFromVaultState(newVaultState.totalAssetAmount, newVaultState.totalAssetShares)
+        : 1000000000000000000n; // Default 1:1 if no state
+
     await context.db.insert(LiquidateIsolated).values({
         id: event.id,
         txHash: event.transaction.hash,
-        pair: event.transaction.to || "0xNEW",
+        pair: pair as `0x${string}`,
         borrower: event.args._borrower,
         liquidator: event.transaction.from,
         collateralForLiquidator: event.args._collateralForLiquidator,
@@ -665,7 +700,25 @@ ponder.on("IsolatedPair:Liquidate", async ({ event, context }) => {
         amountToAdjust: event.args._amountToAdjust,
         timestamp: Number(event.block.timestamp),
         price: price,
+        exchangeRate: exchangeRate
     });
+
+    // Update tracking table for both borrower and liquidator
+    await updateUserIsolatedPairTracking(
+        context,
+        event.args._borrower,
+        pair,
+        Number(event.block.timestamp),
+        'liquidate'
+    );
+
+    await updateUserIsolatedPairTracking(
+        context,
+        event.transaction.from,
+        pair,
+        Number(event.block.timestamp),
+        'liquidate'
+    );
 });
 
 ponder.on("IsolatedPair:Deposit", async ({ event, context }) => {
@@ -682,17 +735,10 @@ ponder.on("IsolatedPair:Deposit", async ({ event, context }) => {
     const shares = event.args.shares;
 
     // Import vault state functions
-    const { updateVaultStateAfterDeposit, calculateExchangeRateFromVaultState, getCurrentVaultState } = await import("./helpers/yield/isolatedPair/vaultState");
+    const { updateVaultStateAfterDeposit, calculateExchangeRateFromVaultState } = await import("./helpers/yield/isolatedPair/vaultState");
 
-    // Calculate exchange rate from the event data itself (assets/shares from this transaction)
-    // This represents the rate at which the shares were minted
-    const EXCHANGE_PRECISION = 1000000000000000000n; // 1e18
-    const exchangeRate = shares > 0n
-        ? (assets * EXCHANGE_PRECISION) / shares
-        : EXCHANGE_PRECISION; // Default 1:1 if no shares
-
-    // Update vault state (totalAsset.amount and totalAsset.shares)
-    await updateVaultStateAfterDeposit(
+    // Update vault state and get the new state back
+    const newVaultState = await updateVaultStateAfterDeposit(
         context.db,
         pair,
         assets,
@@ -702,6 +748,11 @@ ponder.on("IsolatedPair:Deposit", async ({ event, context }) => {
         event.transaction.hash,
         event.id
     );
+
+    // Calculate exchange rate from the returned vault state
+    const exchangeRate = newVaultState
+        ? calculateExchangeRateFromVaultState(newVaultState.totalAssetAmount, newVaultState.totalAssetShares)
+        : 1000000000000000000n; // Default 1:1 if no state
 
     await context.db.insert(DepositIsolated).values({
         id: event.id,
@@ -740,17 +791,10 @@ ponder.on("IsolatedPair:Withdraw", async ({ event, context }) => {
     const shares = event.args.shares;
 
     // Import vault state functions
-    const { updateVaultStateAfterWithdraw, calculateExchangeRateFromVaultState, getCurrentVaultState } = await import("./helpers/yield/isolatedPair/vaultState");
+    const { updateVaultStateAfterWithdraw, calculateExchangeRateFromVaultState } = await import("./helpers/yield/isolatedPair/vaultState");
 
-    // Calculate exchange rate from the event data itself (assets/shares from this transaction)
-    // This represents the rate at which the shares were burned
-    const EXCHANGE_PRECISION = 1000000000000000000n; // 1e18
-    const exchangeRate = shares > 0n
-        ? (assets * EXCHANGE_PRECISION) / shares
-        : EXCHANGE_PRECISION; // Default 1:1 if no shares
-
-    // Update vault state (totalAsset.amount and totalAsset.shares)
-    await updateVaultStateAfterWithdraw(
+    // Update vault state and get the new state back
+    const newVaultState = await updateVaultStateAfterWithdraw(
         context.db,
         pair,
         assets,
@@ -760,6 +804,11 @@ ponder.on("IsolatedPair:Withdraw", async ({ event, context }) => {
         event.transaction.hash,
         event.id
     );
+
+    // Calculate exchange rate from the returned vault state
+    const exchangeRate = newVaultState
+        ? calculateExchangeRateFromVaultState(newVaultState.totalAssetAmount, newVaultState.totalAssetShares)
+        : 1000000000000000000n; // Default 1:1 if no state
 
     await context.db.insert(WithdrawIsolated).values({
         id: event.id,
@@ -803,10 +852,18 @@ ponder.on("IsolatedPair:UpdateRate", async ({ event, context }) => {
 ponder.on("IsolatedPair:AddInterest", async ({ event, context }) => {
     const pair = event.transaction.to || "0xNEW";
 
+    // Debug logging for the specific transactions we're tracking
+    if (event.transaction.hash === "0x6bbd20fdf8e170800f7c186cce5ee3dd8df668ee9fb70b6083a63cadbe079ef0" ||
+        event.transaction.hash === "0x4c6af30269eb8844a3bfefdf417827bf9a6db6161c28764a7328914d57c4c833") {
+        console.log(`[AddInterest] Transaction: ${event.transaction.hash}`);
+        console.log(`[AddInterest] Interest Earned: ${event.args.interestEarned}`);
+        console.log(`[AddInterest] Fees Share: ${event.args.feesShare}`);
+    }
+
     // Update vault state (totalAsset.amount increases by interestEarned, totalAsset.shares increases by feesShare)
     const { updateVaultStateAfterAddInterest } = await import("./helpers/yield/isolatedPair/vaultState");
 
-    await updateVaultStateAfterAddInterest(
+    const newVaultState = await updateVaultStateAfterAddInterest(
         context.db,
         pair,
         event.args.interestEarned,
@@ -816,6 +873,15 @@ ponder.on("IsolatedPair:AddInterest", async ({ event, context }) => {
         event.transaction.hash,
         event.id
     );
+
+    if (event.transaction.hash === "0x6bbd20fdf8e170800f7c186cce5ee3dd8df668ee9fb70b6083a63cadbe079ef0" ||
+        event.transaction.hash === "0x4c6af30269eb8844a3bfefdf417827bf9a6db6161c28764a7328914d57c4c833") {
+        console.log(`[AddInterest] New Vault State:`, newVaultState);
+        if (newVaultState) {
+            const rate = (newVaultState.totalAssetAmount * 1000000000000000000n) / newVaultState.totalAssetShares;
+            console.log(`[AddInterest] Calculated Exchange Rate: ${rate}`);
+        }
+    }
 
     await context.db.insert(AddInterestIsolated).values({
         id: event.id,

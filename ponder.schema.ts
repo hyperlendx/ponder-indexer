@@ -366,6 +366,7 @@ export const LiquidateIsolated = onchainTable(
         amountToAdjust: t.bigint(),
         timestamp: t.integer(),
         price: t.bigint(),
+        exchangeRate: t.bigint(), // Vault exchange rate (assets/shares)
     }),
     (table) => ({
         liquidatorIdx: index().on(table.liquidator),
@@ -436,6 +437,7 @@ export const UserIsolatedPairTracking = onchainTable(
         hasRepays: t.boolean().default(false),
         hasCollateralAdded: t.boolean().default(false),
         hasCollateralRemoved: t.boolean().default(false),
+        hasLiquidations: t.boolean().default(false),
         // Timestamps
         firstInteraction: t.integer(),
         lastInteraction: t.integer(),

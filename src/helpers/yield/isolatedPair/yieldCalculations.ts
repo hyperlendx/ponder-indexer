@@ -442,7 +442,8 @@ export async function calculateSegmentedIsolatedPairYield(
         const segmentYield = (segment.assetShares * exchangeRateChange + EXCHANGE_PRECISION / 2n) / EXCHANGE_PRECISION;
         totalYield += segmentYield;
 
-        const actualAssetAmount = convertSharesToAssets(segment.assetShares, startExchangeRate);
+        // Use endExchangeRate to show actual asset value at end of segment (including yield earned)
+        const actualAssetAmount = convertSharesToAssets(segment.assetShares, endExchangeRate);
         const durationDays = (Number(segment.endTime) - Number(segment.startTime)) / (24 * 60 * 60);
 
         detailedSegments.push({
@@ -612,7 +613,8 @@ export async function calculateSegmentedIsolatedPairBorrowCost(
         const segmentBorrowCost = (segment.borrowShares * exchangeRateChange + EXCHANGE_PRECISION / 2n) / EXCHANGE_PRECISION;
         totalBorrowCost += segmentBorrowCost;
 
-        const actualBorrowAmount = convertSharesToAssets(segment.borrowShares, startExchangeRate);
+        // Use endExchangeRate to show actual borrow value at end of segment (including interest accrued)
+        const actualBorrowAmount = convertSharesToAssets(segment.borrowShares, endExchangeRate);
         const durationDays = (Number(segment.endTime) - Number(segment.startTime)) / (24 * 60 * 60);
 
         detailedSegments.push({

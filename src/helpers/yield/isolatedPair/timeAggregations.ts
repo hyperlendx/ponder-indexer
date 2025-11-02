@@ -121,11 +121,12 @@ export async function calculateDailyIsolatedPairYields(
         };
     }
 
-    // Always calculate only complete days (exclude partial day at the end)
-    // This ensures daily breakdown totals match custom-period-yield totals
+    // Calculate daily yields for complete days
+    // Use end of last complete day (next day's midnight) to include full 24 hours of the last day
     const endDate = new Date(endTimestamp * 1000);
     const endDayStart = Date.UTC(endDate.getUTCFullYear(), endDate.getUTCMonth(), endDate.getUTCDate()) / 1000;
-    const endTimestampForDays = endDayStart; // Always use start of last day
+    // Use end of last complete day (next day's midnight) to ensure all days are full 24-hour periods
+    const endTimestampForDays = endDayStart + 24 * 60 * 60;
 
     // Create caches for this request
     const exchangeRateCache = new ExchangeRateCache();
@@ -176,8 +177,9 @@ export async function calculateDailyIsolatedPairYields(
 
     // Initialize all days with zero yield
     // Days should be aligned to midnight UTC, not to startTimestamp
+    // Use endDayStart (not endTimestampForDays) to only include days within the query period
     const periodStartDate = new Date(startTimestamp * 1000);
-    const periodEndDate = new Date(endTimestampForDays * 1000);
+    const periodEndDate = new Date(endDayStart * 1000);
 
     let currentDate = new Date(Date.UTC(periodStartDate.getUTCFullYear(), periodStartDate.getUTCMonth(), periodStartDate.getUTCDate()));
     const endDateMidnight = new Date(Date.UTC(periodEndDate.getUTCFullYear(), periodEndDate.getUTCMonth(), periodEndDate.getUTCDate()));
@@ -297,12 +299,12 @@ function assignSegmentYieldToDays(
 
         for (let dayOffset = 0; dayOffset < segmentDays; dayOffset++) {
             const currentDate = new Date(segmentStartDate);
-            currentDate.setDate(segmentStartDate.getDate() + dayOffset);
+            currentDate.setUTCDate(segmentStartDate.getUTCDate() + dayOffset);
             const currentDateStr = currentDate.toISOString().split('T')[0]!;
             const dayData = dailyResults.get(currentDateStr);
             if (!dayData || !dayData.pairs.has(pair)) continue;
 
-            const dayStart = Math.floor(new Date(currentDate.getFullYear(), currentDate.getMonth(), currentDate.getDate()).getTime() / 1000);
+            const dayStart = Math.floor(Date.UTC(currentDate.getUTCFullYear(), currentDate.getUTCMonth(), currentDate.getUTCDate()) / 1000);
             const dayEnd = dayStart + 24 * 60 * 60;
             const overlapStart = Math.max(segment.startTime, dayStart);
             const overlapEnd = Math.min(segment.endTime, dayEnd);
@@ -389,7 +391,12 @@ export async function calculateMonthlyIsolatedPairYields(
     const currentMonthStart = new Date(Date.UTC(endDate.getUTCFullYear(), endDate.getUTCMonth(), 1));
     const nextMonthStart = new Date(Date.UTC(endDate.getUTCFullYear(), endDate.getUTCMonth() + 1, 1));
     const nextMonthStartTimestamp = Math.floor(nextMonthStart.getTime() / 1000);
-    const isPartialMonth = endTimestamp < nextMonthStartTimestamp;
+
+    // Consider a month "complete" if endTimestamp is within 6 hours of the month end
+    // This handles cases like July 31 23:59:59 which should be treated as a complete July
+    // while still treating genuinely partial months (like July 15) as partial
+    const sixHoursSeconds = 6 * 60 * 60;
+    const isPartialMonth = endTimestamp < (nextMonthStartTimestamp - sixHoursSeconds);
 
     // Create caches for this request
     const exchangeRateCache = new ExchangeRateCache();

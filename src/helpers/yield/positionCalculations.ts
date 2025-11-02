@@ -523,6 +523,8 @@ export interface SimplifiedYieldPosition {
     totalWithdrawn: bigint;
     totalBorrowed: bigint;
     totalRepaid: bigint;
+    totalScaledDeposited: bigint;
+    totalScaledBorrowed: bigint;
     netDeposits: bigint;
     netBorrows: bigint;
     events: EventDetail[];
@@ -530,6 +532,8 @@ export interface SimplifiedYieldPosition {
     starting_balances: {
         deposits: bigint;
         borrows: bigint;
+        scaledDeposits: bigint;
+        scaledBorrows: bigint;
     };
     yieldSegments: YieldSegmentDetail[];
     borrowCostSegments: BorrowCostSegmentDetail[];
@@ -674,17 +678,23 @@ export async function calculateUserYieldPositions(
                 ...startBorrowResult.events
             ].sort((a, b) => a.timestamp - b.timestamp);
 
-            // Initialize totals with starting balances
+            // Initialize totals with starting balances (actual amounts with liquidity index applied)
             let totalDeposited = startSupplyBalance;
             let totalBorrowed = startBorrowBalance;
             let totalWithdrawn = 0n;
             let totalRepaid = 0n;
+
+            // Initialize scaled totals (raw transaction amounts, consistent across query periods)
+            let totalScaledDeposited = startScaledSupplyBalance;
+            let totalScaledBorrowed = startScaledBorrowBalance;
+
             const events: EventDetail[] = [];
 
             // Process deposit events during the period
             for (const event of depositEvents) {
                 const actualAmount = calculateActualBalance(event.transactionAmount, event.liquidityIndex);
                 totalDeposited += actualAmount;
+                totalScaledDeposited += event.transactionAmount;  // Add scaled amount
                 events.push({
                     eventType: 'deposit',
                     timestamp: Number(event.timestamp),
@@ -710,6 +720,7 @@ export async function calculateUserYieldPositions(
             // Process borrow events during the period
             for (const event of borrowEvents) {
                 totalBorrowed += event.amount;
+                totalScaledBorrowed += event.amount;  // Add scaled amount
                 events.push({
                     eventType: 'borrow',
                     timestamp: Number(event.timestamp),
@@ -773,13 +784,17 @@ export async function calculateUserYieldPositions(
                 totalWithdrawn,
                 totalBorrowed,
                 totalRepaid,
+                totalScaledDeposited,  // NEW: Scaled deposit amounts (consistent across query periods)
+                totalScaledBorrowed,   // NEW: Scaled borrow amounts (consistent across query periods)
                 netDeposits,
                 netBorrows,
                 events,
                 events_before_period,
                 starting_balances: {
                     deposits: startSupplyBalance,
-                    borrows: startBorrowBalance
+                    borrows: startBorrowBalance,
+                    scaledDeposits: startScaledSupplyBalance,  // NEW: Scaled balance at period start
+                    scaledBorrows: startScaledBorrowBalance    // NEW: Scaled borrow balance at period start
                 },
                 yieldSegments,
                 borrowCostSegments

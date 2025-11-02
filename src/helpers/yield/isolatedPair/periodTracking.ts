@@ -12,9 +12,10 @@ import {
     RemoveCollateralIsolated,
     DepositIsolated,
     WithdrawIsolated,
+    LiquidateIsolated,
     UserIsolatedPairTracking
 } from "ponder:schema";
-import { eq, and, lte, gte, inArray } from "ponder";
+import { eq, and, or, lte, gte, inArray } from "ponder";
 
 /**
  * Get isolated pairs where user had positions during a specific time period
@@ -70,8 +71,21 @@ export async function getUserIsolatedPairsForPeriod(
         const allPairs = trackingRecords.map((record: any) => record.pair as string);
         console.log(`All pairs for user: ${allPairs.join(', ')}`);
 
-        // Step 2: Batch check for activity during the period (OPTIMIZED)
-        // Instead of checking each pair individually, check all pairs at once
+        // Use Set to track unique pairs with positions during the period
+        const activePairs = new Set<string>();
+
+        // Step 2: Check for pre-existing positions at START of period
+        // This catches positions that were opened before the period but are still active
+        const pairsWithPreExistingPositions = await checkBatchPairBalancesAtTimestamp(
+            context,
+            user,
+            allPairs,
+            startTimestamp
+        );
+        console.log(`Pairs with pre-existing positions at start: ${pairsWithPreExistingPositions.join(', ')}`);
+        pairsWithPreExistingPositions.forEach(pair => activePairs.add(pair));
+
+        // Step 3: Check for activity during the period (new positions or activity on existing ones)
         const pairsWithActivity = await checkBatchPairActivityDuringPeriod(
             context,
             user,
@@ -79,9 +93,12 @@ export async function getUserIsolatedPairsForPeriod(
             startTimestamp,
             endTimestamp
         );
-
         console.log(`Pairs with activity during period: ${pairsWithActivity.join(', ')}`);
-        return pairsWithActivity;
+        pairsWithActivity.forEach(pair => activePairs.add(pair));
+
+        const result = Array.from(activePairs);
+        console.log(`Total pairs with positions during period: ${result.join(', ')}`);
+        return result;
 
     } catch (error: any) {
         console.error('Error in getUserIsolatedPairsForPeriod:', error.message);
@@ -131,7 +148,8 @@ async function checkBatchPairActivityDuringPeriod(
             borrows,
             repays,
             addCollateral,
-            removeCollateral
+            removeCollateral,
+            liquidations
         ] = await Promise.all([
             // Deposits - check all pairs at once
             dbQuery.select({pair: DepositIsolated.pair}).from(DepositIsolated).where(
@@ -191,6 +209,19 @@ async function checkBatchPairActivityDuringPeriod(
                     gte(RemoveCollateralIsolated.timestamp, startTimestamp),
                     lte(RemoveCollateralIsolated.timestamp, endTimestamp)
                 )
+            ),
+
+            // Liquidations - check all pairs at once (user can be either borrower or liquidator)
+            dbQuery.select({pair: LiquidateIsolated.pair}).from(LiquidateIsolated).where(
+                and(
+                    or(
+                        eq(LiquidateIsolated.borrower, user as `0x${string}`),
+                        eq(LiquidateIsolated.liquidator, user as `0x${string}`)
+                    ),
+                    inArray(LiquidateIsolated.pair, pairs as `0x${string}`[]),
+                    gte(LiquidateIsolated.timestamp, startTimestamp),
+                    lte(LiquidateIsolated.timestamp, endTimestamp)
+                )
             )
         ]);
 
@@ -201,6 +232,7 @@ async function checkBatchPairActivityDuringPeriod(
         repays.forEach((row: any) => activePairs.add(row.pair));
         addCollateral.forEach((row: any) => activePairs.add(row.pair));
         removeCollateral.forEach((row: any) => activePairs.add(row.pair));
+        liquidations.forEach((row: any) => activePairs.add(row.pair));
 
         return Array.from(activePairs);
 
@@ -211,3 +243,63 @@ async function checkBatchPairActivityDuringPeriod(
     }
 }
 
+/**
+ * OPTIMIZED: Batch check for pairs with non-zero balances at a specific timestamp
+ *
+ * This function checks ALL pairs at once to see if the user has any non-zero balances
+ * (collateral, asset shares, or borrow shares) at the given timestamp.
+ * This is used to detect pre-existing positions at the start of a period.
+ *
+ * @param context - Ponder context with database access
+ * @param user - User address
+ * @param pairs - Array of isolated pair addresses to check
+ * @param timestamp - Timestamp to check balances at
+ * @returns Array of pair addresses that had non-zero balances at the timestamp
+ */
+async function checkBatchPairBalancesAtTimestamp(
+    context: any,
+    user: string,
+    pairs: string[],
+    timestamp: number
+): Promise<string[]> {
+    if (pairs.length === 0) {
+        return [];
+    }
+
+    try {
+        // Import balance query functions
+        const {
+            getIsolatedPairCollateralBalance,
+            getIsolatedPairAssetShares,
+            getIsolatedPairBorrowShares
+        } = await import("./balanceQueries");
+
+        // Check balances for all pairs in parallel
+        const balanceChecks = await Promise.all(
+            pairs.map(async (pair) => {
+                try {
+                    const [collateralBalance, assetShares, borrowShares] = await Promise.all([
+                        getIsolatedPairCollateralBalance(context, user, pair, timestamp),
+                        getIsolatedPairAssetShares(context, user, pair, timestamp),
+                        getIsolatedPairBorrowShares(context, user, pair, timestamp)
+                    ]);
+
+                    // Return pair if any balance is non-zero
+                    const hasBalance = collateralBalance > 0n || assetShares > 0n || borrowShares > 0n;
+                    return hasBalance ? pair : null;
+                } catch (error: any) {
+                    console.error(`Error checking balance for pair ${pair}:`, error.message);
+                    return null;
+                }
+            })
+        );
+
+        // Filter out null values and return pairs with non-zero balances
+        return balanceChecks.filter((pair): pair is string => pair !== null);
+
+    } catch (error: any) {
+        console.error('Error checking batch pair balances:', error.message);
+        console.error('Stack:', error.stack);
+        return [];
+    }
+}

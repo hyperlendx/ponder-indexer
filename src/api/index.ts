@@ -107,13 +107,17 @@ app.get("/user/:address/custom-period-yield", async (c) => {
             totalWithdrawn: pos.totalWithdrawn.toString(),
             totalBorrowed: pos.totalBorrowed.toString(),
             totalRepaid: pos.totalRepaid.toString(),
+            totalScaledDeposited: pos.totalScaledDeposited.toString(),  // NEW: Scaled amounts (consistent across periods)
+            totalScaledBorrowed: pos.totalScaledBorrowed.toString(),    // NEW: Scaled amounts (consistent across periods)
             netDeposits: pos.netDeposits.toString(),
             netBorrows: pos.netBorrows.toString(),
             events: pos.events, // Already formatted with string amounts
             events_before_period: pos.events_before_period, // Events that contributed to starting balances
             starting_balances: {
                 deposits: pos.starting_balances.deposits.toString(),
-                borrows: pos.starting_balances.borrows.toString()
+                borrows: pos.starting_balances.borrows.toString(),
+                scaledDeposits: pos.starting_balances.scaledDeposits.toString(),  // NEW: Scaled balance at period start
+                scaledBorrows: pos.starting_balances.scaledBorrows.toString()     // NEW: Scaled borrow balance at period start
             },
             yieldSegments: pos.yieldSegments.map(seg => ({
                 startTime: seg.startTime,
@@ -246,6 +250,8 @@ app.get("/user/:address/custom-period-yield-isolated", async (c) => {
             totalRepaid: pos.totalRepaid?.toString() ?? '0',
             totalCollateralAdded: pos.totalCollateralAdded?.toString() ?? '0',
             totalCollateralRemoved: pos.totalCollateralRemoved?.toString() ?? '0',
+            totalScaledDeposited: pos.totalScaledDeposited?.toString() ?? '0',
+            totalScaledBorrowed: pos.totalScaledBorrowed?.toString() ?? '0',
             netDeposits: pos.netDeposits?.toString() ?? '0',
             netBorrows: pos.netBorrows?.toString() ?? '0',
             netCollateral: pos.netCollateral?.toString() ?? '0',
@@ -254,7 +260,9 @@ app.get("/user/:address/custom-period-yield-isolated", async (c) => {
             starting_balances: {
                 collateral: pos.starting_balances?.collateral?.toString() ?? '0',
                 deposits: pos.starting_balances?.deposits?.toString() ?? '0',
-                borrows: pos.starting_balances?.borrows?.toString() ?? '0'
+                borrows: pos.starting_balances?.borrows?.toString() ?? '0',
+                scaledDeposits: pos.starting_balances?.scaledDeposits?.toString() ?? '0',
+                scaledBorrows: pos.starting_balances?.scaledBorrows?.toString() ?? '0'
             },
             yieldSegments: (pos.yieldSegments ?? []).map((seg) => {
                 if (!seg) {
@@ -818,7 +826,7 @@ app.get("/user/:address/daily-portfolio-value", async (c) => {
         // Calculate daily portfolio values for regular pool only
         const portfolioData = await calculateUserDailyPortfolioValue(context, userAddress, fromTimestamp, toTimestamp);
 
-        if (portfolioData.dailyValues.length === 0 && !portfolioData.currentValue) {
+        if (portfolioData.dailyValues.length === 0) {
             // Calculate expected number of days for empty response
             const expectedDays = Math.ceil((toTimestamp - fromTimestamp) / (24 * 60 * 60));
             return c.json({
@@ -827,13 +835,8 @@ app.get("/user/:address/daily-portfolio-value", async (c) => {
                 toTimestamp,
                 fromDate: new Date(fromTimestamp * 1000).toISOString(),
                 toDate: new Date(toTimestamp * 1000).toISOString(),
-                days: Math.round((toTimestamp - fromTimestamp) / (24 * 60 * 60) * 100) / 100,
+                days: expectedDays,
                 dailyPortfolioValues: [],
-                currentValue: null,
-                summary: {
-                    totalDaysInPeriod: expectedDays,
-                    hasPartialDay: false
-                },
                 calculatedAt: Math.floor(Date.now() / 1000),
                 message: "No positions found for this user during the specified period"
             });
@@ -851,34 +854,16 @@ app.get("/user/:address/daily-portfolio-value", async (c) => {
             }))
         }));
 
-        // Serialize current value if present
-        const serializedCurrentValue = portfolioData.currentValue ? {
-            date: portfolioData.currentValue.date,
-            timestamp: portfolioData.currentValue.timestamp,
-            isPartialDay: portfolioData.currentValue.isPartialDay,
-            assets: portfolioData.currentValue.assets.map(asset => ({
-                asset: asset.asset,
-                supplied: asset.supplied.toString(),
-                borrowed: asset.borrowed.toString(),
-                netPosition: asset.netPosition.toString()
-            }))
-        } : null;
-
         return c.json({
             user: userAddress,
             fromTimestamp,
             toTimestamp,
             fromDate: new Date(fromTimestamp * 1000).toISOString(),
             toDate: new Date(toTimestamp * 1000).toISOString(),
-            days: Math.round((toTimestamp - fromTimestamp) / (24 * 60 * 60) * 100) / 100,
+            days: portfolioData.dailyValues.length,
             dailyPortfolioValues: serializedPortfolio,
-            currentValue: serializedCurrentValue,
-            summary: {
-                totalDaysInPeriod: portfolioData.dailyValues.length,
-                hasPartialDay: !!portfolioData.currentValue
-            },
             calculatedAt: Math.floor(Date.now() / 1000),
-            note: "To calculate total portfolio value in USD, sum ((supplied - borrowed) / 10^decimals * price) for each asset using current oracle prices"
+            note: "Portfolio values represent actual balances (including accrued interest/yield) at the START of each day (midnight UTC). To calculate total portfolio value in USD, sum ((supplied - borrowed) / 10^decimals * price) for each asset using current oracle prices."
         });
 
     } catch (error) {
@@ -934,11 +919,6 @@ app.get("/user/:address/daily-portfolio-value-isolated", async (c) => {
     try {
         const context = {db};
 
-        // Check if endTimestamp is at a day boundary (midnight UTC)
-        const endDate = new Date(toTimestamp * 1000);
-        const endDayStart = Date.UTC(endDate.getUTCFullYear(), endDate.getUTCMonth(), endDate.getUTCDate()) / 1000;
-        const isPartialDay = toTimestamp !== endDayStart;
-
         // Calculate isolated pair positions for each complete day
         const dailyIsolatedPairs: Array<{
             date: string;
@@ -946,17 +926,26 @@ app.get("/user/:address/daily-portfolio-value-isolated", async (c) => {
             pairs: Array<any>;
         }> = [];
 
-        // Generate daily timestamps (only complete days)
+        // Generate daily timestamps (only complete days at midnight UTC)
         const oneDaySeconds = 24 * 60 * 60;
-        const endTimestampForDays = isPartialDay ? endDayStart : toTimestamp;
 
-        for (let ts = fromTimestamp; ts <= endTimestampForDays; ts += oneDaySeconds) {
-            const dayTimestamp = Math.min(ts, endTimestampForDays);
-            const positions = await calculateAllIsolatedPairPositions(context, userAddress, dayTimestamp, fromTimestamp);
+        // Calculate the start of each day in the range
+        const startDate = new Date(fromTimestamp * 1000);
+        const endDate = new Date(toTimestamp * 1000);
+
+        // Get the start of the first day (midnight UTC)
+        const firstDayStart = Math.floor(Date.UTC(startDate.getUTCFullYear(), startDate.getUTCMonth(), startDate.getUTCDate()) / 1000);
+
+        // Get the start of the last day (midnight UTC)
+        const lastDayStart = Math.floor(Date.UTC(endDate.getUTCFullYear(), endDate.getUTCMonth(), endDate.getUTCDate()) / 1000);
+
+        // Generate portfolio values for each day at midnight UTC
+        for (let ts = firstDayStart; ts <= lastDayStart; ts += oneDaySeconds) {
+            const positions = await calculateAllIsolatedPairPositions(context, userAddress, ts, fromTimestamp);
 
             dailyIsolatedPairs.push({
-                date: new Date(dayTimestamp * 1000).toISOString().split('T')[0]!,
-                timestamp: dayTimestamp,
+                date: new Date(ts * 1000).toISOString().split('T')[0]!,
+                timestamp: ts,
                 pairs: positions.map(pos => ({
                     pair: pos.pair,
                     collateralAmount: pos.collateralAmount.toString(),
@@ -966,31 +955,7 @@ app.get("/user/:address/daily-portfolio-value-isolated", async (c) => {
             });
         }
 
-        // Calculate current value if partial day
-        let currentValue: {
-            date: string;
-            timestamp: number;
-            isPartialDay: boolean;
-            pairs: Array<any>;
-        } | null = null;
-
-        if (isPartialDay) {
-            const currentPositions = await calculateAllIsolatedPairPositions(context, userAddress, toTimestamp, fromTimestamp);
-
-            currentValue = {
-                date: endDate.toISOString().split('T')[0]!,
-                timestamp: toTimestamp,
-                isPartialDay: true,
-                pairs: currentPositions.map(pos => ({
-                    pair: pos.pair,
-                    collateralAmount: pos.collateralAmount.toString(),
-                    assetAmount: pos.assetAmount.toString(),
-                    borrowAmount: pos.borrowAmount.toString()
-                }))
-            };
-        }
-
-        if (dailyIsolatedPairs.length === 0 && !currentValue) {
+        if (dailyIsolatedPairs.length === 0) {
             const expectedDays = Math.ceil((toTimestamp - fromTimestamp) / (24 * 60 * 60));
             return c.json({
                 user: userAddress,
@@ -998,13 +963,8 @@ app.get("/user/:address/daily-portfolio-value-isolated", async (c) => {
                 toTimestamp,
                 fromDate: new Date(fromTimestamp * 1000).toISOString(),
                 toDate: new Date(toTimestamp * 1000).toISOString(),
-                days: Math.round((toTimestamp - fromTimestamp) / (24 * 60 * 60) * 100) / 100,
+                days: expectedDays,
                 dailyPortfolioValues: [],
-                currentValue: null,
-                summary: {
-                    totalDaysInPeriod: expectedDays,
-                    hasPartialDay: false
-                },
                 calculatedAt: Math.floor(Date.now() / 1000),
                 message: "No isolated pair positions found for this user during the specified period"
             });
@@ -1016,15 +976,10 @@ app.get("/user/:address/daily-portfolio-value-isolated", async (c) => {
             toTimestamp,
             fromDate: new Date(fromTimestamp * 1000).toISOString(),
             toDate: new Date(toTimestamp * 1000).toISOString(),
-            days: Math.round((toTimestamp - fromTimestamp) / (24 * 60 * 60) * 100) / 100,
+            days: dailyIsolatedPairs.length,
             dailyPortfolioValues: dailyIsolatedPairs,
-            currentValue: currentValue,
-            summary: {
-                totalDaysInPeriod: dailyIsolatedPairs.length,
-                hasPartialDay: !!currentValue
-            },
             calculatedAt: Math.floor(Date.now() / 1000),
-            note: "To calculate total portfolio value in USD, sum ((collateralAmount + assetAmount - borrowAmount) / 10^decimals * price) for each pair using current oracle prices"
+            note: "Portfolio values represent actual balances (including accrued interest/yield) at the START of each day (midnight UTC). To calculate total portfolio value in USD, sum ((collateralAmount + assetAmount - borrowAmount) / 10^decimals * price) for each pair using current oracle prices."
         });
 
     } catch (error) {
@@ -1246,6 +1201,7 @@ app.get("/user/:address/monthly-yield-breakdown-isolated", async (c) => {
             monthName: month.monthName,
             startDate: month.startDate,
             endDate: month.endDate,
+            monthlyYield: month.monthlyYield.toString(),
             pairs: month.pairs.map(pair => ({
                 pair: pair.pair,
                 assetYield: pair.assetYield.toString(),
@@ -1261,6 +1217,7 @@ app.get("/user/:address/monthly-yield-breakdown-isolated", async (c) => {
             monthName: yieldData.currentValue.monthName,
             startDate: yieldData.currentValue.startDate,
             endDate: yieldData.currentValue.endDate,
+            monthlyYield: yieldData.currentValue.monthlyYield.toString(),
             isPartialMonth: yieldData.currentValue.isPartialMonth,
             daysInPeriod: yieldData.currentValue.daysInPeriod,
             pairs: yieldData.currentValue.pairs.map(pair => ({

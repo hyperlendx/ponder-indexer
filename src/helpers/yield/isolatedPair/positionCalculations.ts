@@ -724,6 +724,8 @@ export interface SimplifiedIsolatedPairYieldPosition {
     totalRepaid: bigint;
     totalCollateralAdded: bigint;
     totalCollateralRemoved: bigint;
+    totalScaledDeposited: bigint;  // Sum of asset shares (starting + deposits during period)
+    totalScaledBorrowed: bigint;   // Sum of borrow shares (starting + borrows during period)
     netDeposits: bigint;
     netBorrows: bigint;
     netCollateral: bigint;
@@ -733,6 +735,8 @@ export interface SimplifiedIsolatedPairYieldPosition {
         collateral: bigint;
         deposits: bigint;
         borrows: bigint;
+        scaledDeposits: bigint;  // Asset shares at period start
+        scaledBorrows: bigint;   // Borrow shares at period start
     };
     yieldSegments: IsolatedPairYieldSegmentDetail[];
     borrowCostSegments: IsolatedPairBorrowCostSegmentDetail[];
@@ -902,12 +906,18 @@ export async function calculateUserIsolatedYieldPositions(
             let totalWithdrawn = 0n;
             let totalRepaid = 0n;
             let totalCollateralRemoved = 0n;
+
+            // Initialize scaled totals (shares without exchange rate conversion)
+            let totalScaledDeposited = startAssetShares;
+            let totalScaledBorrowed = startBorrowShares;
+
             const events: IsolatedPairEventDetail[] = [];
 
             // Process deposit events during the period
             for (const event of depositEvents) {
                 const assetAmount = convertSharesToAssets(event.shares, event.exchangeRate);
                 totalDeposited += assetAmount;
+                totalScaledDeposited += event.shares;  // Track scaled amount (shares)
                 events.push({
                     eventType: 'deposit',
                     timestamp: Number(event.timestamp),
@@ -934,6 +944,7 @@ export async function calculateUserIsolatedYieldPositions(
             for (const event of borrowEvents) {
                 const borrowAmount = convertSharesToAssets(event.sharesAdded, event.exchangeRate);
                 totalBorrowed += borrowAmount;
+                totalScaledBorrowed += event.sharesAdded;  // Track scaled amount (shares)
                 events.push({
                     eventType: 'borrow',
                     timestamp: Number(event.timestamp),
@@ -947,6 +958,7 @@ export async function calculateUserIsolatedYieldPositions(
             for (const event of repayEvents) {
                 const repayAmount = convertSharesToAssets(event.shares, event.exchangeRate);
                 totalRepaid += repayAmount;
+                // Note: Do NOT subtract from totalScaledBorrowed - we want total borrowed, not net
                 events.push({
                     eventType: 'repay',
                     timestamp: Number(event.timestamp),
@@ -1075,6 +1087,8 @@ export async function calculateUserIsolatedYieldPositions(
                 totalRepaid,
                 totalCollateralAdded,
                 totalCollateralRemoved,
+                totalScaledDeposited,
+                totalScaledBorrowed,
                 netDeposits,
                 netBorrows,
                 netCollateral,
@@ -1083,7 +1097,9 @@ export async function calculateUserIsolatedYieldPositions(
                 starting_balances: {
                     collateral: startCollateralBalance,
                     deposits: startAssetAmount,
-                    borrows: startBorrowAmount
+                    borrows: startBorrowAmount,
+                    scaledDeposits: startAssetShares,
+                    scaledBorrows: startBorrowShares
                 },
                 yieldSegments,
                 borrowCostSegments
@@ -1096,15 +1112,20 @@ export async function calculateUserIsolatedYieldPositions(
         })
     );
 
-    // Filter to only positions with activity during the period
+    // Filter to only positions with activity during the period OR pre-existing balances
     const activePositions = positions.filter(
         pos =>
+            // Activity during the period
             pos.totalDeposited > 0n ||
             pos.totalWithdrawn > 0n ||
             pos.totalBorrowed > 0n ||
             pos.totalRepaid > 0n ||
             pos.totalCollateralAdded > 0n ||
-            pos.totalCollateralRemoved > 0n
+            pos.totalCollateralRemoved > 0n ||
+            // OR pre-existing balances at start of period
+            pos.starting_balances.collateral > 0n ||
+            pos.starting_balances.deposits > 0n ||
+            pos.starting_balances.borrows > 0n
     );
 
     return activePositions;
