@@ -8,16 +8,14 @@
 import {
     getIsolatedPairAssetShares,
     getIsolatedPairBorrowShares,
-    getIsolatedPairCollateralBalance,
     convertSharesToAssets
 } from "./balanceQueries";
-import { calculateIsolatedPairExchangeRateAtTimestamp } from "./exchangeRate";
 import { getUserPairEvents } from "./eventQueries";
 import { getUserIsolatedPairs } from "./pairTracking";
 import { EXCHANGE_PRECISION } from "./constants";
 import { ExchangeRateCache } from "./exchangeRateCache";
 import { IsolatedPairBalanceCache } from "./balanceCache";
-import { DepositIsolated, WithdrawIsolated, BorrowAssetIsolated, RepayAssetIsolated } from "ponder:schema";
+import { DepositIsolated, WithdrawIsolated, BorrowAssetIsolated, RepayAssetIsolated, LiquidateIsolated } from "ponder:schema";
 import { eq, and, gte, lte } from "ponder";
 
 /**
@@ -331,7 +329,7 @@ export async function calculateSegmentedIsolatedPairYield(
     // Get all deposit and withdraw events during the period, ordered chronologically
     const dbQuery = context.db.sql || context.db;
 
-    const [depositEvents, withdrawEvents] = await Promise.all([
+    const [depositEvents, withdrawEvents, liquidationEvents] = await Promise.all([
         dbQuery.select().from(DepositIsolated).where(
             and(
                 eq(DepositIsolated.owner, user as `0x${string}`),
@@ -347,7 +345,16 @@ export async function calculateSegmentedIsolatedPairYield(
                 gte(WithdrawIsolated.timestamp, startTimestamp),
                 lte(WithdrawIsolated.timestamp, endTimestamp)
             )
-        ).orderBy(WithdrawIsolated.timestamp)
+        ).orderBy(WithdrawIsolated.timestamp),
+        // Get liquidation events (collateral liquidations don't affect asset shares, but we track them for segment boundaries)
+        dbQuery.select().from(LiquidateIsolated).where(
+            and(
+                eq(LiquidateIsolated.borrower, user as `0x${string}`),
+                eq(LiquidateIsolated.pair, pair as `0x${string}`),
+                gte(LiquidateIsolated.timestamp, startTimestamp),
+                lte(LiquidateIsolated.timestamp, endTimestamp)
+            )
+        ).orderBy(LiquidateIsolated.timestamp)
     ]);
 
     // Combine and sort events with validation
@@ -365,6 +372,11 @@ export async function calculateSegmentedIsolatedPairYield(
                 throw new Error(`Invalid WithdrawIsolated event: shares is ${e.shares}`);
             }
             return { ...e, eventType: 'withdraw' as const, sharesDelta: 0n - e.shares };
+        }),
+        // Liquidations create segment boundaries but don't directly affect asset shares
+        // (they affect collateral and borrow shares, not asset shares)
+        ...liquidationEvents.map((e: any) => {
+            return { ...e, eventType: 'liquidation' as const, sharesDelta: 0n };
         })
     ].sort((a, b) => Number(a.timestamp) - Number(b.timestamp));
 
@@ -502,7 +514,7 @@ export async function calculateSegmentedIsolatedPairBorrowCost(
     // Get all borrow and repay events during the period, ordered chronologically
     const dbQuery = context.db.sql || context.db;
 
-    const [borrowEvents, repayEvents] = await Promise.all([
+    const [borrowEvents, repayEvents, liquidationEvents] = await Promise.all([
         dbQuery.select().from(BorrowAssetIsolated).where(
             and(
                 eq(BorrowAssetIsolated.borrower, user as `0x${string}`),
@@ -518,7 +530,16 @@ export async function calculateSegmentedIsolatedPairBorrowCost(
                 gte(RepayAssetIsolated.timestamp, startTimestamp),
                 lte(RepayAssetIsolated.timestamp, endTimestamp)
             )
-        ).orderBy(RepayAssetIsolated.timestamp)
+        ).orderBy(RepayAssetIsolated.timestamp),
+        // Get liquidation events (forced repayment of borrow shares)
+        dbQuery.select().from(LiquidateIsolated).where(
+            and(
+                eq(LiquidateIsolated.borrower, user as `0x${string}`),
+                eq(LiquidateIsolated.pair, pair as `0x${string}`),
+                gte(LiquidateIsolated.timestamp, startTimestamp),
+                lte(LiquidateIsolated.timestamp, endTimestamp)
+            )
+        ).orderBy(LiquidateIsolated.timestamp)
     ]);
 
     // Combine and sort events with validation
@@ -536,6 +557,14 @@ export async function calculateSegmentedIsolatedPairBorrowCost(
                 throw new Error(`Invalid RepayAssetIsolated event: shares is ${e.shares}`);
             }
             return { ...e, eventType: 'repay' as const, sharesDelta: 0n - e.shares };
+        }),
+        // Liquidations reduce borrow shares (forced repayment)
+        ...liquidationEvents.map((e: any) => {
+            if (e.sharesToLiquidate === undefined || e.sharesToLiquidate === null) {
+                console.error(`LiquidateIsolated event has undefined sharesToLiquidate:`, e);
+                throw new Error(`Invalid LiquidateIsolated event: sharesToLiquidate is ${e.sharesToLiquidate}`);
+            }
+            return { ...e, eventType: 'liquidation' as const, sharesDelta: 0n - e.sharesToLiquidate };
         })
     ].sort((a, b) => Number(a.timestamp) - Number(b.timestamp));
 

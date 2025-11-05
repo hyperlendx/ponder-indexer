@@ -1,4 +1,4 @@
-import { UserPosition, UserBalanceEvent, ReserveDataEvent, Borrow, Repay } from "ponder:schema";
+import { UserPosition, UserBalanceEvent, Borrow, Repay, LiquidationCall } from "ponder:schema";
 import { calculateLiquidityIndexAtTimestamp, calculateActualBalance, RAY } from "./aave";
 import { eq, and, gte, lte, desc } from "ponder";
 
@@ -155,7 +155,6 @@ export async function updateUserPosition(
     // Calculate new actual balance
     const newActualBalance = calculateActualBalance(newScaledBalance, currentLiquidityIndex);
 
-    // Record the balance event using Ponder's insert method
     // Use a truly unique ID to avoid conflicts when multiple events occur in same transaction
     const randomSuffix = Math.random().toString(36).substring(2, 8);
     const eventId = `${txHash}_${user}_${asset}_${eventType}_${timestamp}_${randomSuffix}`;
@@ -208,108 +207,6 @@ export async function updateUserPosition(
 }
 
 /**
- * Get all positions for a user
- */
-export async function getUserPositions(
-    context: any,
-    user: string
-): Promise<Array<{
-    asset: string;
-    scaledBalance: bigint;
-    actualBalance: bigint;
-    totalDeposits: bigint;
-    totalWithdrawals: bigint;
-    lastUpdated: number;
-    currentYield: bigint;
-}>> {
-    const { db } = context;
-    // Query all positions for the user using Drizzle ORM pattern
-    const positions = await db
-        .select()
-        .from(UserPosition)
-        .where(eq(UserPosition.user, user as `0x${string}`));
-
-    const result = [];
-
-    for (const position of positions) {
-        // Get the most recent liquidity index directly from ReserveDataEvent
-        const mostRecentEvent = await context.db
-            .select()
-            .from(ReserveDataEvent)
-            .where(eq(ReserveDataEvent.reserve, position.asset as `0x${string}`))
-            .orderBy(desc(ReserveDataEvent.timestamp))
-            .limit(1);
-
-        const currentLiquidityIndex = mostRecentEvent.length > 0
-            ? BigInt(mostRecentEvent[0].liquidityIndex)
-            : RAY; // Fallback to RAY if no events found
-
-        // Calculate current actual balance
-        const currentActualBalance = calculateActualBalance(
-            position.scaledBalance,
-            currentLiquidityIndex
-        );
-
-        // Calculate current yield
-        const netDeposits = BigInt(position.totalDeposits) - BigInt(position.totalWithdrawals);
-
-        const currentYield = currentActualBalance - netDeposits;
-
-        result.push({
-            asset: position.asset,
-            scaledBalance: position.scaledBalance,
-            actualBalance: currentActualBalance,
-            totalDeposits: position.totalDeposits,
-            totalWithdrawals: position.totalWithdrawals,
-            lastUpdated: position.lastUpdated,
-            currentYield,
-        });
-    }
-
-    return result;
-}
-
-/**
- * Calculate net deposits for a user in a specific time period
- */
-export async function calculateNetDeposits(
-    context: any,
-    user: string,
-    asset: string,
-    startTimestamp: number,
-    endTimestamp: number
-): Promise<bigint> {
-    const { db } = context;
-
-    const dbQuery = db.sql || db;
-    const events = await dbQuery
-        .select()
-        .from(UserBalanceEvent)
-        .where(
-            and(
-                eq(UserBalanceEvent.user, user as `0x${string}`),
-                eq(UserBalanceEvent.asset, asset as `0x${string}`),
-                gte(UserBalanceEvent.timestamp, startTimestamp),
-                lte(UserBalanceEvent.timestamp, endTimestamp)
-            )
-        );
-
-    let netDeposits = 0n;
-
-    for (const event of events) {
-        // Convert transaction amount to actual amount using liquidity index
-        // Note: transactionAmount is stored as positive for deposits/transfers_in
-        // and negative for withdrawals/transfers_out
-        const actualAmount = calculateActualBalance(event.transactionAmount, event.liquidityIndex);
-
-        // Simply add the actualAmount (which already has the correct sign)
-        netDeposits += actualAmount;
-    }
-
-    return netDeposits;
-}
-
-/**
  * Calculate total supplied amount for a user in a specific time period
  * This includes all deposits and transfers in, regardless of withdrawals
  */
@@ -354,6 +251,9 @@ export async function calculateTotalSupplied(
 /**
  * Calculate total withdrawn amount for a user in a specific time period
  * This includes all withdrawals and transfers out, regardless of deposits
+ *
+ * IMPORTANT: This function now accounts for liquidations as forced withdrawals.
+ * When collateral is liquidated, it's treated as a withdrawal from the user's position.
  */
 export async function calculateTotalWithdrawn(
     context: any,
@@ -388,6 +288,24 @@ export async function calculateTotalWithdrawn(
         if (event.eventType === 'withdraw' || event.eventType === 'transfer_out') {
             totalWithdrawn += actualAmount < 0n ? -actualAmount : actualAmount;
         }
+    }
+
+    // Add liquidated collateral amounts (treated as forced withdrawals)
+    const liquidations = await dbQuery
+        .select()
+        .from(LiquidationCall)
+        .where(
+            and(
+                eq(LiquidationCall.user, user as `0x${string}`),
+                eq(LiquidationCall.collateralAsset, asset as `0x${string}`),
+                gte(LiquidationCall.timestamp, startTimestamp),
+                lte(LiquidationCall.timestamp, endTimestamp)
+            )
+        );
+
+    for (const liquidation of liquidations) {
+        // liquidatedCollateralAmount is already in actual token amounts
+        totalWithdrawn += liquidation.liquidatedCollateralAmount;
     }
 
     return totalWithdrawn;
@@ -431,6 +349,9 @@ export async function calculateTotalBorrowed(
 /**
  * Calculate total repaid amount for a user in a specific time period
  * This includes all repay transactions during the period
+ *
+ * IMPORTANT: This function now accounts for liquidations as forced repayments.
+ * When debt is liquidated, the debtToCover is treated as a repayment on behalf of the user.
  */
 export async function calculateTotalRepaid(
     context: any,
@@ -458,6 +379,24 @@ export async function calculateTotalRepaid(
 
     for (const event of repayEvents) {
         totalRepaid += event.amount;
+    }
+
+    // Add liquidated debt amounts (treated as forced repayments)
+    const liquidations = await dbQuery
+        .select()
+        .from(LiquidationCall)
+        .where(
+            and(
+                eq(LiquidationCall.user, user as `0x${string}`),
+                eq(LiquidationCall.debtAsset, asset as `0x${string}`),
+                gte(LiquidationCall.timestamp, startTimestamp),
+                lte(LiquidationCall.timestamp, endTimestamp)
+            )
+        );
+
+    for (const liquidation of liquidations) {
+        // debtToCover is already in actual token amounts
+        totalRepaid += liquidation.debtToCover;
     }
 
     return totalRepaid;

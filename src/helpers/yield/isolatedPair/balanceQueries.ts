@@ -12,7 +12,8 @@ import {
     AddCollateralIsolated,
     RemoveCollateralIsolated,
     DepositIsolated,
-    WithdrawIsolated
+    WithdrawIsolated,
+    LiquidateIsolated
 } from "ponder:schema";
 import { eq, and, lte } from "ponder";
 import { EXCHANGE_PRECISION } from "./constants";
@@ -57,9 +58,9 @@ export async function getIsolatedPairCollateralBalance(
     timestamp: number
 ): Promise<bigint> {
     const dbQuery = context.db.sql || context.db;
-    
+
     // Get all collateral events up to timestamp
-    const [addEvents, removeEvents] = await Promise.all([
+    const [addEvents, removeEvents, liquidationEvents] = await Promise.all([
         dbQuery.select().from(AddCollateralIsolated).where(
             and(
                 eq(AddCollateralIsolated.borrower, user as `0x${string}`),
@@ -73,20 +74,33 @@ export async function getIsolatedPairCollateralBalance(
                 eq(RemoveCollateralIsolated.pair, pair as `0x${string}`),
                 lte(RemoveCollateralIsolated.timestamp, timestamp)
             )
+        ),
+        // Get liquidation events where user's collateral was liquidated
+        dbQuery.select().from(LiquidateIsolated).where(
+            and(
+                eq(LiquidateIsolated.borrower, user as `0x${string}`),
+                eq(LiquidateIsolated.pair, pair as `0x${string}`),
+                lte(LiquidateIsolated.timestamp, timestamp)
+            )
         )
     ]);
-    
+
     // Calculate net collateral
     let collateralBalance = 0n;
-    
+
     for (const event of addEvents) {
         collateralBalance += event.collateralAmount;
     }
-    
+
     for (const event of removeEvents) {
         collateralBalance -= event.collateralAmount;
     }
-    
+
+    // Subtract liquidated collateral (forced removal)
+    for (const liquidation of liquidationEvents) {
+        collateralBalance -= liquidation.collateralForLiquidator;
+    }
+
     return collateralBalance > 0n ? collateralBalance : 0n;
 }
 
@@ -177,9 +191,9 @@ export async function getIsolatedPairBorrowShares(
     timestamp: number
 ): Promise<bigint> {
     const dbQuery = context.db.sql || context.db;
-    
+
     // Get all borrow/repay events up to timestamp
-    const [borrows, repays] = await Promise.all([
+    const [borrows, repays, liquidationEvents] = await Promise.all([
         dbQuery.select().from(BorrowAssetIsolated).where(
             and(
                 eq(BorrowAssetIsolated.borrower, user as `0x${string}`),
@@ -193,20 +207,33 @@ export async function getIsolatedPairBorrowShares(
                 eq(RepayAssetIsolated.pair, pair as `0x${string}`),
                 lte(RepayAssetIsolated.timestamp, timestamp)
             )
+        ),
+        // Get liquidation events where user's borrow shares were liquidated
+        dbQuery.select().from(LiquidateIsolated).where(
+            and(
+                eq(LiquidateIsolated.borrower, user as `0x${string}`),
+                eq(LiquidateIsolated.pair, pair as `0x${string}`),
+                lte(LiquidateIsolated.timestamp, timestamp)
+            )
         )
     ]);
-    
+
     // Calculate net borrow shares
     let borrowShares = 0n;
-    
+
     for (const event of borrows) {
         borrowShares += event.sharesAdded;
     }
-    
+
     for (const event of repays) {
         borrowShares -= event.shares;
     }
-    
+
+    // Subtract liquidated borrow shares (forced repayment)
+    for (const liquidation of liquidationEvents) {
+        borrowShares -= liquidation.sharesToLiquidate;
+    }
+
     return borrowShares > 0n ? borrowShares : 0n;
 }
 

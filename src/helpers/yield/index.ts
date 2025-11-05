@@ -4,7 +4,7 @@
  * This module provides comprehensive yield tracking and reporting for AAVE/Hyperlend protocol:
  * - Balance queries (historical and current)
  * - Segmented yield calculations
- * - Monthly, daily, and custom period reports
+ * - daily, and custom period reports
  * - Portfolio value tracking
  */
 

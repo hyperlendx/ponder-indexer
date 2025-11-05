@@ -19,8 +19,8 @@ import { calculateLiquidityIndexAtTimestamp } from "../aave/liquidityIndex";
 import { calculateVariableBorrowIndexAtTimestamp } from "../aave/borrowIndex";
 import { calculateActualBalance } from "../aave/balanceConversions";
 import { calculateTotalSupplied, calculateTotalWithdrawn, calculateTotalBorrowed, calculateTotalRepaid } from "../userPositionManager";
-import { UserBalanceEvent, Borrow, Repay } from "ponder:schema";
-import { eq, and, gte, lte } from "ponder";
+import { UserBalanceEvent, Borrow, Repay, LiquidationCall, Supply, Withdraw } from "ponder:schema";
+import { eq, and, gte, lte, or } from "ponder";
 import { calculateSegmentedCustomPeriodYield, calculateSegmentedCustomPeriodBorrowCost } from "./yieldCalculations";
 import { LiquidityIndexCache } from "./liquidityIndexCache";
 
@@ -255,232 +255,6 @@ export interface EventDetail {
 }
 
 /**
- * Simplified position data with only activity metrics and event details
- */
-export interface SimplifiedAssetPosition {
-    asset: string;
-    totalDeposited: bigint;
-    totalWithdrawn: bigint;
-    totalBorrowed: bigint;
-    totalRepaid: bigint;
-    events: EventDetail[];
-}
-
-/**
- * Calculate simplified user positions with only activity metrics and event details
- *
- * This is an optimized version that:
- * - Returns only the 4 core activity metrics (deposits, withdrawals, borrows, repays)
- * - Includes all event details for transparency and verification
- * - Properly accounts for positions active before the period started
- *
- * IMPORTANT: Activity metrics show total capital active during the period:
- * - totalDeposited = balance at START of period + deposits DURING period
- * - totalWithdrawn = withdrawals DURING period
- * - totalBorrowed = borrow balance at START of period + borrows DURING period
- * - totalRepaid = repayments DURING period
- *
- * This allows users to see how much capital was working for them during the period.
- *
- * Example: User deposited 1000 USDC on Jan 1, withdrew 500 USDC on Feb 15
- * Query period: Feb 1 - Feb 28
- * Result: Asset USDC with totalDeposited=1000, totalWithdrawn=500
- * (Shows 1000 was active during Feb, 500 was withdrawn)
- *
- * @param context - Ponder context with database access
- * @param user - User address
- * @param startTimestamp - Start of the time period (Unix timestamp)
- * @param endTimestamp - End of the time period (Unix timestamp)
- * @returns Array of simplified position data with event details
- */
-export async function calculateUserActivityPositions(
-    context: any,
-    user: string,
-    startTimestamp: number,
-    endTimestamp: number
-): Promise<SimplifiedAssetPosition[]> {
-    const { db } = context;
-    const dbQuery = db.sql || db;
-
-    // Get all assets where user had activity during the period
-    // This includes both supply and borrow activity
-    const supplyAssets = await getUserAssetsForPeriod(context, user, startTimestamp, endTimestamp);
-    const borrowAssets = await getUserBorrowedAssets(context, user, startTimestamp, endTimestamp);
-    const allAssets = [...new Set([...supplyAssets, ...borrowAssets])];
-
-
-
-    if (allAssets.length === 0) {
-        return [];
-    }
-
-    // Calculate activity metrics for each asset in parallel
-    const positions = await Promise.all(
-        allAssets.map(async (asset) => {
-            // Fetch data in parallel for performance
-            const [
-                balanceEvents,
-                borrowEvents,
-                repayEvents,
-                startScaledSupplyBalance,
-                startScaledBorrowBalance,
-                startLiquidityIndex,
-                startBorrowIndex
-            ] = await Promise.all([
-                // Fetch all supply/withdraw events for this asset during the period
-                dbQuery
-                    .select()
-                    .from(UserBalanceEvent)
-                    .where(
-                        and(
-                            eq(UserBalanceEvent.user, user as `0x${string}`),
-                            eq(UserBalanceEvent.asset, asset as `0x${string}`),
-                            gte(UserBalanceEvent.timestamp, startTimestamp),
-                            lte(UserBalanceEvent.timestamp, endTimestamp)
-                        )
-                    ),
-                // Fetch all borrow events for this asset during the period
-                dbQuery
-                    .select()
-                    .from(Borrow)
-                    .where(
-                        and(
-                            eq(Borrow.onBehalfOf, user as `0x${string}`),
-                            eq(Borrow.reserve, asset as `0x${string}`),
-                            gte(Borrow.timestamp, startTimestamp),
-                            lte(Borrow.timestamp, endTimestamp)
-                        )
-                    ),
-                // Fetch all repay events for this asset during the period
-                dbQuery
-                    .select()
-                    .from(Repay)
-                    .where(
-                        and(
-                            eq(Repay.user, user as `0x${string}`),
-                            eq(Repay.reserve, asset as `0x${string}`),
-                            gte(Repay.timestamp, startTimestamp),
-                            lte(Repay.timestamp, endTimestamp)
-                        )
-                    ),
-                // Get balances at start of period
-                getScaledBalanceAtTimestamp(context, user, asset, startTimestamp),
-                getScaledBorrowBalanceAtTimestamp(context, user, asset, startTimestamp),
-                // Get indices at start of period
-                calculateLiquidityIndexAtTimestamp(context, asset, startTimestamp),
-                calculateVariableBorrowIndexAtTimestamp(context, asset, startTimestamp)
-            ]);
-
-            // Calculate starting balances (capital that was already active at period start)
-            const startSupplyBalance = calculateActualBalance(startScaledSupplyBalance, startLiquidityIndex);
-            const startBorrowBalance = calculateActualBalance(startScaledBorrowBalance, startBorrowIndex);
-
-            // Initialize totals with starting balances
-            // This represents capital that was already working during the period
-            let totalDeposited = startSupplyBalance;
-            let totalBorrowed = startBorrowBalance;
-            let totalWithdrawn = 0n;
-            let totalRepaid = 0n;
-            const events: EventDetail[] = [];
-
-            // Add a synthetic event for starting balance if non-zero
-            if (startSupplyBalance > 0n) {
-                events.push({
-                    eventType: 'deposit',
-                    timestamp: startTimestamp,
-                    date: new Date(startTimestamp * 1000).toISOString(),
-                    amount: startSupplyBalance.toString(),
-                    txHash: '0x0000000000000000000000000000000000000000000000000000000000000000' // Synthetic event
-                });
-            }
-
-            if (startBorrowBalance > 0n) {
-                events.push({
-                    eventType: 'borrow',
-                    timestamp: startTimestamp,
-                    date: new Date(startTimestamp * 1000).toISOString(),
-                    amount: startBorrowBalance.toString(),
-                    txHash: '0x0000000000000000000000000000000000000000000000000000000000000000' // Synthetic event
-                });
-            }
-
-            // Process balance events (deposits and withdrawals during the period)
-            for (const event of balanceEvents) {
-                const actualAmount = calculateActualBalance(event.transactionAmount, event.liquidityIndex);
-
-                if (event.eventType === 'deposit' || event.eventType === 'transfer_in') {
-                    totalDeposited += actualAmount;
-                    events.push({
-                        eventType: event.eventType as 'deposit' | 'transfer_in',
-                        timestamp: Number(event.timestamp),
-                        date: new Date(Number(event.timestamp) * 1000).toISOString(),
-                        amount: actualAmount.toString(),
-                        txHash: event.txHash
-                    });
-                } else if (event.eventType === 'withdraw' || event.eventType === 'transfer_out') {
-                    const withdrawAmount = actualAmount < 0n ? -actualAmount : actualAmount;
-                    totalWithdrawn += withdrawAmount;
-                    events.push({
-                        eventType: event.eventType as 'withdraw' | 'transfer_out',
-                        timestamp: Number(event.timestamp),
-                        date: new Date(Number(event.timestamp) * 1000).toISOString(),
-                        amount: withdrawAmount.toString(),
-                        txHash: event.txHash
-                    });
-                }
-            }
-
-            // Process borrow events during the period
-            for (const event of borrowEvents) {
-                totalBorrowed += event.amount;
-                events.push({
-                    eventType: 'borrow',
-                    timestamp: Number(event.timestamp),
-                    date: new Date(Number(event.timestamp) * 1000).toISOString(),
-                    amount: event.amount.toString(),
-                    txHash: event.txHash
-                });
-            }
-
-            // Process repay events during the period
-            for (const event of repayEvents) {
-                totalRepaid += event.amount;
-                events.push({
-                    eventType: 'repay',
-                    timestamp: Number(event.timestamp),
-                    date: new Date(Number(event.timestamp) * 1000).toISOString(),
-                    amount: event.amount.toString(),
-                    txHash: event.txHash
-                });
-            }
-
-            // Sort events by timestamp for better readability
-            events.sort((a, b) => a.timestamp - b.timestamp);
-
-            return {
-                asset,
-                totalDeposited,
-                totalWithdrawn,
-                totalBorrowed,
-                totalRepaid,
-                events
-            };
-        })
-    );
-
-    // Filter to only positions with activity during the period
-    const activePositions = positions.filter(
-        pos =>
-            pos.totalDeposited > 0n ||
-            pos.totalWithdrawn > 0n ||
-            pos.totalBorrowed > 0n ||
-            pos.totalRepaid > 0n
-    );
-
-    return activePositions;
-}
-
-/**
  * Yield segment detail for transparency and manual verification
  */
 export interface YieldSegmentDetail {
@@ -525,6 +299,8 @@ export interface SimplifiedYieldPosition {
     totalRepaid: bigint;
     totalScaledDeposited: bigint;
     totalScaledBorrowed: bigint;
+    totalRawDeposited: bigint;  // Sum of raw deposit transaction amounts (from Supply events)
+    totalRawBorrowed: bigint;   // Sum of raw borrow transaction amounts (from Borrow events)
     netDeposits: bigint;
     netBorrows: bigint;
     events: EventDetail[];
@@ -534,6 +310,8 @@ export interface SimplifiedYieldPosition {
         borrows: bigint;
         scaledDeposits: bigint;
         scaledBorrows: bigint;
+        rawDeposits: bigint;
+        rawBorrows: bigint;
     };
     yieldSegments: YieldSegmentDetail[];
     borrowCostSegments: BorrowCostSegmentDetail[];
@@ -605,6 +383,15 @@ export async function calculateUserYieldPositions(
                 withdrawEvents,
                 borrowEvents,
                 repayEvents,
+                liquidationEvents,
+                // Raw transaction events for totalRawDeposited/totalRawBorrowed
+                supplyEvents,
+                withdrawRawEvents,
+                // Raw transaction events BEFORE period start for starting raw balances
+                supplyEventsBeforeStart,
+                withdrawEventsBeforeStart,
+                borrowEventsBeforeStart,
+                repayEventsBeforeStart,
                 // Starting balances with events
                 startSupplyResult,
                 startBorrowResult,
@@ -653,6 +440,69 @@ export async function calculateUserYieldPositions(
                         lte(Repay.timestamp, endTimestamp)
                     )
                 ),
+                // Fetch all liquidation events during the period where this asset was involved
+                // (either as collateral or debt asset)
+                dbQuery.select().from(LiquidationCall).where(
+                    and(
+                        eq(LiquidationCall.user, user as `0x${string}`),
+                        or(
+                            eq(LiquidationCall.collateralAsset, asset as `0x${string}`),
+                            eq(LiquidationCall.debtAsset, asset as `0x${string}`)
+                        ),
+                        gte(LiquidationCall.timestamp, startTimestamp),
+                        lte(LiquidationCall.timestamp, endTimestamp)
+                    )
+                ),
+                // Fetch raw Supply events for totalRawDeposited calculation
+                dbQuery.select().from(Supply).where(
+                    and(
+                        eq(Supply.onBehalfOf, user as `0x${string}`),
+                        eq(Supply.reserve, asset as `0x${string}`),
+                        gte(Supply.timestamp, startTimestamp),
+                        lte(Supply.timestamp, endTimestamp)
+                    )
+                ),
+                // Fetch raw Withdraw events for totalRawDeposited calculation (to subtract)
+                dbQuery.select().from(Withdraw).where(
+                    and(
+                        eq(Withdraw.user, user as `0x${string}`),
+                        eq(Withdraw.reserve, asset as `0x${string}`),
+                        gte(Withdraw.timestamp, startTimestamp),
+                        lte(Withdraw.timestamp, endTimestamp)
+                    )
+                ),
+                // Fetch raw Supply events BEFORE start timestamp for starting raw balance
+                dbQuery.select().from(Supply).where(
+                    and(
+                        eq(Supply.onBehalfOf, user as `0x${string}`),
+                        eq(Supply.reserve, asset as `0x${string}`),
+                        lte(Supply.timestamp, startTimestamp)
+                    )
+                ),
+                // Fetch raw Withdraw events BEFORE start timestamp for starting raw balance
+                dbQuery.select().from(Withdraw).where(
+                    and(
+                        eq(Withdraw.user, user as `0x${string}`),
+                        eq(Withdraw.reserve, asset as `0x${string}`),
+                        lte(Withdraw.timestamp, startTimestamp)
+                    )
+                ),
+                // Fetch raw Borrow events BEFORE start timestamp for starting raw balance
+                dbQuery.select().from(Borrow).where(
+                    and(
+                        eq(Borrow.onBehalfOf, user as `0x${string}`),
+                        eq(Borrow.reserve, asset as `0x${string}`),
+                        lte(Borrow.timestamp, startTimestamp)
+                    )
+                ),
+                // Fetch raw Repay events BEFORE start timestamp for starting raw balance
+                dbQuery.select().from(Repay).where(
+                    and(
+                        eq(Repay.user, user as `0x${string}`),
+                        eq(Repay.reserve, asset as `0x${string}`),
+                        lte(Repay.timestamp, startTimestamp)
+                    )
+                ),
                 // Get balances and events at start of period
                 getScaledBalanceWithEvents(context, user, asset, startTimestamp),
                 getScaledBorrowBalanceWithEvents(context, user, asset, startTimestamp),
@@ -687,6 +537,54 @@ export async function calculateUserYieldPositions(
             // Initialize scaled totals (raw transaction amounts, consistent across query periods)
             let totalScaledDeposited = startScaledSupplyBalance;
             let totalScaledBorrowed = startScaledBorrowBalance;
+
+            // Calculate starting raw balances (from events before period start)
+            let startRawDeposits = 0n;
+            let startRawBorrows = 0n;
+
+            // Sum raw deposit amounts from Supply events before start
+            for (const event of supplyEventsBeforeStart) {
+                startRawDeposits += event.amount;
+            }
+
+            // Subtract raw withdraw amounts from Withdraw events before start
+            for (const event of withdrawEventsBeforeStart) {
+                startRawDeposits -= event.amount;
+            }
+
+            // Sum raw borrow amounts from Borrow events before start
+            for (const event of borrowEventsBeforeStart) {
+                startRawBorrows += event.amount;
+            }
+
+            // Subtract raw repay amounts from Repay events before start
+            for (const event of repayEventsBeforeStart) {
+                startRawBorrows -= event.amount;
+            }
+
+            // Calculate raw transaction amounts (exact amounts from Supply/Withdraw/Borrow/Repay events)
+            let totalRawDeposited = 0n;
+            let totalRawBorrowed = 0n;
+
+            // Sum raw deposit amounts from Supply events
+            for (const event of supplyEvents) {
+                totalRawDeposited += event.amount;
+            }
+
+            // Subtract raw withdraw amounts from Withdraw events
+            for (const event of withdrawRawEvents) {
+                totalRawDeposited -= event.amount;
+            }
+
+            // Sum raw borrow amounts from Borrow events
+            for (const event of borrowEvents) {
+                totalRawBorrowed += event.amount;
+            }
+
+            // Subtract raw repay amounts from Repay events
+            for (const event of repayEvents) {
+                totalRawBorrowed -= event.amount;
+            }
 
             const events: EventDetail[] = [];
 
@@ -742,6 +640,34 @@ export async function calculateUserYieldPositions(
                 });
             }
 
+            // Process liquidation events during the period
+            // Liquidations affect both collateral (forced withdrawal) and debt (forced repayment)
+            for (const liquidation of liquidationEvents) {
+                // Check if this asset was the collateral asset (forced withdrawal)
+                if (liquidation.collateralAsset.toLowerCase() === asset.toLowerCase()) {
+                    totalWithdrawn += liquidation.liquidatedCollateralAmount;
+                    events.push({
+                        eventType: 'liquidation_collateral' as any,
+                        timestamp: Number(liquidation.timestamp),
+                        date: new Date(Number(liquidation.timestamp) * 1000).toISOString(),
+                        amount: liquidation.liquidatedCollateralAmount.toString(),
+                        txHash: liquidation.txHash
+                    });
+                }
+
+                // Check if this asset was the debt asset (forced repayment)
+                if (liquidation.debtAsset.toLowerCase() === asset.toLowerCase()) {
+                    totalRepaid += liquidation.debtToCover;
+                    events.push({
+                        eventType: 'liquidation_debt' as any,
+                        timestamp: Number(liquidation.timestamp),
+                        date: new Date(Number(liquidation.timestamp) * 1000).toISOString(),
+                        amount: liquidation.debtToCover.toString(),
+                        txHash: liquidation.txHash
+                    });
+                }
+            }
+
             // Sort events by timestamp for better readability
             events.sort((a, b) => a.timestamp - b.timestamp);
 
@@ -784,8 +710,10 @@ export async function calculateUserYieldPositions(
                 totalWithdrawn,
                 totalBorrowed,
                 totalRepaid,
-                totalScaledDeposited,  // NEW: Scaled deposit amounts (consistent across query periods)
-                totalScaledBorrowed,   // NEW: Scaled borrow amounts (consistent across query periods)
+                totalScaledDeposited,
+                totalScaledBorrowed,
+                totalRawDeposited,
+                totalRawBorrowed,
                 netDeposits,
                 netBorrows,
                 events,
@@ -793,8 +721,10 @@ export async function calculateUserYieldPositions(
                 starting_balances: {
                     deposits: startSupplyBalance,
                     borrows: startBorrowBalance,
-                    scaledDeposits: startScaledSupplyBalance,  // NEW: Scaled balance at period start
-                    scaledBorrows: startScaledBorrowBalance    // NEW: Scaled borrow balance at period start
+                    scaledDeposits: startScaledSupplyBalance,
+                    scaledBorrows: startScaledBorrowBalance,
+                    rawDeposits: startRawDeposits,
+                    rawBorrows: startRawBorrows
                 },
                 yieldSegments,
                 borrowCostSegments

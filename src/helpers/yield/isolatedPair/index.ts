@@ -11,10 +11,8 @@
 // Re-export constants
 export { EXCHANGE_PRECISION } from "./constants";
 
-// Re-export pair tracking functions
 export { getUserIsolatedPairs } from "./pairTracking";
 
-// Re-export balance query functions
 export {
     getIsolatedPairCollateralBalance,
     getIsolatedPairAssetShares,
@@ -22,13 +20,11 @@ export {
     convertSharesToAssets
 } from "./balanceQueries";
 
-// Re-export exchange rate functions
 export {
     calculateIsolatedPairExchangeRateAtTimestamp,
     getIsolatedPairExchangeRate
 } from "./exchangeRate";
 
-// Re-export position calculation functions
 export {
     calculateIsolatedPairPosition,
     calculateAllIsolatedPairPositions,
@@ -39,34 +35,22 @@ export type {
     IsolatedPairCustomPeriodPosition
 } from "./positionCalculations";
 
-// Re-export yield calculation functions
 export {
     calculateIsolatedPairYield,
     calculateAllIsolatedPairYields
 } from "./yieldCalculations";
 export type { IsolatedPairYield } from "./yieldCalculations";
 
-// Re-export time aggregation functions
 export {
     calculateDailyIsolatedPairYields,
-    calculateMonthlyIsolatedPairYields
 } from "./timeAggregations";
 export type {
     DailyIsolatedPairYield,
     MonthlyIsolatedPairYield
 } from "./timeAggregations";
 
-// Re-export caching utilities
 export { ExchangeRateCache } from "./exchangeRateCache";
 export { IsolatedPairBalanceCache } from "./balanceCache";
 
-// Re-export old custom period position functions (for backward compatibility)
-export {
-    calculateUserCustomPeriodIsolatedPositions
-} from "./customPeriodPositions";
-
-// Re-export period tracking functions
 export { getUserIsolatedPairsForPeriod } from "./periodTracking";
-
-// Note: getUserPairEvents is intentionally NOT exported as it's an internal helper
 

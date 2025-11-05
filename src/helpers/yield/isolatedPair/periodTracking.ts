@@ -108,14 +108,11 @@ export async function getUserIsolatedPairsForPeriod(
 }
 
 /**
- * OPTIMIZED: Batch check for pairs with activity during a time period
+ * Batch check for pairs with activity during a time period
  *
  * This function checks ALL pairs at once using SQL IN clauses, dramatically reducing
  * the number of database queries from O(n*6) to O(6) where n is the number of pairs.
  *
- * For a user with 5 pairs:
- * - Old approach: 5 pairs × 6 event types = 30 queries
- * - New approach: 6 queries total (one per event type for all pairs)
  *
  * @param context - Ponder context with database access
  * @param user - User address
@@ -244,7 +241,7 @@ async function checkBatchPairActivityDuringPeriod(
 }
 
 /**
- * OPTIMIZED: Batch check for pairs with non-zero balances at a specific timestamp
+ * Batch check for pairs with non-zero balances at a specific timestamp
  *
  * This function checks ALL pairs at once to see if the user has any non-zero balances
  * (collateral, asset shares, or borrow shares) at the given timestamp.

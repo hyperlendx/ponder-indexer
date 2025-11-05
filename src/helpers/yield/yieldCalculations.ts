@@ -1,4 +1,4 @@
-import { UserBalanceEvent, Borrow, Repay } from "ponder:schema";
+import { UserBalanceEvent, Borrow, Repay, LiquidationCall } from "ponder:schema";
 import { eq, and, gte, lte } from "ponder";
 import { calculateLiquidityIndexAtTimestamp, calculateActualBalance } from "../aave";
 import { getScaledBalanceAtTimestamp, getScaledBorrowBalanceAtTimestamp } from "./balanceQueries";
@@ -103,120 +103,6 @@ export async function createTimeSegments(
 }
 
 /**
- * Enhanced monthly yield calculation that handles intra-month positions
- * Breaks down the month into segments based on balance changes and calculates interest for each segment
- *
- * Algorithm:
- * 1. Get all balance events during the month
- * 2. Create time segments: [monthStart, event1, event2, ..., monthEnd]
- * 3. For each segment, calculate: (scaledBalance * liquidityIndexGrowth)
- * 4. Sum interest from all segments
- *
- * @param indexCache - Optional cache to avoid redundant liquidity index queries
- */
-export async function calculateSegmentedMonthlyYield(
-    context: any,
-    user: string,
-    asset: string,
-    startTimestamp: number,
-    endTimestamp: number,
-    indexCache?: LiquidityIndexCache
-): Promise<{
-    totalYield: bigint;
-    segments: Array<{
-        startTime: number;
-        endTime: number;
-        startDate: string;
-        endDate: string;
-        scaledBalance: bigint;
-        actualBalance: bigint;
-        startLiquidityIndex: bigint;
-        endLiquidityIndex: bigint;
-        segmentYield: bigint;
-        durationDays: number;
-    }>;
-}> {
-    // Get all balance events during the month, ordered chronologically
-    const dbQuery = context.db.sql || context.db;
-    const monthlyEvents = await dbQuery
-        .select()
-        .from(UserBalanceEvent)
-        .where(
-            and(
-                eq(UserBalanceEvent.user, user as `0x${string}`),
-                eq(UserBalanceEvent.asset, asset as `0x${string}`),
-                gte(UserBalanceEvent.timestamp, startTimestamp),
-                lte(UserBalanceEvent.timestamp, endTimestamp)
-            )
-        )
-        .orderBy(UserBalanceEvent.timestamp);
-
-    // Create time segments for interest calculation
-    const segments = await createTimeSegments(context, user, asset, startTimestamp, endTimestamp, monthlyEvents);
-
-    // Prefetch all liquidity indices for segments if cache provided
-    if (indexCache) {
-        const indexPrefetchList = [];
-        for (const segment of segments) {
-            indexPrefetchList.push(
-                { asset, timestamp: segment.startTime },
-                { asset, timestamp: segment.endTime }
-            );
-        }
-        await indexCache.prefetch(context, indexPrefetchList);
-    }
-
-    // Calculate interest for each segment and collect detailed information
-    let totalInterest = 0n;
-    const detailedSegments = [];
-
-    for (let i = 0; i < segments.length; i++) {
-        const segment = segments[i];
-        if (!segment) continue; // Skip if segment is undefined
-
-        const segmentInterest = await calculateSegmentInterest(context, asset, segment, indexCache);
-        totalInterest += segmentInterest;
-
-        // Get liquidity indices for this segment (use cache if available)
-        let startLiquidityIndex: bigint;
-        let endLiquidityIndex: bigint;
-
-        if (indexCache) {
-            [startLiquidityIndex, endLiquidityIndex] = await Promise.all([
-                indexCache.get(context, asset, segment.startTime),
-                indexCache.get(context, asset, segment.endTime)
-            ]);
-        } else {
-            [startLiquidityIndex, endLiquidityIndex] = await Promise.all([
-                calculateLiquidityIndexAtTimestamp(context, asset, segment.startTime),
-                calculateLiquidityIndexAtTimestamp(context, asset, segment.endTime)
-            ]);
-        }
-
-        const actualBalance = calculateActualBalance(segment.scaledBalance, startLiquidityIndex);
-        const durationDays = (Number(segment.endTime) - Number(segment.startTime)) / (24 * 60 * 60);
-
-        detailedSegments.push({
-            startTime: Number(segment.startTime),
-            endTime: Number(segment.endTime),
-            startDate: new Date(Number(segment.startTime) * 1000).toISOString(),
-            endDate: new Date(Number(segment.endTime) * 1000).toISOString(),
-            scaledBalance: segment.scaledBalance,
-            actualBalance,
-            startLiquidityIndex,
-            endLiquidityIndex,
-            segmentYield: segmentInterest,
-            durationDays: Math.round(durationDays * 100) / 100 // Round to 2 decimal places
-        });
-    }
-
-    return {
-        totalYield: totalInterest,
-        segments: detailedSegments
-    };
-}
-
-/**
  * Custom period yield calculation that handles intra-period positions
  * Adapts the monthly segmented calculation for arbitrary date ranges
  *
@@ -246,21 +132,61 @@ export async function calculateSegmentedCustomPeriodYield(
 }> {
     // Get all balance events during the period, ordered chronologically
     const dbQuery = context.db.sql || context.db;
-    const periodEvents = await dbQuery
-        .select()
-        .from(UserBalanceEvent)
-        .where(
-            and(
-                eq(UserBalanceEvent.user, user as `0x${string}`),
-                eq(UserBalanceEvent.asset, asset as `0x${string}`),
-                gte(UserBalanceEvent.timestamp, startTimestamp),
-                lte(UserBalanceEvent.timestamp, endTimestamp)
+    const [periodEvents, liquidationEvents] = await Promise.all([
+        dbQuery
+            .select()
+            .from(UserBalanceEvent)
+            .where(
+                and(
+                    eq(UserBalanceEvent.user, user as `0x${string}`),
+                    eq(UserBalanceEvent.asset, asset as `0x${string}`),
+                    gte(UserBalanceEvent.timestamp, startTimestamp),
+                    lte(UserBalanceEvent.timestamp, endTimestamp)
+                )
             )
-        )
-        .orderBy(UserBalanceEvent.timestamp);
+            .orderBy(UserBalanceEvent.timestamp),
+        // Get liquidations where this asset was the collateral
+        dbQuery
+            .select()
+            .from(LiquidationCall)
+            .where(
+                and(
+                    eq(LiquidationCall.user, user as `0x${string}`),
+                    eq(LiquidationCall.collateralAsset, asset as `0x${string}`),
+                    gte(LiquidationCall.timestamp, startTimestamp),
+                    lte(LiquidationCall.timestamp, endTimestamp)
+                )
+            )
+            .orderBy(LiquidationCall.timestamp)
+    ]);
+
+    // Combine balance events and liquidation events, treating liquidations as balance-changing events
+    // For liquidations, we need to create synthetic events with the new scaled balance after liquidation
+    const allEvents = [...periodEvents];
+
+    // Add liquidation events as synthetic balance events
+    for (const liquidation of liquidationEvents) {
+        // Get the scaled balance at the liquidation timestamp (after accounting for the liquidation)
+        const scaledBalanceAfterLiquidation = await getScaledBalanceAtTimestamp(
+            context,
+            user,
+            asset,
+            Number(liquidation.timestamp)
+        );
+
+        allEvents.push({
+            timestamp: liquidation.timestamp,
+            scaledBalance: scaledBalanceAfterLiquidation,
+            eventType: 'liquidation',
+            txHash: liquidation.txHash
+        } as any);
+    }
+
+    // Sort all events by timestamp
+    allEvents.sort((a, b) => Number(a.timestamp) - Number(b.timestamp));
 
     // Create time segments for interest calculation
-    const segments = await createTimeSegments(context, user, asset, startTimestamp, endTimestamp, periodEvents);
+    const segments = await createTimeSegments(context, user, asset, startTimestamp, endTimestamp, allEvents);
 
     // Prefetch all liquidity indices for segments if cache provided
     if (indexCache) {
@@ -490,7 +416,7 @@ export async function calculateSegmentedCustomPeriodBorrowCost(
     // Get all borrow and repay events during the period, ordered chronologically
     const dbQuery = context.db.sql || context.db;
 
-    const [borrowEvents, repayEvents] = await Promise.all([
+    const [borrowEvents, repayEvents, liquidationEvents] = await Promise.all([
         dbQuery.select().from(Borrow).where(
             and(
                 eq(Borrow.onBehalfOf, user as `0x${string}`),
@@ -506,13 +432,28 @@ export async function calculateSegmentedCustomPeriodBorrowCost(
                 gte(Repay.timestamp, startTimestamp),
                 lte(Repay.timestamp, endTimestamp)
             )
-        ).orderBy(Repay.timestamp)
+        ).orderBy(Repay.timestamp),
+        // Get liquidations where this asset was the debt asset
+        dbQuery.select().from(LiquidationCall).where(
+            and(
+                eq(LiquidationCall.user, user as `0x${string}`),
+                eq(LiquidationCall.debtAsset, asset as `0x${string}`),
+                gte(LiquidationCall.timestamp, startTimestamp),
+                lte(LiquidationCall.timestamp, endTimestamp)
+            )
+        ).orderBy(LiquidationCall.timestamp)
     ]);
 
     // Combine and sort events
+    // Treat liquidations as repay events (forced repayment)
     const allEvents = [
         ...borrowEvents.map((e: any) => ({ ...e, eventType: 'borrow' as const })),
-        ...repayEvents.map((e: any) => ({ ...e, eventType: 'repay' as const }))
+        ...repayEvents.map((e: any) => ({ ...e, eventType: 'repay' as const })),
+        ...liquidationEvents.map((e: any) => ({
+            ...e,
+            eventType: 'repay' as const,
+            amount: e.debtToCover  // Use debtToCover as the repay amount
+        }))
     ].sort((a, b) => Number(a.timestamp) - Number(b.timestamp));
 
     // Create time segments for borrow cost calculation

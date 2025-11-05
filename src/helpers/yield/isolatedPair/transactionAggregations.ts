@@ -11,7 +11,8 @@ import {
     AddCollateralIsolated,
     RemoveCollateralIsolated,
     DepositIsolated,
-    WithdrawIsolated
+    WithdrawIsolated,
+    LiquidateIsolated
 } from "ponder:schema";
 import { eq, and, gte, lte } from "ponder";
 import { convertSharesToAssets } from "./balanceQueries";
@@ -159,24 +160,41 @@ export async function calculateTotalRepaid(
     endTimestamp: number
 ): Promise<bigint> {
     const dbQuery = context.db.sql || context.db;
-    
-    const repays = await dbQuery.select().from(RepayAssetIsolated).where(
-        and(
-            eq(RepayAssetIsolated.borrower, user as `0x${string}`),
-            eq(RepayAssetIsolated.pair, pair as `0x${string}`),
-            gte(RepayAssetIsolated.timestamp, startTimestamp),
-            lte(RepayAssetIsolated.timestamp, endTimestamp)
+
+    const [repays, liquidationEvents] = await Promise.all([
+        dbQuery.select().from(RepayAssetIsolated).where(
+            and(
+                eq(RepayAssetIsolated.borrower, user as `0x${string}`),
+                eq(RepayAssetIsolated.pair, pair as `0x${string}`),
+                gte(RepayAssetIsolated.timestamp, startTimestamp),
+                lte(RepayAssetIsolated.timestamp, endTimestamp)
+            )
+        ),
+        // Get liquidation events where user's borrow was liquidated (forced repayment)
+        dbQuery.select().from(LiquidateIsolated).where(
+            and(
+                eq(LiquidateIsolated.borrower, user as `0x${string}`),
+                eq(LiquidateIsolated.pair, pair as `0x${string}`),
+                gte(LiquidateIsolated.timestamp, startTimestamp),
+                lte(LiquidateIsolated.timestamp, endTimestamp)
+            )
         )
-    );
-    
+    ]);
+
     let totalRepaid = 0n;
-    
+
     for (const repay of repays) {
         // Convert shares to asset amount using the exchange rate at time of repay
         const assetAmount = convertSharesToAssets(repay.shares, repay.exchangeRate);
         totalRepaid += assetAmount;
     }
-    
+
+    // Add liquidated borrow amounts (forced repayment)
+    for (const liquidation of liquidationEvents) {
+        // amountLiquidatorToRepay is the actual asset amount repaid by liquidator
+        totalRepaid += liquidation.amountLiquidatorToRepay;
+    }
+
     return totalRepaid;
 }
 
@@ -239,22 +257,38 @@ export async function calculateTotalCollateralRemoved(
     endTimestamp: number
 ): Promise<bigint> {
     const dbQuery = context.db.sql || context.db;
-    
-    const removeEvents = await dbQuery.select().from(RemoveCollateralIsolated).where(
-        and(
-            eq(RemoveCollateralIsolated.borrower, user as `0x${string}`),
-            eq(RemoveCollateralIsolated.pair, pair as `0x${string}`),
-            gte(RemoveCollateralIsolated.timestamp, startTimestamp),
-            lte(RemoveCollateralIsolated.timestamp, endTimestamp)
+
+    const [removeEvents, liquidationEvents] = await Promise.all([
+        dbQuery.select().from(RemoveCollateralIsolated).where(
+            and(
+                eq(RemoveCollateralIsolated.borrower, user as `0x${string}`),
+                eq(RemoveCollateralIsolated.pair, pair as `0x${string}`),
+                gte(RemoveCollateralIsolated.timestamp, startTimestamp),
+                lte(RemoveCollateralIsolated.timestamp, endTimestamp)
+            )
+        ),
+        // Get liquidation events where user's collateral was liquidated (forced removal)
+        dbQuery.select().from(LiquidateIsolated).where(
+            and(
+                eq(LiquidateIsolated.borrower, user as `0x${string}`),
+                eq(LiquidateIsolated.pair, pair as `0x${string}`),
+                gte(LiquidateIsolated.timestamp, startTimestamp),
+                lte(LiquidateIsolated.timestamp, endTimestamp)
+            )
         )
-    );
-    
+    ]);
+
     let totalRemoved = 0n;
-    
+
     for (const event of removeEvents) {
         totalRemoved += event.collateralAmount;
     }
-    
+
+    // Add liquidated collateral (forced removal)
+    for (const liquidation of liquidationEvents) {
+        totalRemoved += liquidation.collateralForLiquidator;
+    }
+
     return totalRemoved;
 }
 

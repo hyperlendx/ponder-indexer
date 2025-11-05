@@ -13,7 +13,6 @@ import { EXCHANGE_PRECISION } from "./constants";
 import {
     getVaultStateAtTimestamp,
     calculateExchangeRateFromVaultState,
-    getCurrentVaultState,
 } from "./vaultState";
 
 /**
@@ -69,42 +68,6 @@ export async function calculateIsolatedPairExchangeRate(
 
     } catch (error: any) {
         console.error(`Error calculating exchange rate for pair ${pair} at timestamp ${targetTimestamp}:`, error);
-        return EXCHANGE_PRECISION;
-    }
-}
-
-/**
- * Get the current exchange rate for a pair (at latest block)
- *
- * This is useful for getting the most up-to-date exchange rate without
- * specifying a target timestamp.
- *
- * @param context - Ponder context with database access
- * @param pair - Isolated pair address
- * @returns Current exchange rate (1e18 precision)
- */
-export async function getCurrentExchangeRate(
-    context: any,
-    pair: string
-): Promise<bigint> {
-    const { db } = context;
-
-    try {
-        // Get the most recent vault state
-        const vaultState = await getCurrentVaultState(db, pair);
-
-        if (!vaultState) {
-            return EXCHANGE_PRECISION; // Default 1:1
-        }
-
-        // Calculate exchange rate from vault state
-        return calculateExchangeRateFromVaultState(
-            vaultState.totalAssetAmount,
-            vaultState.totalAssetShares
-        );
-
-    } catch (error: any) {
-        console.error(`Error getting current exchange rate for pair ${pair}:`, error);
         return EXCHANGE_PRECISION;
     }
 }

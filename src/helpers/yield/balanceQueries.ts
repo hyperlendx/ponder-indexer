@@ -1,7 +1,5 @@
-import { UserBalanceEvent, UserPosition, Borrow, Repay } from "ponder:schema";
+import { UserBalanceEvent, UserPosition, Borrow, Repay, LiquidationCall } from "ponder:schema";
 import { eq, and, lte, desc, gte } from "ponder";
-import { calculateVariableBorrowIndexAtTimestamp } from "../aave/borrowIndex";
-import { calculateActualBalance } from "../aave";
 
 /**
  * Enhanced balance result that includes both balance and contributing events
@@ -21,6 +19,9 @@ export interface BalanceWithEvents {
  * Get scaled balance at a specific timestamp by looking at balance events
  * Finds the most recent UserBalanceEvent at or before the target timestamp
  * and returns the scaled balance from that event.
+ *
+ * IMPORTANT: This function now accounts for liquidations. When a user's collateral
+ * is liquidated, the liquidatedCollateralAmount is subtracted from their balance.
  */
 export async function getScaledBalanceAtTimestamp(
     context: any,
@@ -54,8 +55,44 @@ export async function getScaledBalanceAtTimestamp(
         }
 
         const mostRecentEvent = events[0];
+        let scaledBalance = BigInt(mostRecentEvent.scaledBalance);
 
-        return BigInt(mostRecentEvent.scaledBalance);
+        // Account for liquidations: subtract liquidated collateral amounts
+        // Query all liquidations where this user's collateral (this asset) was liquidated
+        const liquidations = await dbQuery
+            .select()
+            .from(LiquidationCall)
+            .where(
+                and(
+                    eq(LiquidationCall.user, user as `0x${string}`),
+                    eq(LiquidationCall.collateralAsset, asset as `0x${string}`),
+                    lte(LiquidationCall.timestamp, timestamp)
+                )
+            );
+
+        // Subtract liquidated collateral amounts
+        // Note: liquidatedCollateralAmount is in actual token amounts, not scaled
+        // We need to convert it to scaled balance by dividing by the liquidity index at liquidation time
+        for (const liquidation of liquidations) {
+            // Import the function to calculate liquidity index
+            const { calculateLiquidityIndexAtTimestamp } = await import("../aave/liquidityIndex");
+
+            // Get liquidity index at the time of liquidation
+            const liquidityIndexAtLiquidation = await calculateLiquidityIndexAtTimestamp(
+                context,
+                asset,
+                Number(liquidation.timestamp)
+            );
+
+            // Convert actual liquidated amount to scaled amount
+            // scaledAmount = actualAmount * RAY / liquidityIndex
+            const RAY = 1000000000000000000000000000n; // 1e27
+            const scaledLiquidatedAmount = (liquidation.liquidatedCollateralAmount * RAY) / liquidityIndexAtLiquidation;
+
+            scaledBalance -= scaledLiquidatedAmount;
+        }
+
+        return scaledBalance > 0n ? scaledBalance : 0n;
 
     } catch (error) {
         console.error(`❌ Error getting scaled balance at timestamp for user ${user}, asset ${asset}:`, error);
@@ -116,54 +153,6 @@ export async function getAssetsWithBalanceAtTimestamp(
 }
 
 /**
- * Get all unique assets that a user had positions in during a specific month
- * This looks at what positions were active at the start of the month, plus any new positions opened during the month
- */
-export async function getUserAssetsForMonth(
-    context: any,
-    user: string,
-    startTimestamp: number,
-    endTimestamp: number
-): Promise<string[]> {
-    const { db } = context;
-
-    try {
-        const assetsWithPositions = new Set<string>();
-
-        // 1. Find all assets where user had non-zero scaled balance at the START of the month
-        // This catches existing positions that were already open
-        const startOfMonthAssets = await getAssetsWithBalanceAtTimestamp(context, user, startTimestamp);
-        startOfMonthAssets.forEach(asset => {
-            assetsWithPositions.add(asset);
-        });
-
-        // 2. Find all assets where user had balance events DURING the month
-        // This catches new positions opened during the month
-        const dbQuery = db.sql || db;
-        const eventsThisMonth = await dbQuery
-            .select()
-            .from(UserBalanceEvent)
-            .where(
-                and(
-                    eq(UserBalanceEvent.user, user as `0x${string}`),
-                    gte(UserBalanceEvent.timestamp, startTimestamp),
-                    lte(UserBalanceEvent.timestamp, endTimestamp)
-                )
-            );
-
-        eventsThisMonth.forEach((event: any) => {
-            assetsWithPositions.add(event.asset);
-        });
-
-        return Array.from(assetsWithPositions);
-
-    } catch (error) {
-        console.error(`❌ Error getting user assets for month:`, error);
-        return [];
-    }
-}
-
-/**
  * Get all assets a user had positions in during a custom time period
  * Similar to getUserAssetsForMonth but for arbitrary date ranges
  */
@@ -208,46 +197,6 @@ export async function getUserAssetsForPeriod(
     } catch (error) {
         console.error(`❌ Error getting user assets for custom period:`, error);
         return [];
-    }
-}
-
-/**
- * Get the maximum scaled balance the user had during the month
- * This helps explain yield when start/end balances are 0
- */
-export async function getMaxBalanceDuringMonth(
-    context: any,
-    user: string,
-    asset: string,
-    startTimestamp: number,
-    endTimestamp: number
-): Promise<bigint> {
-    const { db } = context;
-
-    try {
-        const dbQuery = db.sql || db;
-        const events = await dbQuery
-            .select()
-            .from(UserBalanceEvent)
-            .where(
-                and(
-                    eq(UserBalanceEvent.user, user as `0x${string}`),
-                    eq(UserBalanceEvent.asset, asset as `0x${string}`),
-                    gte(UserBalanceEvent.timestamp, startTimestamp),
-                    lte(UserBalanceEvent.timestamp, endTimestamp)
-                )
-            );
-
-        // Include start balance
-        const startBalance = await getScaledBalanceAtTimestamp(context, user, asset, startTimestamp);
-        // @ts-ignore
-        const allBalances = [startBalance, ...events.map(e => BigInt(e.scaledBalance))];
-
-        return allBalances.reduce((max, current) => current > max ? current : max, 0n);
-
-    } catch (error) {
-        console.error(`Error getting max balance during month:`, error);
-        return 0n;
     }
 }
 
@@ -377,7 +326,11 @@ export async function getMaxBorrowBalanceDuringPeriod(
  * Algorithm:
  * 1. Get all borrow events up to the timestamp
  * 2. Get all repay events up to the timestamp
- * 3. Calculate: scaledBorrowBalance = Σ(borrows) - Σ(repays)
+ * 3. Get all liquidation events where debt was repaid (debtToCover)
+ * 4. Calculate: scaledBorrowBalance = Σ(borrows) - Σ(repays) - Σ(liquidated debt)
+ *
+ * IMPORTANT: This function now accounts for liquidations. When a user's debt
+ * is liquidated, the debtToCover is subtracted from their borrow balance.
  */
 export async function getScaledBorrowBalanceAtTimestamp(
     context: any,
@@ -415,6 +368,18 @@ export async function getScaledBorrowBalanceAtTimestamp(
                 )
             );
 
+        // Get all liquidation events where this user's debt (this asset) was liquidated
+        const liquidations = await dbQuery
+            .select()
+            .from(LiquidationCall)
+            .where(
+                and(
+                    eq(LiquidationCall.user, user as `0x${string}`),
+                    eq(LiquidationCall.debtAsset, asset as `0x${string}`),
+                    lte(LiquidationCall.timestamp, timestamp)
+                )
+            );
+
         // Calculate scaled borrow balance
         let scaledBorrowBalance = 0n;
 
@@ -424,102 +389,34 @@ export async function getScaledBorrowBalanceAtTimestamp(
 
         for (const event of repayEvents) {
             scaledBorrowBalance -= event.amount;
+        }
+
+        // Subtract liquidated debt amounts
+        // Note: debtToCover is in actual token amounts, not scaled
+        // We need to convert it to scaled balance by dividing by the borrow index at liquidation time
+        for (const liquidation of liquidations) {
+            // Import the function to calculate borrow index
+            const { calculateVariableBorrowIndexAtTimestamp } = await import("../aave/borrowIndex");
+
+            // Get borrow index at the time of liquidation
+            const borrowIndexAtLiquidation = await calculateVariableBorrowIndexAtTimestamp(
+                context,
+                asset,
+                Number(liquidation.timestamp)
+            );
+
+            // Convert actual debt amount to scaled amount
+            // scaledAmount = actualAmount * RAY / borrowIndex
+            const RAY = 1000000000000000000000000000n; // 1e27
+            const scaledDebtAmount = (liquidation.debtToCover * RAY) / borrowIndexAtLiquidation;
+
+            scaledBorrowBalance -= scaledDebtAmount;
         }
 
         return scaledBorrowBalance > 0n ? scaledBorrowBalance : 0n;
 
     } catch (error) {
         console.error(`❌ Error getting scaled borrow balance at timestamp for user ${user}, asset ${asset}:`, error);
-        return 0n;
-    }
-}
-
-/**
- * Get borrowed balance at a specific timestamp with accrued interest
- *
- * This function properly calculates the borrowed amount including accrued interest
- * by using the variable borrow index, following AAVE's methodology.
- *
- * Algorithm:
- * 1. Get all borrow and repay events up to the timestamp
- * 2. Calculate scaled borrow balance (constant value)
- * 3. Get variable borrow index at the target timestamp
- * 4. Calculate actual borrowed amount: scaledBorrow * variableBorrowIndex / RAY
- *
- * Note: In AAVE, borrow amounts are stored as scaled values and grow over time
- * through the increasing variableBorrowIndex, similar to how supply balances work.
- */
-export async function getBorrowedBalanceAtTimestamp(
-    context: any,
-    user: string,
-    asset: string,
-    timestamp: number
-): Promise<bigint> {
-    const { db } = context;
-    const dbQuery = db.sql || db;
-
-    try {
-        // Get all borrow events up to timestamp
-        const borrowEvents = await dbQuery
-            .select()
-            .from(Borrow)
-            .where(
-                and(
-                    eq(Borrow.onBehalfOf, user as `0x${string}`),
-                    eq(Borrow.reserve, asset as `0x${string}`),
-                    lte(Borrow.timestamp, timestamp)
-                )
-            );
-
-        // Get all repay events up to timestamp
-        const repayEvents = await dbQuery
-            .select()
-            .from(Repay)
-            .where(
-                and(
-                    eq(Repay.user, user as `0x${string}`),
-                    eq(Repay.reserve, asset as `0x${string}`),
-                    lte(Repay.timestamp, timestamp)
-                )
-            );
-
-        // Calculate scaled borrow balance
-        // In AAVE, borrow amounts are stored as scaled values (constant)
-        // The actual borrowed amount grows over time via the variableBorrowIndex
-        let scaledBorrowBalance = 0n;
-
-        for (const event of borrowEvents) {
-            scaledBorrowBalance += event.amount;
-        }
-
-        for (const event of repayEvents) {
-            scaledBorrowBalance -= event.amount;
-        }
-
-        // If no net borrowed amount, return 0
-        if (scaledBorrowBalance <= 0n) {
-            return 0n;
-        }
-
-        // Get the variable borrow index at the target timestamp
-        const variableBorrowIndex = await calculateVariableBorrowIndexAtTimestamp(
-            context,
-            asset,
-            timestamp
-        );
-
-        // Calculate actual borrowed amount with accrued interest
-        // Formula: actualBorrow = scaledBorrow * variableBorrowIndex / RAY
-        const actualBorrowedBalance = calculateActualBalance(
-            scaledBorrowBalance,
-            variableBorrowIndex
-        );
-
-        return actualBorrowedBalance > 0n ? actualBorrowedBalance : 0n;
-
-    } catch (error) {
-        console.error(`❌ Error calculating borrowed balance at timestamp for user ${user}, asset ${asset}:`, error);
-        // Return 0 as fallback to prevent calculation errors
         return 0n;
     }
 }
@@ -666,13 +563,13 @@ export async function getScaledBalanceWithEvents(
         const balance = BigInt(events[0].scaledBalance);
 
         // Format all events for response
-        const formattedEvents = events.map(event => ({
+        const formattedEvents = events.map((event: any) => ({
             eventType: event.eventType as 'deposit' | 'withdraw' | 'transfer_in' | 'transfer_out' | 'borrow' | 'repay',
             timestamp: Number(event.timestamp),
             date: new Date(Number(event.timestamp) * 1000).toISOString(),
             amount: event.transactionAmount.toString(),
             txHash: event.txHash
-        })).sort((a, b) => a.timestamp - b.timestamp);
+        })).sort((a: any, b: any) => a.timestamp - b.timestamp);
 
         return { balance, events: formattedEvents };
 
