@@ -22,7 +22,11 @@ export async function getCurrentVaultState(
         .select()
         .from(IsolatedPairVaultState)
         .where(eq(IsolatedPairVaultState.pair, pair as `0x${string}`))
-        .orderBy(desc(IsolatedPairVaultState.timestamp))
+        .orderBy(
+            desc(IsolatedPairVaultState.timestamp),
+            desc(IsolatedPairVaultState.blockNumber),
+            desc(IsolatedPairVaultState.id)
+        )
         .limit(1);
 
     if (!states || states.length === 0) {
@@ -56,7 +60,11 @@ export async function getVaultStateAtTimestamp(
                 lte(IsolatedPairVaultState.timestamp, targetTimestamp)
             )
         )
-        .orderBy(desc(IsolatedPairVaultState.timestamp), desc(IsolatedPairVaultState.blockNumber))
+        .orderBy(
+            desc(IsolatedPairVaultState.timestamp),
+            desc(IsolatedPairVaultState.blockNumber),
+            desc(IsolatedPairVaultState.id)
+        )
         .limit(1);
 
     if (!states || states.length === 0) {
