@@ -568,6 +568,7 @@ export const UserBalanceEvent = onchainTable(
         timestamp: t.integer(),
         blockNumber: t.bigint(),
         liquidityIndex: t.bigint(),
+        assetPrice: t.bigint(), // Oracle price of the asset at the time of the event (8 decimals precision)
     }),
     (table) => ({
         userIdx: index().on(table.user),

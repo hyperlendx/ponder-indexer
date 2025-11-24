@@ -12,6 +12,8 @@ import { calculateSegmentedIsolatedPairYield, calculateSegmentedIsolatedPairBorr
 import { getUserIsolatedPairs } from "./pairTracking";
 import { ExchangeRateCache } from "./exchangeRateCache";
 import { IsolatedPairBalanceCache } from "./balanceCache";
+import { getDecimals } from "../../getDecimals";
+import { calculateUSDValueNumber } from "../../usdCalculations";
 
 /**
  * Daily yield data structure
@@ -41,11 +43,17 @@ export interface DailyIsolatedPairYield {
     date: string;
     timestamp: number;
     dailyYield: bigint;
+    assetYieldUSD: string;   // USD value of daily asset yield
+    borrowCostUSD: string;   // USD value of daily borrow cost
+    netYieldUSD: string;     // USD value of daily net yield
     pairs: Array<{
         pair: string;
         assetYield: bigint;      // Can be negative (value loss)
         borrowCost: bigint;      // Can be negative (debt reduction = gain)
         netYield: bigint;        // assetYield - borrowCost
+        assetYieldUSD: string;   // USD value of asset yield
+        borrowCostUSD: string;   // USD value of borrow cost
+        netYieldUSD: string;     // USD value of net yield
     }>;
 }
 
@@ -167,11 +175,17 @@ export async function calculateDailyIsolatedPairYields(
         date: string;
         timestamp: number;
         dailyYield: bigint;
+        assetYieldUSD: number;
+        borrowCostUSD: number;
+        netYieldUSD: number;
         pairs: Map<string, {
             pair: string;
             assetYield: bigint;
             borrowCost: bigint;
             netYield: bigint;
+            assetYieldUSD: number;
+            borrowCostUSD: number;
+            netYieldUSD: number;
         }>;
     }>();
 
@@ -191,6 +205,9 @@ export async function calculateDailyIsolatedPairYields(
             date: dateStr,
             timestamp: dayTimestamp,
             dailyYield: 0n,
+            assetYieldUSD: 0,
+            borrowCostUSD: 0,
+            netYieldUSD: 0,
             pairs: new Map()
         });
         currentDate.setUTCDate(currentDate.getUTCDate() + 1);
@@ -199,22 +216,28 @@ export async function calculateDailyIsolatedPairYields(
     // Process each pair and assign yield to appropriate days
     for (const pair of pairs) {
         try {
+            // Get decimals for USD calculations
+            const decimals = await getDecimals(context, pair) || 18;
+
             // Initialize this pair in all days with zero yield
             for (const [dateStr, dayData] of dailyResults) {
                 dayData.pairs.set(pair, {
                     pair,
                     assetYield: 0n,
                     borrowCost: 0n,
-                    netYield: 0n
+                    netYield: 0n,
+                    assetYieldUSD: 0,
+                    borrowCostUSD: 0,
+                    netYieldUSD: 0
                 });
             }
 
             // Get segmented yield data for this pair over the entire period
             const segmentedAssetResult = await calculateSegmentedIsolatedPairYield(
-                context, user, pair, startTimestamp, endTimestampForDays, exchangeRateCache
+                context, user, pair, startTimestamp, endTimestampForDays, decimals, exchangeRateCache
             );
             const segmentedBorrowResult = await calculateSegmentedIsolatedPairBorrowCost(
-                context, user, pair, startTimestamp, endTimestampForDays, exchangeRateCache
+                context, user, pair, startTimestamp, endTimestampForDays, decimals, exchangeRateCache
             );
 
             // Process asset yield segments and assign to appropriate days
@@ -236,7 +259,16 @@ export async function calculateDailyIsolatedPairYields(
     // Convert results to array format and filter out zero-yield pairs
     for (const [dateStr, dayData] of dailyResults) {
         const nonZeroPairYields = Array.from(dayData.pairs.values())
-            .filter(py => py.netYield !== 0n);
+            .filter(py => py.netYield !== 0n)
+            .map(py => ({
+                pair: py.pair,
+                assetYield: py.assetYield,
+                borrowCost: py.borrowCost,
+                netYield: py.netYield,
+                assetYieldUSD: py.assetYieldUSD.toFixed(4),
+                borrowCostUSD: py.borrowCostUSD.toFixed(4),
+                netYieldUSD: py.netYieldUSD.toFixed(4)
+            }));
 
         // Calculate total daily yield
         const dailyYield = Array.from(dayData.pairs.values())
@@ -246,6 +278,9 @@ export async function calculateDailyIsolatedPairYields(
             date: dayData.date,
             timestamp: dayData.timestamp,
             dailyYield,
+            assetYieldUSD: dayData.assetYieldUSD.toFixed(4),
+            borrowCostUSD: dayData.borrowCostUSD.toFixed(4),
+            netYieldUSD: dayData.netYieldUSD.toFixed(4),
             pairs: nonZeroPairYields
         });
     }
@@ -283,9 +318,23 @@ function assignSegmentYieldToDays(
             if (yieldType === 'asset') {
                 pairData.assetYield += segment.segmentYield;
                 pairData.netYield += segment.segmentYield;
+
+                // Add USD values
+                const segmentYieldUSD = parseFloat(segment.segmentYieldUSD || "0");
+                pairData.assetYieldUSD += segmentYieldUSD;
+                pairData.netYieldUSD += segmentYieldUSD;
+                dayData.assetYieldUSD += segmentYieldUSD;
+                dayData.netYieldUSD += segmentYieldUSD;
             } else {
                 pairData.borrowCost += segment.segmentBorrowCost;
                 pairData.netYield -= segment.segmentBorrowCost;
+
+                // Add USD values
+                const segmentBorrowCostUSD = parseFloat(segment.segmentBorrowCostUSD || "0");
+                pairData.borrowCostUSD += segmentBorrowCostUSD;
+                pairData.netYieldUSD -= segmentBorrowCostUSD;
+                dayData.borrowCostUSD += segmentBorrowCostUSD;
+                dayData.netYieldUSD -= segmentBorrowCostUSD;
             }
             dayData.dailyYield += (yieldType === 'asset' ? segment.segmentYield : -segment.segmentBorrowCost);
         }
@@ -293,6 +342,9 @@ function assignSegmentYieldToDays(
         // Segment spans multiple days - distribute proportionally by time
         const totalDuration = segment.endTime - segment.startTime;
         const segmentYieldValue = yieldType === 'asset' ? segment.segmentYield : segment.segmentBorrowCost;
+        const segmentUSDValue = yieldType === 'asset'
+            ? parseFloat(segment.segmentYieldUSD || "0")
+            : parseFloat(segment.segmentBorrowCostUSD || "0");
 
         // Calculate how much of the segment falls into each day
         const segmentDays = Math.ceil((segmentEndDate.getTime() - segmentStartDate.getTime()) / (24 * 60 * 60 * 1000)) + 1;
@@ -313,15 +365,32 @@ function assignSegmentYieldToDays(
                 const overlapDuration = overlapEnd - overlapStart;
                 const proportionalYield = (segmentYieldValue * BigInt(overlapDuration)) / BigInt(totalDuration);
 
+                // Calculate proportional USD value for this day's portion
+                const proportionalUSD = totalDuration > 0
+                    ? (segmentUSDValue * overlapDuration) / totalDuration
+                    : 0;
+
                 const pairData = dayData.pairs.get(pair)!;
                 if (yieldType === 'asset') {
                     pairData.assetYield += proportionalYield;
                     pairData.netYield += proportionalYield;
                     dayData.dailyYield += proportionalYield;
+
+                    // Add USD values
+                    pairData.assetYieldUSD += proportionalUSD;
+                    pairData.netYieldUSD += proportionalUSD;
+                    dayData.assetYieldUSD += proportionalUSD;
+                    dayData.netYieldUSD += proportionalUSD;
                 } else {
                     pairData.borrowCost += proportionalYield;
                     pairData.netYield -= proportionalYield;
                     dayData.dailyYield -= proportionalYield;
+
+                    // Add USD values
+                    pairData.borrowCostUSD += proportionalUSD;
+                    pairData.netYieldUSD -= proportionalUSD;
+                    dayData.borrowCostUSD += proportionalUSD;
+                    dayData.netYieldUSD -= proportionalUSD;
                 }
             }
         }

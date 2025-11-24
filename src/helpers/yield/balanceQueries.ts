@@ -1,4 +1,4 @@
-import { UserBalanceEvent, UserPosition, Borrow, Repay, LiquidationCall } from "ponder:schema";
+import { UserBalanceEvent, UserPosition, Borrow, Repay, LiquidationCall, Supply, Withdraw } from "ponder:schema";
 import { eq, and, lte, desc, gte } from "ponder";
 
 /**
@@ -12,6 +12,7 @@ export interface BalanceWithEvents {
         date: string;
         amount: string;
         txHash: string;
+        assetPrice?: string; // Oracle price of the asset at the time of the event
     }>;
 }
 
@@ -530,7 +531,7 @@ export async function getUserBorrowedAssets(
  * @param user - User address
  * @param asset - Asset address
  * @param timestamp - Target timestamp
- * @returns Scaled balance and contributing events
+ * @returns Scaled balance and contributing events with asset prices
  */
 export async function getScaledBalanceWithEvents(
     context: any,
@@ -562,14 +563,44 @@ export async function getScaledBalanceWithEvents(
         // Get the most recent balance
         const balance = BigInt(events[0].scaledBalance);
 
-        // Format all events for response
-        const formattedEvents = events.map((event: any) => ({
-            eventType: event.eventType as 'deposit' | 'withdraw' | 'transfer_in' | 'transfer_out' | 'borrow' | 'repay',
-            timestamp: Number(event.timestamp),
-            date: new Date(Number(event.timestamp) * 1000).toISOString(),
-            amount: event.transactionAmount.toString(),
-            txHash: event.txHash
-        })).sort((a: any, b: any) => a.timestamp - b.timestamp);
+        // Fetch Supply and Withdraw events to get prices
+        // We need to match by txHash to get the correct price for each event
+        const [supplyEvents, withdrawEvents] = await Promise.all([
+            dbQuery.select().from(Supply).where(
+                and(
+                    eq(Supply.reserve, asset as `0x${string}`),
+                    lte(Supply.timestamp, timestamp)
+                )
+            ),
+            dbQuery.select().from(Withdraw).where(
+                and(
+                    eq(Withdraw.reserve, asset as `0x${string}`),
+                    lte(Withdraw.timestamp, timestamp)
+                )
+            )
+        ]);
+
+        // Create a map of txHash -> price for quick lookup
+        const priceMap = new Map<string, bigint>();
+        for (const supply of supplyEvents) {
+            priceMap.set(supply.txHash, supply.price);
+        }
+        for (const withdraw of withdrawEvents) {
+            priceMap.set(withdraw.txHash, withdraw.price);
+        }
+
+        // Format all events for response with prices
+        const formattedEvents = events.map((event: any) => {
+            const price = priceMap.get(event.txHash);
+            return {
+                eventType: event.eventType as 'deposit' | 'withdraw' | 'transfer_in' | 'transfer_out' | 'borrow' | 'repay',
+                timestamp: Number(event.timestamp),
+                date: new Date(Number(event.timestamp) * 1000).toISOString(),
+                amount: event.transactionAmount.toString(),
+                txHash: event.txHash,
+                assetPrice: price?.toString()
+            };
+        }).sort((a: any, b: any) => a.timestamp - b.timestamp);
 
         return { balance, events: formattedEvents };
 
@@ -634,7 +665,8 @@ export async function getScaledBorrowBalanceWithEvents(
                 timestamp: Number(event.timestamp),
                 date: new Date(Number(event.timestamp) * 1000).toISOString(),
                 amount: event.amount.toString(),
-                txHash: event.txHash
+                txHash: event.txHash,
+                assetPrice: event.price?.toString() // Borrow events already have price field
             });
         }
 
@@ -646,7 +678,8 @@ export async function getScaledBorrowBalanceWithEvents(
                 timestamp: Number(event.timestamp),
                 date: new Date(Number(event.timestamp) * 1000).toISOString(),
                 amount: event.amount.toString(),
-                txHash: event.txHash
+                txHash: event.txHash,
+                assetPrice: event.price?.toString() // Repay events already have price field
             });
         }
 

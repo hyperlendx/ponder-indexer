@@ -29,6 +29,7 @@ export interface BalanceWithEvents {
         date: string;
         amount: string;
         txHash: string;
+        assetPrice?: string; // Oracle price of the asset at the time of the event
     }>;
 }
 
@@ -321,7 +322,8 @@ export async function getIsolatedPairCollateralBalanceWithEvents(
             timestamp: Number(event.timestamp),
             date: new Date(Number(event.timestamp) * 1000).toISOString(),
             amount: event.collateralAmount.toString(),
-            txHash: event.txHash
+            txHash: event.txHash,
+            assetPrice: event.price?.toString() // AddCollateralIsolated events have price field
         });
     }
 
@@ -333,7 +335,8 @@ export async function getIsolatedPairCollateralBalanceWithEvents(
             timestamp: Number(event.timestamp),
             date: new Date(Number(event.timestamp) * 1000).toISOString(),
             amount: event.collateralAmount.toString(),
-            txHash: event.txHash
+            txHash: event.txHash,
+            assetPrice: event.price?.toString() // RemoveCollateralIsolated events have price field
         });
     }
 
@@ -390,7 +393,8 @@ export async function getIsolatedPairAssetSharesWithEvents(
             timestamp: Number(event.timestamp),
             date: new Date(Number(event.timestamp) * 1000).toISOString(),
             amount: event.assets.toString(),
-            txHash: event.txHash
+            txHash: event.txHash,
+            assetPrice: event.price?.toString() // DepositIsolated events have price field
         });
     }
 
@@ -402,7 +406,8 @@ export async function getIsolatedPairAssetSharesWithEvents(
             timestamp: Number(event.timestamp),
             date: new Date(Number(event.timestamp) * 1000).toISOString(),
             amount: event.assets.toString(),
-            txHash: event.txHash
+            txHash: event.txHash,
+            assetPrice: event.price?.toString() // WithdrawIsolated events have price field
         });
     }
 
@@ -459,7 +464,8 @@ export async function getIsolatedPairBorrowSharesWithEvents(
             timestamp: Number(event.timestamp),
             date: new Date(Number(event.timestamp) * 1000).toISOString(),
             amount: event.borrowAmount.toString(),
-            txHash: event.txHash
+            txHash: event.txHash,
+            assetPrice: event.price?.toString() // BorrowAssetIsolated events have price field
         });
     }
 
@@ -471,7 +477,8 @@ export async function getIsolatedPairBorrowSharesWithEvents(
             timestamp: Number(event.timestamp),
             date: new Date(Number(event.timestamp) * 1000).toISOString(),
             amount: event.amountToRepay.toString(),
-            txHash: event.txHash
+            txHash: event.txHash,
+            assetPrice: event.price?.toString() // RepayAssetIsolated events have price field
         });
     }
 

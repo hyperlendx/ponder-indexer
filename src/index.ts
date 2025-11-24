@@ -187,10 +187,7 @@ ponder.on("CorePool:Supply", async ({ event, context }) => {
 
     // Calculate scaled balance from deposit amount
     const scaledBalance = calculateScaledBalance(event.args.amount, currentLiquidityIndex);
-    console.log("event.args.onBehalfOf", event.args.onBehalfOf);
-    if (event.args.onBehalfOf.toLowerCase() === '0x4d48bec025de3ad0f06ab8b8562c685c373f83bb'.toLowerCase()) {
-        console.log("Scaled balance for 0x4d48bec025de3ad0f06ab8b8562c685c373f83bb:", scaledBalance.toString());
-    }
+
     // Update user position with scaled balance tracking
     await updateUserPosition(
         context,
@@ -200,7 +197,8 @@ ponder.on("CorePool:Supply", async ({ event, context }) => {
         'deposit',
         timestamp,
         event.transaction.hash,
-        blockNumber
+        blockNumber,
+        reservePrice // Pass the oracle price
     );
 });
 
@@ -275,7 +273,8 @@ ponder.on("CorePool:Withdraw", async ({ event, context }) => {
         'withdraw',
         timestamp,
         event.transaction.hash,
-        blockNumber
+        blockNumber,
+        reservePrice // Pass the oracle price
     );
 });
 

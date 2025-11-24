@@ -1,6 +1,6 @@
 /**
  * Isolated Pair Yield Calculations
- * 
+ *
  * Core yield calculation logic using segment-based approach.
  * Calculates yield by tracking how shares grow in value as exchange rates increase.
  */
@@ -16,7 +16,8 @@ import { EXCHANGE_PRECISION } from "./constants";
 import { ExchangeRateCache } from "./exchangeRateCache";
 import { IsolatedPairBalanceCache } from "./balanceCache";
 import { DepositIsolated, WithdrawIsolated, BorrowAssetIsolated, RepayAssetIsolated, LiquidateIsolated } from "ponder:schema";
-import { eq, and, gte, lte } from "ponder";
+import { eq, and, gte, lte, desc } from "ponder";
+import { calculateUSDValueNumber } from "../../usdCalculations";
 
 /**
  * Yield data for a single isolated pair over a time period
@@ -310,9 +311,11 @@ export async function calculateSegmentedIsolatedPairYield(
     pair: string,
     startTimestamp: number,
     endTimestamp: number,
+    decimals: number,
     exchangeRateCache?: ExchangeRateCache
 ): Promise<{
     totalYield: bigint;
+    totalYieldUSD: string;
     segments: Array<{
         startTime: number;
         endTime: number;
@@ -323,6 +326,7 @@ export async function calculateSegmentedIsolatedPairYield(
         startExchangeRate: bigint;
         endExchangeRate: bigint;
         segmentYield: bigint;
+        segmentYieldUSD: string;
         durationDays: number;
     }>;
 }> {
@@ -437,8 +441,25 @@ export async function calculateSegmentedIsolatedPairYield(
     ]);
     await rateCache.prefetch(context, prefetchList);
 
+    // Get the most recent price from DepositIsolated events for USD calculations
+    const recentEvent = await dbQuery
+        .select()
+        .from(DepositIsolated)
+        .where(
+            and(
+                eq(DepositIsolated.owner, user as `0x${string}`),
+                eq(DepositIsolated.pair, pair as `0x${string}`),
+                lte(DepositIsolated.timestamp, endTimestamp)
+            )
+        )
+        .orderBy(desc(DepositIsolated.timestamp))
+        .limit(1);
+
+    const currentPrice = recentEvent.length > 0 ? recentEvent[0].price : 0n;
+
     // Calculate yield for each segment and collect detailed information
     let totalYield = 0n;
+    let totalYieldUSD = 0;
     const detailedSegments = [];
 
     for (const segment of segments) {
@@ -454,6 +475,10 @@ export async function calculateSegmentedIsolatedPairYield(
         const segmentYield = (segment.assetShares * exchangeRateChange + EXCHANGE_PRECISION / 2n) / EXCHANGE_PRECISION;
         totalYield += segmentYield;
 
+        // Calculate USD value for this segment's yield
+        const segmentYieldUSD = calculateUSDValueNumber(segmentYield, currentPrice, decimals);
+        totalYieldUSD += segmentYieldUSD;
+
         // Use endExchangeRate to show actual asset value at end of segment (including yield earned)
         const actualAssetAmount = convertSharesToAssets(segment.assetShares, endExchangeRate);
         const durationDays = (Number(segment.endTime) - Number(segment.startTime)) / (24 * 60 * 60);
@@ -468,12 +493,14 @@ export async function calculateSegmentedIsolatedPairYield(
             startExchangeRate,
             endExchangeRate,
             segmentYield,
+            segmentYieldUSD: segmentYieldUSD.toFixed(4),
             durationDays: Math.round(durationDays * 100) / 100
         });
     }
 
     return {
         totalYield,
+        totalYieldUSD: totalYieldUSD.toFixed(4),
         segments: detailedSegments
     };
 }
@@ -495,9 +522,11 @@ export async function calculateSegmentedIsolatedPairBorrowCost(
     pair: string,
     startTimestamp: number,
     endTimestamp: number,
+    decimals: number,
     exchangeRateCache?: ExchangeRateCache
 ): Promise<{
     totalBorrowCost: bigint;
+    totalBorrowCostUSD: string;
     segments: Array<{
         startTime: number;
         endTime: number;
@@ -508,6 +537,7 @@ export async function calculateSegmentedIsolatedPairBorrowCost(
         startExchangeRate: bigint;
         endExchangeRate: bigint;
         segmentBorrowCost: bigint;
+        segmentBorrowCostUSD: string;
         durationDays: number;
     }>;
 }> {
@@ -625,8 +655,46 @@ export async function calculateSegmentedIsolatedPairBorrowCost(
     ]);
     await rateCache.prefetch(context, prefetchList);
 
+    // Get the most recent price from BorrowAssetIsolated events for USD calculations
+    const recentBorrow = await dbQuery
+        .select()
+        .from(BorrowAssetIsolated)
+        .where(
+            and(
+                eq(BorrowAssetIsolated.borrower, user as `0x${string}`),
+                eq(BorrowAssetIsolated.pair, pair as `0x${string}`),
+                lte(BorrowAssetIsolated.timestamp, endTimestamp)
+            )
+        )
+        .orderBy(desc(BorrowAssetIsolated.timestamp))
+        .limit(1);
+
+    let currentPrice = 0n;
+    if (recentBorrow.length > 0) {
+        currentPrice = recentBorrow[0].price;
+    } else {
+        // Fallback to RepayAssetIsolated events if no borrow events found
+        const recentRepay = await dbQuery
+            .select()
+            .from(RepayAssetIsolated)
+            .where(
+                and(
+                    eq(RepayAssetIsolated.payer, user as `0x${string}`),
+                    eq(RepayAssetIsolated.pair, pair as `0x${string}`),
+                    lte(RepayAssetIsolated.timestamp, endTimestamp)
+                )
+            )
+            .orderBy(desc(RepayAssetIsolated.timestamp))
+            .limit(1);
+
+        if (recentRepay.length > 0) {
+            currentPrice = recentRepay[0].price;
+        }
+    }
+
     // Calculate borrow cost for each segment and collect detailed information
     let totalBorrowCost = 0n;
+    let totalBorrowCostUSD = 0;
     const detailedSegments = [];
 
     for (const segment of segments) {
@@ -642,6 +710,10 @@ export async function calculateSegmentedIsolatedPairBorrowCost(
         const segmentBorrowCost = (segment.borrowShares * exchangeRateChange + EXCHANGE_PRECISION / 2n) / EXCHANGE_PRECISION;
         totalBorrowCost += segmentBorrowCost;
 
+        // Calculate USD value for this segment's borrow cost
+        const segmentBorrowCostUSD = calculateUSDValueNumber(segmentBorrowCost, currentPrice, decimals);
+        totalBorrowCostUSD += segmentBorrowCostUSD;
+
         // Use endExchangeRate to show actual borrow value at end of segment (including interest accrued)
         const actualBorrowAmount = convertSharesToAssets(segment.borrowShares, endExchangeRate);
         const durationDays = (Number(segment.endTime) - Number(segment.startTime)) / (24 * 60 * 60);
@@ -656,12 +728,14 @@ export async function calculateSegmentedIsolatedPairBorrowCost(
             startExchangeRate,
             endExchangeRate,
             segmentBorrowCost,
+            segmentBorrowCostUSD: segmentBorrowCostUSD.toFixed(4),
             durationDays: Math.round(durationDays * 100) / 100
         });
     }
 
     return {
         totalBorrowCost,
+        totalBorrowCostUSD: totalBorrowCostUSD.toFixed(4),
         segments: detailedSegments
     };
 }

@@ -56,7 +56,8 @@ export async function updateUserPosition(
     eventType: 'deposit' | 'withdraw' | 'transfer_in' | 'transfer_out',
     timestamp: number,
     txHash: string,
-    blockNumber: bigint
+    blockNumber: bigint,
+    assetPrice: bigint // Oracle price of the asset at the time of the event (8 decimals precision)
 ): Promise<void> {
     const { db } = context;
     const positionId = `${user}_${asset}`;
@@ -169,7 +170,8 @@ export async function updateUserPosition(
         eventType,
         timestamp,
         blockNumber,
-        liquidityIndex: currentLiquidityIndex
+        liquidityIndex: currentLiquidityIndex,
+        assetPrice // Oracle price at the time of the event
     });
 
     if (newScaledBalance === 0n) {

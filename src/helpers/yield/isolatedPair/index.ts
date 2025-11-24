@@ -54,3 +54,5 @@ export { IsolatedPairBalanceCache } from "./balanceCache";
 
 export { getUserIsolatedPairsForPeriod } from "./periodTracking";
 
+export { calculateUserDailyIsolatedPairPortfolioValue } from "./portfolioValue";
+

@@ -23,6 +23,10 @@ import { UserBalanceEvent, Borrow, Repay, LiquidationCall, Supply, Withdraw } fr
 import { eq, and, gte, lte, or } from "ponder";
 import { calculateSegmentedCustomPeriodYield, calculateSegmentedCustomPeriodBorrowCost } from "./yieldCalculations";
 import { LiquidityIndexCache } from "./liquidityIndexCache";
+import { getDecimals } from "../getDecimals";
+import { calculateUSDValueNumber } from "../usdCalculations";
+
+
 
 /**
  * Position data for a single asset during a time period
@@ -252,6 +256,7 @@ export interface EventDetail {
     date: string;
     amount: string;
     txHash: string;
+    assetPrice?: string; // Oracle price of the asset at the time of the event (optional for backward compatibility)
 }
 
 /**
@@ -267,6 +272,7 @@ export interface YieldSegmentDetail {
     startLiquidityIndex: bigint;
     endLiquidityIndex: bigint;
     segmentYield: bigint;
+    segmentYieldUSD: string; // USD value of yield for this segment
     durationDays: number;
 }
 
@@ -283,6 +289,7 @@ export interface BorrowCostSegmentDetail {
     startBorrowIndex: bigint;
     endBorrowIndex: bigint;
     segmentBorrowCost: bigint;
+    segmentBorrowCostUSD: string; // USD value of borrow cost for this segment
     durationDays: number;
 }
 
@@ -303,6 +310,17 @@ export interface SimplifiedYieldPosition {
     totalRawBorrowed: bigint;   // Sum of raw borrow transaction amounts (from Borrow events)
     netDeposits: bigint;
     netBorrows: bigint;
+    // USD values calculated using historical oracle prices
+    totalDepositedUSD: string;
+    totalWithdrawnUSD: string;
+    totalBorrowedUSD: string;
+    totalRepaidUSD: string;
+    totalYieldEarnedUSD: string;
+    totalBorrowCostUSD: string;
+    totalRawDepositedUSD: string;   // USD value of total raw deposits
+    totalRawBorrowedUSD: string;    // USD value of total raw borrows
+    totalScaledDepositedUSD: string; // USD value of total scaled deposits
+    totalScaledBorrowedUSD: string;  // USD value of total scaled borrows
     events: EventDetail[];
     events_before_period: EventDetail[];
     starting_balances: {
@@ -376,6 +394,9 @@ export async function calculateUserYieldPositions(
     // Calculate yield positions for each asset in parallel
     const positions = await Promise.all(
         allAssets.map(async (asset) => {
+            // Get decimals first (needed for USD calculations in segmented functions)
+            const decimals = await getDecimals(context, asset) || 18; // Default to 18 if not found
+
             // Fetch data in parallel for performance
             const [
                 // Events during the period
@@ -510,8 +531,8 @@ export async function calculateUserYieldPositions(
                 calculateLiquidityIndexAtTimestamp(context, asset, startTimestamp),
                 calculateVariableBorrowIndexAtTimestamp(context, asset, startTimestamp),
                 // Calculate segmented yield and borrow cost (with caching for performance)
-                calculateSegmentedCustomPeriodYield(context, user, asset, startTimestamp, endTimestamp, liquidityIndexCache),
-                calculateSegmentedCustomPeriodBorrowCost(context, user, asset, startTimestamp, endTimestamp, borrowIndexCache)
+                calculateSegmentedCustomPeriodYield(context, user, asset, startTimestamp, endTimestamp, decimals, liquidityIndexCache),
+                calculateSegmentedCustomPeriodBorrowCost(context, user, asset, startTimestamp, endTimestamp, decimals, borrowIndexCache)
             ]);
 
             // Extract balances and events from enhanced results
@@ -533,6 +554,14 @@ export async function calculateUserYieldPositions(
             let totalBorrowed = startBorrowBalance;
             let totalWithdrawn = 0n;
             let totalRepaid = 0n;
+
+            // Initialize USD totals
+            let totalDepositedUSD = 0;
+            let totalWithdrawnUSD = 0;
+            let totalBorrowedUSD = 0;
+            let totalRepaidUSD = 0;
+            let totalScaledDepositedUSD = 0;
+            let totalScaledBorrowedUSD = 0;
 
             // Initialize scaled totals (raw transaction amounts, consistent across query periods)
             let totalScaledDeposited = startScaledSupplyBalance;
@@ -565,53 +594,90 @@ export async function calculateUserYieldPositions(
             // Calculate raw transaction amounts (exact amounts from Supply/Withdraw/Borrow/Repay events)
             let totalRawDeposited = 0n;
             let totalRawBorrowed = 0n;
+            let totalRawDepositedUSD = 0;
+            let totalRawBorrowedUSD = 0;
 
             // Sum raw deposit amounts from Supply events
             for (const event of supplyEvents) {
                 totalRawDeposited += event.amount;
+                // Calculate USD value for raw deposits
+                if (event.price) {
+                    totalRawDepositedUSD += calculateUSDValueNumber(event.amount, event.price, decimals);
+                }
             }
 
             // Subtract raw withdraw amounts from Withdraw events
             for (const event of withdrawRawEvents) {
                 totalRawDeposited -= event.amount;
+                // Subtract USD value for raw withdraws
+                if (event.price) {
+                    totalRawDepositedUSD -= calculateUSDValueNumber(event.amount, event.price, decimals);
+                }
             }
 
             // Sum raw borrow amounts from Borrow events
             for (const event of borrowEvents) {
                 totalRawBorrowed += event.amount;
+                // Calculate USD value for raw borrows
+                if (event.price) {
+                    totalRawBorrowedUSD += calculateUSDValueNumber(event.amount, event.price, decimals);
+                }
             }
 
             // Subtract raw repay amounts from Repay events
             for (const event of repayEvents) {
                 totalRawBorrowed -= event.amount;
+                // Subtract USD value for raw repays
+                if (event.price) {
+                    totalRawBorrowedUSD -= calculateUSDValueNumber(event.amount, event.price, decimals);
+                }
             }
 
             const events: EventDetail[] = [];
 
             // Process deposit events during the period
+            // UserBalanceEvent now includes assetPrice, so we don't need to fetch from Supply table
             for (const event of depositEvents) {
                 const actualAmount = calculateActualBalance(event.transactionAmount, event.liquidityIndex);
                 totalDeposited += actualAmount;
                 totalScaledDeposited += event.transactionAmount;  // Add scaled amount
+
+                // Calculate USD values using price from UserBalanceEvent
+                if (event.assetPrice) {
+                    totalDepositedUSD += calculateUSDValueNumber(actualAmount, event.assetPrice, decimals);
+                    totalScaledDepositedUSD += calculateUSDValueNumber(event.transactionAmount, event.assetPrice, decimals);
+                }
+
                 events.push({
                     eventType: 'deposit',
                     timestamp: Number(event.timestamp),
                     date: new Date(Number(event.timestamp) * 1000).toISOString(),
                     amount: actualAmount.toString(),
-                    txHash: event.txHash
+                    txHash: event.txHash,
+                    assetPrice: event.assetPrice?.toString()
                 });
             }
 
             // Process withdraw events during the period
+            // UserBalanceEvent now includes assetPrice, so we don't need to fetch from Withdraw table
             for (const event of withdrawEvents) {
                 const actualAmount = calculateActualBalance(event.transactionAmount, event.liquidityIndex);
                 totalWithdrawn += actualAmount;
+
+                // Calculate USD values using price from UserBalanceEvent
+                if (event.assetPrice) {
+                    totalWithdrawnUSD += calculateUSDValueNumber(actualAmount, event.assetPrice, decimals);
+                    // Note: We don't subtract from totalScaledDepositedUSD here because totalScaledDeposited
+                    // is cumulative (not net), so totalScaledDepositedUSD should also be cumulative
+                }
+
                 events.push({
                     eventType: 'withdraw',
                     timestamp: Number(event.timestamp),
                     date: new Date(Number(event.timestamp) * 1000).toISOString(),
                     amount: actualAmount.toString(),
-                    txHash: event.txHash
+                    txHash: event.txHash,
+                    assetPrice: event.assetPrice?.toString()
                 });
             }
 
@@ -619,24 +685,41 @@ export async function calculateUserYieldPositions(
             for (const event of borrowEvents) {
                 totalBorrowed += event.amount;
                 totalScaledBorrowed += event.amount;  // Add scaled amount
+
+                // Calculate USD values
+                if (event.price) {
+                    totalBorrowedUSD += calculateUSDValueNumber(event.amount, event.price, decimals);
+                    totalScaledBorrowedUSD += calculateUSDValueNumber(event.amount, event.price, decimals);
+                }
+
                 events.push({
                     eventType: 'borrow',
                     timestamp: Number(event.timestamp),
                     date: new Date(Number(event.timestamp) * 1000).toISOString(),
                     amount: event.amount.toString(),
-                    txHash: event.txHash
+                    txHash: event.txHash,
+                    assetPrice: event.price?.toString()
                 });
             }
 
             // Process repay events during the period
             for (const event of repayEvents) {
                 totalRepaid += event.amount;
+
+                // Calculate USD values
+                if (event.price) {
+                    totalRepaidUSD += calculateUSDValueNumber(event.amount, event.price, decimals);
+                    // Note: We don't subtract from totalScaledBorrowedUSD here because totalScaledBorrowed
+                    // is cumulative (not net), so totalScaledBorrowedUSD should also be cumulative
+                }
+
                 events.push({
                     eventType: 'repay',
                     timestamp: Number(event.timestamp),
                     date: new Date(Number(event.timestamp) * 1000).toISOString(),
                     amount: event.amount.toString(),
-                    txHash: event.txHash
+                    txHash: event.txHash,
+                    assetPrice: event.price?.toString()
                 });
             }
 
@@ -675,6 +758,10 @@ export async function calculateUserYieldPositions(
             const netDeposits = totalDeposited - totalWithdrawn;
             const netBorrows = totalBorrowed - totalRepaid;
 
+            // USD values are already calculated in the segmented functions
+            const totalYieldEarnedUSD = yieldResult.totalYieldUSD;
+            const totalBorrowCostUSD = borrowCostResult.totalBorrowCostUSD;
+
             // Convert segment data to string format for response
             const yieldSegments: YieldSegmentDetail[] = yieldResult.segments.map(seg => ({
                 startTime: seg.startTime,
@@ -686,6 +773,7 @@ export async function calculateUserYieldPositions(
                 startLiquidityIndex: seg.startLiquidityIndex,
                 endLiquidityIndex: seg.endLiquidityIndex,
                 segmentYield: seg.segmentYield,
+                segmentYieldUSD: seg.segmentYieldUSD, // USD value for this segment
                 durationDays: seg.durationDays
             }));
 
@@ -699,6 +787,7 @@ export async function calculateUserYieldPositions(
                 startBorrowIndex: seg.startBorrowIndex,
                 endBorrowIndex: seg.endBorrowIndex,
                 segmentBorrowCost: seg.segmentBorrowCost,
+                segmentBorrowCostUSD: seg.segmentBorrowCostUSD, // USD value for this segment
                 durationDays: seg.durationDays
             }));
 
@@ -716,6 +805,17 @@ export async function calculateUserYieldPositions(
                 totalRawBorrowed,
                 netDeposits,
                 netBorrows,
+                // USD values calculated using historical oracle prices
+                totalDepositedUSD: totalDepositedUSD.toFixed(4),
+                totalWithdrawnUSD: totalWithdrawnUSD.toFixed(4),
+                totalBorrowedUSD: totalBorrowedUSD.toFixed(4),
+                totalRepaidUSD: totalRepaidUSD.toFixed(4),
+                totalYieldEarnedUSD,
+                totalBorrowCostUSD,
+                totalRawDepositedUSD: totalRawDepositedUSD.toFixed(4),
+                totalRawBorrowedUSD: totalRawBorrowedUSD.toFixed(4),
+                totalScaledDepositedUSD: totalScaledDepositedUSD.toFixed(4),
+                totalScaledBorrowedUSD: totalScaledBorrowedUSD.toFixed(4),
                 events,
                 events_before_period,
                 starting_balances: {

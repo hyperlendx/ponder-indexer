@@ -38,6 +38,8 @@ import {
 import { eq, and, gte, lte } from "ponder";
 import { calculateSegmentedIsolatedPairYield, calculateSegmentedIsolatedPairBorrowCost } from "./yieldCalculations";
 import { ExchangeRateCache } from "./exchangeRateCache";
+import { getDecimals } from "../../getDecimals";
+import { calculateUSDValueNumber } from "../../usdCalculations";
 
 /**
  * Position data for a single isolated pair
@@ -382,17 +384,7 @@ export interface IsolatedPairEventDetail {
     date: string;
     amount: string;
     txHash: string;
-}
-
-/**
- * Event detail for isolated pair transactions
- */
-export interface IsolatedPairEventDetail {
-    eventType: 'deposit' | 'withdraw' | 'borrow' | 'repay' | 'collateral_add' | 'collateral_remove';
-    timestamp: number;
-    date: string;
-    amount: string;
-    txHash: string;
+    assetPrice?: string; // Oracle price of the asset at the time of the event (optional for backward compatibility)
 }
 
 /**
@@ -408,6 +400,7 @@ export interface IsolatedPairYieldSegmentDetail {
     startExchangeRate: bigint;
     endExchangeRate: bigint;
     segmentYield: bigint;
+    segmentYieldUSD: string; // USD value of yield for this segment
     durationDays: number;
 }
 
@@ -424,6 +417,7 @@ export interface IsolatedPairBorrowCostSegmentDetail {
     startExchangeRate: bigint;
     endExchangeRate: bigint;
     segmentBorrowCost: bigint;
+    segmentBorrowCostUSD: string; // USD value of borrow cost for this segment
     durationDays: number;
 }
 
@@ -447,6 +441,19 @@ export interface SimplifiedIsolatedPairYieldPosition {
     netDeposits: bigint;
     netBorrows: bigint;
     netCollateral: bigint;
+    // USD values calculated using historical oracle prices
+    totalDepositedUSD: string;
+    totalWithdrawnUSD: string;
+    totalBorrowedUSD: string;
+    totalRepaidUSD: string;
+    totalCollateralAddedUSD: string;
+    totalCollateralRemovedUSD: string;
+    totalYieldEarnedUSD: string;
+    totalBorrowCostUSD: string;
+    totalRawDepositedUSD: string;
+    totalRawBorrowedUSD: string;
+    totalScaledDepositedUSD: string;
+    totalScaledBorrowedUSD: string;
     events: IsolatedPairEventDetail[];
     events_before_period: IsolatedPairEventDetail[];
     starting_balances: {
@@ -519,6 +526,10 @@ export async function calculateUserIsolatedYieldPositions(
     const positions = await Promise.all(
         pairs.map(async (pair) => {
             try {
+            // Get decimals first (needed for USD calculations)
+            // For isolated pairs, the asset is the pair address itself
+            const decimals = await getDecimals(context, pair) || 18; // Default to 18 if not found
+
             // Fetch data in parallel for performance
             const [
                 // Events during the period
@@ -646,8 +657,8 @@ export async function calculateUserIsolatedYieldPositions(
                 // Get exchange rate at start of period
                 getIsolatedPairExchangeRate(context, pair, startTimestamp),
                 // Calculate segmented yield and borrow cost (with caching for performance)
-                calculateSegmentedIsolatedPairYield(context, user, pair, startTimestamp, endTimestamp, exchangeRateCache),
-                calculateSegmentedIsolatedPairBorrowCost(context, user, pair, startTimestamp, endTimestamp, exchangeRateCache)
+                calculateSegmentedIsolatedPairYield(context, user, pair, startTimestamp, endTimestamp, decimals, exchangeRateCache),
+                calculateSegmentedIsolatedPairBorrowCost(context, user, pair, startTimestamp, endTimestamp, decimals, exchangeRateCache)
             ]);
 
             // Extract balances and events from enhanced results
@@ -673,6 +684,16 @@ export async function calculateUserIsolatedYieldPositions(
             let totalWithdrawn = 0n;
             let totalRepaid = 0n;
             let totalCollateralRemoved = 0n;
+
+            // Initialize USD totals
+            let totalDepositedUSD = 0;
+            let totalWithdrawnUSD = 0;
+            let totalBorrowedUSD = 0;
+            let totalRepaidUSD = 0;
+            let totalCollateralAddedUSD = 0;
+            let totalCollateralRemovedUSD = 0;
+            let totalScaledDepositedUSD = 0;
+            let totalScaledBorrowedUSD = 0;
 
             // Initialize scaled totals (shares without exchange rate conversion)
             let totalScaledDeposited = startAssetShares;
@@ -705,25 +726,43 @@ export async function calculateUserIsolatedYieldPositions(
             // Calculate raw transaction amounts (exact amounts from DepositIsolated/WithdrawIsolated/BorrowAssetIsolated/RepayAssetIsolated events)
             let totalRawDeposited = 0n;
             let totalRawBorrowed = 0n;
+            let totalRawDepositedUSD = 0;
+            let totalRawBorrowedUSD = 0;
 
             // Sum raw deposit amounts from DepositIsolated events
             for (const event of depositEvents) {
                 totalRawDeposited += event.assets;
+                // Calculate USD value for raw deposits
+                if (event.price) {
+                    totalRawDepositedUSD += calculateUSDValueNumber(event.assets, event.price, decimals);
+                }
             }
 
             // Subtract raw withdraw amounts from WithdrawIsolated events
             for (const event of withdrawEvents) {
                 totalRawDeposited -= event.assets;
+                // Subtract USD value for raw withdraws
+                if (event.price) {
+                    totalRawDepositedUSD -= calculateUSDValueNumber(event.assets, event.price, decimals);
+                }
             }
 
             // Sum raw borrow amounts from BorrowAssetIsolated events
             for (const event of borrowEvents) {
                 totalRawBorrowed += event.borrowAmount;
+                // Calculate USD value for raw borrows
+                if (event.price) {
+                    totalRawBorrowedUSD += calculateUSDValueNumber(event.borrowAmount, event.price, decimals);
+                }
             }
 
             // Subtract raw repay amounts from RepayAssetIsolated events
             for (const event of repayEvents) {
                 totalRawBorrowed -= event.amountToRepay;
+                // Subtract USD value for raw repays
+                if (event.price) {
+                    totalRawBorrowedUSD -= calculateUSDValueNumber(event.amountToRepay, event.price, decimals);
+                }
             }
 
             const events: IsolatedPairEventDetail[] = [];
@@ -733,12 +772,20 @@ export async function calculateUserIsolatedYieldPositions(
                 const assetAmount = convertSharesToAssets(event.shares, event.exchangeRate);
                 totalDeposited += assetAmount;
                 totalScaledDeposited += event.shares;  // Track scaled amount (shares)
+
+                // Calculate USD values
+                if (event.price) {
+                    totalDepositedUSD += calculateUSDValueNumber(assetAmount, event.price, decimals);
+                    totalScaledDepositedUSD += calculateUSDValueNumber(event.shares, event.price, decimals);
+                }
+
                 events.push({
                     eventType: 'deposit',
                     timestamp: Number(event.timestamp),
                     date: new Date(Number(event.timestamp) * 1000).toISOString(),
                     amount: assetAmount.toString(),
-                    txHash: event.txHash
+                    txHash: event.txHash,
+                    assetPrice: event.price?.toString() // DepositIsolated events have price field
                 });
             }
 
@@ -746,12 +793,19 @@ export async function calculateUserIsolatedYieldPositions(
             for (const event of withdrawEvents) {
                 const assetAmount = convertSharesToAssets(event.shares, event.exchangeRate);
                 totalWithdrawn += assetAmount;
+
+                // Calculate USD value
+                if (event.price) {
+                    totalWithdrawnUSD += calculateUSDValueNumber(assetAmount, event.price, decimals);
+                }
+
                 events.push({
                     eventType: 'withdraw',
                     timestamp: Number(event.timestamp),
                     date: new Date(Number(event.timestamp) * 1000).toISOString(),
                     amount: assetAmount.toString(),
-                    txHash: event.txHash
+                    txHash: event.txHash,
+                    assetPrice: event.price?.toString() // WithdrawIsolated events have price field
                 });
             }
 
@@ -760,12 +814,20 @@ export async function calculateUserIsolatedYieldPositions(
                 const borrowAmount = convertSharesToAssets(event.sharesAdded, event.exchangeRate);
                 totalBorrowed += borrowAmount;
                 totalScaledBorrowed += event.sharesAdded;  // Track scaled amount (shares)
+
+                // Calculate USD values
+                if (event.price) {
+                    totalBorrowedUSD += calculateUSDValueNumber(borrowAmount, event.price, decimals);
+                    totalScaledBorrowedUSD += calculateUSDValueNumber(event.sharesAdded, event.price, decimals);
+                }
+
                 events.push({
                     eventType: 'borrow',
                     timestamp: Number(event.timestamp),
                     date: new Date(Number(event.timestamp) * 1000).toISOString(),
                     amount: borrowAmount.toString(),
-                    txHash: event.txHash
+                    txHash: event.txHash,
+                    assetPrice: event.price?.toString() // BorrowAssetIsolated events have price field
                 });
             }
 
@@ -774,36 +836,57 @@ export async function calculateUserIsolatedYieldPositions(
                 const repayAmount = convertSharesToAssets(event.shares, event.exchangeRate);
                 totalRepaid += repayAmount;
                 // Note: Do NOT subtract from totalScaledBorrowed - we want total borrowed, not net
+
+                // Calculate USD value
+                if (event.price) {
+                    totalRepaidUSD += calculateUSDValueNumber(repayAmount, event.price, decimals);
+                }
+
                 events.push({
                     eventType: 'repay',
                     timestamp: Number(event.timestamp),
                     date: new Date(Number(event.timestamp) * 1000).toISOString(),
                     amount: repayAmount.toString(),
-                    txHash: event.txHash
+                    txHash: event.txHash,
+                    assetPrice: event.price?.toString() // RepayAssetIsolated events have price field
                 });
             }
 
             // Process collateral add events during the period
             for (const event of collateralAddEvents) {
                 totalCollateralAdded += event.collateralAmount;
+
+                // Calculate USD value
+                if (event.price) {
+                    totalCollateralAddedUSD += calculateUSDValueNumber(event.collateralAmount, event.price, decimals);
+                }
+
                 events.push({
                     eventType: 'collateral_add',
                     timestamp: Number(event.timestamp),
                     date: new Date(Number(event.timestamp) * 1000).toISOString(),
                     amount: event.collateralAmount.toString(),
-                    txHash: event.txHash
+                    txHash: event.txHash,
+                    assetPrice: event.price?.toString() // AddCollateralIsolated events have price field
                 });
             }
 
             // Process collateral remove events during the period
             for (const event of collateralRemoveEvents) {
                 totalCollateralRemoved += event.collateralAmount;
+
+                // Calculate USD value
+                if (event.price) {
+                    totalCollateralRemovedUSD += calculateUSDValueNumber(event.collateralAmount, event.price, decimals);
+                }
+
                 events.push({
                     eventType: 'collateral_remove',
                     timestamp: Number(event.timestamp),
                     date: new Date(Number(event.timestamp) * 1000).toISOString(),
                     amount: event.collateralAmount.toString(),
-                    txHash: event.txHash
+                    txHash: event.txHash,
+                    assetPrice: event.price?.toString() // RemoveCollateralIsolated events have price field
                 });
             }
 
@@ -884,6 +967,7 @@ export async function calculateUserIsolatedYieldPositions(
                     startExchangeRate: seg.startExchangeRate ?? 0n,
                     endExchangeRate: seg.endExchangeRate ?? 0n,
                     segmentYield: seg.segmentYield,
+                    segmentYieldUSD: seg.segmentYieldUSD || "0.00", // USD value from yield calculation
                     durationDays: seg.durationDays ?? 0
                 };
             });
@@ -913,6 +997,7 @@ export async function calculateUserIsolatedYieldPositions(
                     startExchangeRate: seg.startExchangeRate ?? 0n,
                     endExchangeRate: seg.endExchangeRate ?? 0n,
                     segmentBorrowCost: seg.segmentBorrowCost,
+                    segmentBorrowCostUSD: seg.segmentBorrowCostUSD || "0.00", // USD value from borrow cost calculation
                     durationDays: seg.durationDays ?? 0
                 };
             });
@@ -934,6 +1019,19 @@ export async function calculateUserIsolatedYieldPositions(
                 netDeposits,
                 netBorrows,
                 netCollateral,
+                // USD values calculated using historical oracle prices
+                totalDepositedUSD: totalDepositedUSD.toFixed(4),
+                totalWithdrawnUSD: totalWithdrawnUSD.toFixed(4),
+                totalBorrowedUSD: totalBorrowedUSD.toFixed(4),
+                totalRepaidUSD: totalRepaidUSD.toFixed(4),
+                totalCollateralAddedUSD: totalCollateralAddedUSD.toFixed(4),
+                totalCollateralRemovedUSD: totalCollateralRemovedUSD.toFixed(4),
+                totalYieldEarnedUSD: yieldResult.totalYieldUSD || "0.0000",
+                totalBorrowCostUSD: borrowCostResult.totalBorrowCostUSD || "0.0000",
+                totalRawDepositedUSD: totalRawDepositedUSD.toFixed(4),
+                totalRawBorrowedUSD: totalRawBorrowedUSD.toFixed(4),
+                totalScaledDepositedUSD: totalScaledDepositedUSD.toFixed(4),
+                totalScaledBorrowedUSD: totalScaledBorrowedUSD.toFixed(4),
                 events,
                 events_before_period,
                 starting_balances: {

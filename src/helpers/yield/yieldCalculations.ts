@@ -1,9 +1,10 @@
 import { UserBalanceEvent, Borrow, Repay, LiquidationCall } from "ponder:schema";
-import { eq, and, gte, lte } from "ponder";
+import { eq, and, gte, lte, desc } from "ponder";
 import { calculateLiquidityIndexAtTimestamp, calculateActualBalance } from "../aave";
 import { getScaledBalanceAtTimestamp, getScaledBorrowBalanceAtTimestamp } from "./balanceQueries";
 import { LiquidityIndexCache } from "./liquidityIndexCache";
 import { calculateVariableBorrowIndexAtTimestamp } from "../aave/borrowIndex";
+import { calculateUSDValueNumber } from "../usdCalculations";
 
 /**
  * Calculate interest earned in a specific time segment
@@ -107,6 +108,7 @@ export async function createTimeSegments(
  * Adapts the monthly segmented calculation for arbitrary date ranges
  *
  * @param indexCache - Optional cache to avoid redundant liquidity index queries
+ * @param decimals - Token decimals for USD calculation
  */
 export async function calculateSegmentedCustomPeriodYield(
     context: any,
@@ -114,9 +116,11 @@ export async function calculateSegmentedCustomPeriodYield(
     asset: string,
     startTimestamp: number,
     endTimestamp: number,
+    decimals: number,
     indexCache?: LiquidityIndexCache
 ): Promise<{
     totalYield: bigint;
+    totalYieldUSD: string;
     segments: Array<{
         startTime: number;
         endTime: number;
@@ -127,6 +131,7 @@ export async function calculateSegmentedCustomPeriodYield(
         startLiquidityIndex: bigint;
         endLiquidityIndex: bigint;
         segmentYield: bigint;
+        segmentYieldUSD: string;
         durationDays: number;
     }>;
 }> {
@@ -200,8 +205,27 @@ export async function calculateSegmentedCustomPeriodYield(
         await indexCache.prefetch(context, indexPrefetchList);
     }
 
+    // Get the most recent price from UserBalanceEvent for USD calculations
+    // This avoids needing to make a blockchain call to the oracle
+    const recentEvent = await dbQuery
+        .select()
+        .from(UserBalanceEvent)
+        .where(
+            and(
+                eq(UserBalanceEvent.user, user as `0x${string}`),
+                eq(UserBalanceEvent.asset, asset as `0x${string}`),
+                lte(UserBalanceEvent.timestamp, endTimestamp)
+            )
+        )
+        .orderBy(desc(UserBalanceEvent.timestamp))
+        .limit(1);
+
+    // Use the most recent price, or 0 if no events found
+    const currentPrice = recentEvent.length > 0 ? recentEvent[0].assetPrice : 0n;
+
     // Calculate interest for each segment and collect detailed information
     let totalInterest = 0n;
+    let totalInterestUSD = 0;
     const detailedSegments = [];
 
     for (let i = 0; i < segments.length; i++) {
@@ -230,6 +254,10 @@ export async function calculateSegmentedCustomPeriodYield(
         const actualBalance = calculateActualBalance(segment.scaledBalance, startLiquidityIndex);
         const durationDays = (Number(segment.endTime) - Number(segment.startTime)) / (24 * 60 * 60);
 
+        // Calculate USD value for this segment's yield using current price
+        const segmentYieldUSD = calculateUSDValueNumber(segmentInterest, currentPrice, decimals);
+        totalInterestUSD += segmentYieldUSD;
+
         detailedSegments.push({
             startTime: Number(segment.startTime),
             endTime: Number(segment.endTime),
@@ -240,12 +268,14 @@ export async function calculateSegmentedCustomPeriodYield(
             startLiquidityIndex,
             endLiquidityIndex,
             segmentYield: segmentInterest,
+            segmentYieldUSD: segmentYieldUSD.toFixed(4),
             durationDays: Math.round(durationDays * 100) / 100 // Round to 2 decimal places
         });
     }
 
     return {
         totalYield: totalInterest,
+        totalYieldUSD: totalInterestUSD.toFixed(4),
         segments: detailedSegments
     };
 }
@@ -389,6 +419,7 @@ async function createBorrowTimeSegments(
  * @param asset - Asset address
  * @param startTimestamp - Start of time period
  * @param endTimestamp - End of time period
+ * @param decimals - Token decimals for USD calculation
  * @param borrowIndexCache - Optional cache to avoid redundant borrow index queries
  */
 export async function calculateSegmentedCustomPeriodBorrowCost(
@@ -397,9 +428,11 @@ export async function calculateSegmentedCustomPeriodBorrowCost(
     asset: string,
     startTimestamp: number,
     endTimestamp: number,
+    decimals: number,
     borrowIndexCache?: Map<string, bigint>
 ): Promise<{
     totalBorrowCost: bigint;
+    totalBorrowCostUSD: string;
     segments: Array<{
         startTime: number;
         endTime: number;
@@ -410,6 +443,7 @@ export async function calculateSegmentedCustomPeriodBorrowCost(
         startBorrowIndex: bigint;
         endBorrowIndex: bigint;
         segmentBorrowCost: bigint;
+        segmentBorrowCostUSD: string;
         durationDays: number;
     }>;
 }> {
@@ -482,8 +516,48 @@ export async function calculateSegmentedCustomPeriodBorrowCost(
         await Promise.all(prefetchPromises);
     }
 
+    // Get the most recent price from Borrow/Repay events for USD calculations
+    // This avoids needing to make a blockchain call to the oracle
+    // Try to get price from recent Borrow events first
+    const recentBorrow = await dbQuery
+        .select()
+        .from(Borrow)
+        .where(
+            and(
+                eq(Borrow.onBehalfOf, user as `0x${string}`),
+                eq(Borrow.reserve, asset as `0x${string}`),
+                lte(Borrow.timestamp, endTimestamp)
+            )
+        )
+        .orderBy(desc(Borrow.timestamp))
+        .limit(1);
+
+    let currentPrice = 0n;
+    if (recentBorrow.length > 0) {
+        currentPrice = recentBorrow[0].price;
+    } else {
+        // If no borrow events, try Repay events
+        const recentRepay = await dbQuery
+            .select()
+            .from(Repay)
+            .where(
+                and(
+                    eq(Repay.user, user as `0x${string}`),
+                    eq(Repay.reserve, asset as `0x${string}`),
+                    lte(Repay.timestamp, endTimestamp)
+                )
+            )
+            .orderBy(desc(Repay.timestamp))
+            .limit(1);
+
+        if (recentRepay.length > 0) {
+            currentPrice = recentRepay[0].price;
+        }
+    }
+
     // Calculate borrow cost for each segment and collect detailed information
     let totalBorrowCost = 0n;
+    let totalBorrowCostUSD = 0;
     const detailedSegments = [];
 
     for (const segment of segments) {
@@ -509,6 +583,10 @@ export async function calculateSegmentedCustomPeriodBorrowCost(
         const actualBorrowBalance = calculateActualBalance(segment.scaledBorrowBalance, startBorrowIndex);
         const durationDays = (Number(segment.endTime) - Number(segment.startTime)) / (24 * 60 * 60);
 
+        // Calculate USD value for this segment's borrow cost using current price
+        const segmentBorrowCostUSD = calculateUSDValueNumber(segmentBorrowCost, currentPrice, decimals);
+        totalBorrowCostUSD += segmentBorrowCostUSD;
+
         detailedSegments.push({
             startTime: Number(segment.startTime),
             endTime: Number(segment.endTime),
@@ -519,12 +597,14 @@ export async function calculateSegmentedCustomPeriodBorrowCost(
             startBorrowIndex,
             endBorrowIndex,
             segmentBorrowCost,
+            segmentBorrowCostUSD: segmentBorrowCostUSD.toFixed(4),
             durationDays: Math.round(durationDays * 100) / 100
         });
     }
 
     return {
         totalBorrowCost,
+        totalBorrowCostUSD: totalBorrowCostUSD.toFixed(4),
         segments: detailedSegments
     };
 }
