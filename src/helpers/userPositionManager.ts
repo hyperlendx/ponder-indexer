@@ -3,49 +3,6 @@ import { calculateLiquidityIndexAtTimestamp, calculateActualBalance, RAY } from 
 import { eq, and, gte, lte, desc } from "ponder";
 
 /**
- * Check for duplicate events to prevent double-counting
- */
-async function checkForDuplicateEvents(
-    context: any,
-    user: string,
-    asset: string,
-    txHash: string,
-    eventType: string,
-    scaledBalanceDelta: bigint
-): Promise<boolean> {
-    const { db } = context;
-
-    try {
-        // Look for existing events in the same transaction for the same user/asset
-        // Handle both indexing context (db.sql) and API context (db)
-        const dbQuery = db.sql || db;
-        const existingEvents = await dbQuery
-            .select()
-            .from(UserBalanceEvent)
-            .where(
-                and(
-                    eq(UserBalanceEvent.txHash, txHash as `0x${string}`),
-                    eq(UserBalanceEvent.user, user as `0x${string}`),
-                    eq(UserBalanceEvent.asset, asset as `0x${string}`),
-                    eq(UserBalanceEvent.eventType, eventType)
-                )
-            );
-
-        // Check if we have an event with the same scaled balance delta
-        // @ts-ignore
-        const duplicate = existingEvents.find(event =>
-            event.scaledBalance === scaledBalanceDelta
-        );
-
-        return !!duplicate;
-    } catch (error) {
-        console.warn('Error checking for duplicate events:', error);
-        // If we can't check for duplicates, allow the event to proceed
-        return false;
-    }
-}
-
-/**
  * Update or create a user position record
  */
 export async function updateUserPosition(
@@ -61,27 +18,6 @@ export async function updateUserPosition(
 ): Promise<void> {
     const { db } = context;
     const positionId = `${user}_${asset}`;
-
-    // Duplicate event detection
-    const isDuplicate = await checkForDuplicateEvents(
-        context,
-        user,
-        asset,
-        txHash,
-        eventType,
-        scaledBalanceDelta
-    );
-
-    if (isDuplicate) {
-        console.warn(`🚫 Skipping duplicate event:`, {
-            txHash,
-            user,
-            asset,
-            eventType,
-            scaledBalanceDelta: scaledBalanceDelta.toString()
-        });
-        return;
-    }
 
     // Get current liquidity index for this asset at this timestamp
     // Pass the transaction hash to check for ReserveDataUpdated events in the same transaction

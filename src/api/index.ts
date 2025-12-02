@@ -145,7 +145,8 @@ app.get("/user/:address/custom-period-yield", async (c) => {
                 endLiquidityIndex: seg.endLiquidityIndex.toString(),
                 segmentYield: seg.segmentYield.toString(),
                 segmentYieldUSD: seg.segmentYieldUSD, // USD value for this segment
-                durationDays: seg.durationDays
+                durationDays: seg.durationDays,
+                assetPrice: seg.assetPrice // Asset price during this segment
             })),
             borrowCostSegments: pos.borrowCostSegments.map(seg => ({
                 startTime: seg.startTime,
@@ -158,7 +159,8 @@ app.get("/user/:address/custom-period-yield", async (c) => {
                 endBorrowIndex: seg.endBorrowIndex.toString(),
                 segmentBorrowCost: seg.segmentBorrowCost.toString(),
                 segmentBorrowCostUSD: seg.segmentBorrowCostUSD, // USD value for this segment
-                durationDays: seg.durationDays
+                durationDays: seg.durationDays,
+                assetPrice: seg.assetPrice // Asset price during this segment
             }))
         }));
 
@@ -314,7 +316,8 @@ app.get("/user/:address/custom-period-yield-isolated", async (c) => {
                     endExchangeRate: seg.endExchangeRate?.toString() ?? '0',
                     segmentYield: seg.segmentYield?.toString() ?? '0',
                     segmentYieldUSD: seg.segmentYieldUSD ?? '0.00', // USD value for this segment
-                    durationDays: seg.durationDays ?? 0
+                    durationDays: seg.durationDays ?? 0,
+                    assetPrice: seg.assetPrice ?? '0' // Asset price during this segment
                 };
             }),
             borrowCostSegments: (pos.borrowCostSegments ?? []).map((seg) => {
@@ -333,7 +336,8 @@ app.get("/user/:address/custom-period-yield-isolated", async (c) => {
                     endExchangeRate: seg.endExchangeRate?.toString() ?? '0',
                     segmentBorrowCost: seg.segmentBorrowCost?.toString() ?? '0',
                     segmentBorrowCostUSD: seg.segmentBorrowCostUSD ?? '0.00', // USD value for this segment
-                    durationDays: seg.durationDays ?? 0
+                    durationDays: seg.durationDays ?? 0,
+                    assetPrice: seg.assetPrice ?? '0' // Asset price during this segment
                 };
             })
         };
@@ -696,7 +700,7 @@ app.get("/user/:address/daily-portfolio-value", async (c) => {
             days: portfolioData.dailyValues.length,
             dailyPortfolioValues: serializedPortfolio,
             calculatedAt: Math.floor(Date.now() / 1000),
-            note: "USD values are calculated using historical oracle prices from the database events and formatted with 4 decimal places. Portfolio values represent actual balances (including accrued interest/yield) at the START of each day (midnight UTC)."
+            note: "USD values are calculated using historical oracle prices from the database events and formatted with 4 decimal places. Portfolio values represent actual balances (including accrued interest/yield) at the END of each day (23:59:59 UTC)."
         });
 
     } catch (error) {
@@ -806,12 +810,77 @@ app.get("/user/:address/daily-portfolio-value-isolated", async (c) => {
             days: portfolioData.dailyValues.length,
             dailyPortfolioValues: serializedPortfolio,
             calculatedAt: Math.floor(Date.now() / 1000),
-            note: "USD values are calculated using historical oracle prices from the database events and formatted with 4 decimal places. Portfolio values represent actual balances (including accrued interest/yield) at the START of each day (midnight UTC)."
+            note: "USD values are calculated using historical oracle prices from the database events and formatted with 4 decimal places. Portfolio values represent actual balances (including accrued interest/yield) at the END of each day (23:59:59 UTC)."
         });
 
     } catch (error) {
         console.error("Error calculating isolated pair daily portfolio values:", error);
         return c.json({error: "Failed to calculate isolated pair daily portfolio values"}, 500);
+    }
+});
+
+// Debug endpoint to check for duplicate UserBalanceEvent records
+app.get("/debug/duplicate-events/:address", async (c) => {
+    const userAddress = c.req.param("address");
+
+    if (!userAddress || !/^0x[a-fA-F0-9]{40}$/.test(userAddress)) {
+        return c.json({error: "Invalid user address format"}, 400);
+    }
+
+    try {
+        const context = {db};
+        const dbQuery = context.db.sql || context.db;
+
+        // Get all UserBalanceEvent records for this user
+        const {UserBalanceEvent} = await import("ponder:schema");
+        const allEvents = await dbQuery
+            .select()
+            .from(UserBalanceEvent)
+            .where(eq(UserBalanceEvent.user, userAddress as `0x${string}`))
+            .orderBy(UserBalanceEvent.timestamp, UserBalanceEvent.asset);
+
+        // Group events by transaction hash, user, asset, and event type
+        const eventGroups = new Map();
+        const duplicates = [];
+
+        for (const event of allEvents) {
+            const key = `${event.txHash}_${event.user}_${event.asset}_${event.eventType}`;
+
+            if (!eventGroups.has(key)) {
+                eventGroups.set(key, []);
+            }
+            eventGroups.get(key).push(event);
+        }
+
+        // Find groups with multiple events (potential duplicates)
+        for (const [key, events] of eventGroups) {
+            if (events.length > 1) {
+                duplicates.push({
+                    key,
+                    count: events.length,
+                    events: events.map(e => ({
+                        id: e.id,
+                        txHash: e.txHash,
+                        asset: e.asset,
+                        scaledBalance: e.scaledBalance.toString(),
+                        transactionAmount: e.transactionAmount.toString(),
+                        eventType: e.eventType,
+                        timestamp: e.timestamp
+                    }))
+                });
+            }
+        }
+
+        return c.json({
+            user: userAddress,
+            totalEvents: allEvents.length,
+            duplicateGroups: duplicates.length,
+            duplicates: duplicates
+        });
+
+    } catch (error) {
+        console.error("Error checking for duplicate events:", error);
+        return c.json({error: "Failed to check for duplicate events"}, 500);
     }
 });
 

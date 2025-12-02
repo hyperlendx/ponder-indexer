@@ -155,7 +155,6 @@ export async function getAssetsWithBalanceAtTimestamp(
 
 /**
  * Get all assets a user had positions in during a custom time period
- * Similar to getUserAssetsForMonth but for arbitrary date ranges
  */
 export async function getUserAssetsForPeriod(
     context: any,

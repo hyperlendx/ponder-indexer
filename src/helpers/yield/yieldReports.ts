@@ -147,10 +147,11 @@ export async function calculateUserDailyYieldBreakdown(
 
         // Initialize daily buckets for complete days only
         const startDate = new Date(startTimestamp * 1000);
+        const oneDaySeconds = 24 * 60 * 60;
 
         // Calculate number of complete days to iterate (use endDayStart, not endTimestampForDays)
         // endDayStart represents the last day in the query period
-        const totalDays = Math.ceil((endDayStart - startTimestamp) / (24 * 60 * 60)) + 1;
+        const totalDays = Math.ceil((endDayStart - startTimestamp) / oneDaySeconds) + 1;
 
         for (let dayOffset = 0; dayOffset < totalDays; dayOffset++) {
             const currentDate = new Date(startDate);
@@ -159,10 +160,12 @@ export async function calculateUserDailyYieldBreakdown(
             const dateStr = currentDate.toISOString().split('T')[0]!; // YYYY-MM-DD format
             // Use UTC to ensure consistent day boundaries regardless of server timezone
             const dayStartTimestamp = Math.floor(Date.UTC(currentDate.getUTCFullYear(), currentDate.getUTCMonth(), currentDate.getUTCDate()) / 1000);
+            // Use END of day timestamp (23:59:59 UTC) for consistency with portfolio value endpoints
+            const dayEndTimestamp = dayStartTimestamp + oneDaySeconds - 1;
 
             dailyResults.set(dateStr, {
                 date: dateStr,
-                timestamp: dayStartTimestamp,
+                timestamp: dayEndTimestamp,
                 assetYield: 0n,
                 borrowCost: 0n,
                 netYield: 0n,
@@ -755,7 +758,7 @@ export async function calculateUserDailyPortfolioValue(
             }>;
         }>();
 
-        // Initialize daily buckets - calculate portfolio values at START of each day (midnight UTC)
+        // Initialize daily buckets - calculate portfolio values at END of each day (23:59:59 UTC)
         const startDate = new Date(startTimestamp * 1000);
         const endDate = new Date(endTimestamp * 1000);
 
@@ -768,13 +771,15 @@ export async function calculateUserDailyPortfolioValue(
         const oneDaySeconds = 24 * 60 * 60;
         const dayTimestamps: number[] = [];
 
-        for (let ts = firstDayStart; ts <= lastDayStart; ts += oneDaySeconds) {
-            const dateStr = new Date(ts * 1000).toISOString().split('T')[0]!;
+        for (let dayStart = firstDayStart; dayStart <= lastDayStart; dayStart += oneDaySeconds) {
+            const dateStr = new Date(dayStart * 1000).toISOString().split('T')[0]!;
+            // Calculate at END of day (23:59:59 UTC) instead of start
+            const dayEnd = dayStart + oneDaySeconds - 1;
 
-            dayTimestamps.push(ts);
+            dayTimestamps.push(dayEnd);
             dailyResults.set(dateStr, {
                 date: dateStr,
-                timestamp: ts,
+                timestamp: dayEnd,
                 totalSupplied: 0n,
                 totalBorrowed: 0n,
                 totalSuppliedUSD: 0,
@@ -804,24 +809,24 @@ export async function calculateUserDailyPortfolioValue(
             // Get decimals for USD calculations
             const decimals = await getDecimals(context, asset) || 18;
 
-            // For each day, calculate supplied and borrowed balances at START of day (midnight UTC)
+            // For each day, calculate supplied and borrowed balances at END of day (23:59:59 UTC)
             for (const [dateStr, dayData] of dailyResults) {
-                const dayStartTimestamp = dayData.timestamp;
+                const dayEndTimestamp = dayData.timestamp;
 
-                // Calculate supplied balance from events at day start (no DB query)
-                const scaledBalance = calculateBalanceFromEvents(balanceEvents, dayStartTimestamp);
-                const liquidityIndex = await indexCache.get(context, asset, dayStartTimestamp);
+                // Calculate supplied balance from events at day end (no DB query)
+                const scaledBalance = calculateBalanceFromEvents(balanceEvents, dayEndTimestamp);
+                const liquidityIndex = await indexCache.get(context, asset, dayEndTimestamp);
                 const suppliedBalance = calculateActualBalance(scaledBalance, liquidityIndex);
 
-                // Calculate borrowed balance from events with accrued interest at day start (no DB query)
-                const variableBorrowIndex = await borrowIndexCache.get(context, asset, dayStartTimestamp);
-                const borrowedBalance = calculateBorrowedFromEvents(borrows, repays, dayStartTimestamp, variableBorrowIndex);
+                // Calculate borrowed balance from events with accrued interest at day end (no DB query)
+                const variableBorrowIndex = await borrowIndexCache.get(context, asset, dayEndTimestamp);
+                const borrowedBalance = calculateBorrowedFromEvents(borrows, repays, dayEndTimestamp, variableBorrowIndex);
 
-                // Get historical price at day start from UserBalanceEvent
-                // Find the most recent event at or before dayStartTimestamp
+                // Get historical price at day end from UserBalanceEvent
+                // Find the most recent event at or before dayEndTimestamp
                 let assetPrice: bigint | undefined = undefined;
                 for (let i = balanceEvents.length - 1; i >= 0; i--) {
-                    if (balanceEvents[i].timestamp <= dayStartTimestamp) {
+                    if (balanceEvents[i].timestamp <= dayEndTimestamp) {
                         assetPrice = balanceEvents[i].assetPrice;
                         break;
                     }

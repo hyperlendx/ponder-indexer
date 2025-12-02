@@ -6,6 +6,7 @@ import {OracleAbi} from "./abis/OracleAbi";
 import {IsolatedAbi} from "./abis/IsolatedAbi";
 import {HTokenAbi} from "./abis/HTokenAbi";
 import {LoopingStrategyManagerFactoryAbi} from "./abis/LoopingStrategyManagerFactory";
+import {IsolatedPairRegistry as IsolatedPairRegistryAbi} from "./abis/IsolatedPairRegistry";
 
 export default createConfig({
     chains: {
@@ -69,6 +70,19 @@ export default createConfig({
             chain: "hyperEvm",
             address: "0xc3Ed646181Ca80562e96d9e6CF4AF317d22F34b0",
             startBlock: 3414683,
-        }
+        },
+        IsolatedPairRegistryContract: {
+            abi: IsolatedPairRegistryAbi,
+            chain: "hyperEvm",
+            address: "0xf55af86c9ec3a7d5fa6367c00a120e6b262f718d",
+            startBlock: 787000,
+        },
+    },
+    blocks: {
+        ChainlinkOracleUpdate: {
+            chain: "hyperEvm",
+            interval: 300, // Every 300 blocks
+            startBlock: 787000,
+        },
     },
 });

@@ -256,7 +256,7 @@ export interface EventDetail {
     date: string;
     amount: string;
     txHash: string;
-    assetPrice?: string; // Oracle price of the asset at the time of the event (optional for backward compatibility)
+    assetPrice?: string; // Oracle price of the asset at the time of the event
 }
 
 /**
@@ -274,6 +274,7 @@ export interface YieldSegmentDetail {
     segmentYield: bigint;
     segmentYieldUSD: string; // USD value of yield for this segment
     durationDays: number;
+    assetPrice: string; // Oracle price of the asset during this segment (8 decimals precision)
 }
 
 /**
@@ -291,6 +292,7 @@ export interface BorrowCostSegmentDetail {
     segmentBorrowCost: bigint;
     segmentBorrowCostUSD: string; // USD value of borrow cost for this segment
     durationDays: number;
+    assetPrice: string; // Oracle price of the asset during this segment (8 decimals precision)
 }
 
 /**
@@ -486,7 +488,7 @@ export async function calculateUserYieldPositions(
                 // Fetch raw Withdraw events for totalRawDeposited calculation (to subtract)
                 dbQuery.select().from(Withdraw).where(
                     and(
-                        eq(Withdraw.user, user as `0x${string}`),
+                        eq(Withdraw.onBehalfOf, user as `0x${string}`),
                         eq(Withdraw.reserve, asset as `0x${string}`),
                         gte(Withdraw.timestamp, startTimestamp),
                         lte(Withdraw.timestamp, endTimestamp)
@@ -503,7 +505,7 @@ export async function calculateUserYieldPositions(
                 // Fetch raw Withdraw events BEFORE start timestamp for starting raw balance
                 dbQuery.select().from(Withdraw).where(
                     and(
-                        eq(Withdraw.user, user as `0x${string}`),
+                        eq(Withdraw.onBehalfOf, user as `0x${string}`),
                         eq(Withdraw.reserve, asset as `0x${string}`),
                         lte(Withdraw.timestamp, startTimestamp)
                     )
@@ -774,7 +776,8 @@ export async function calculateUserYieldPositions(
                 endLiquidityIndex: seg.endLiquidityIndex,
                 segmentYield: seg.segmentYield,
                 segmentYieldUSD: seg.segmentYieldUSD, // USD value for this segment
-                durationDays: seg.durationDays
+                durationDays: seg.durationDays,
+                assetPrice: seg.assetPrice // Oracle price of the asset during this segment
             }));
 
             const borrowCostSegments: BorrowCostSegmentDetail[] = borrowCostResult.segments.map(seg => ({
@@ -788,7 +791,8 @@ export async function calculateUserYieldPositions(
                 endBorrowIndex: seg.endBorrowIndex,
                 segmentBorrowCost: seg.segmentBorrowCost,
                 segmentBorrowCostUSD: seg.segmentBorrowCostUSD, // USD value for this segment
-                durationDays: seg.durationDays
+                durationDays: seg.durationDays,
+                assetPrice: seg.assetPrice // Oracle price of the asset during this segment
             }));
 
             return {

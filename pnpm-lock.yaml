@@ -15,8 +15,8 @@ importers:
         specifier: ^4.5.0
         version: 4.9.10
       ponder:
-        specifier: ^0.12.0
-        version: 0.12.26(@opentelemetry/api@1.9.0)(@types/node@20.19.19)(hono@4.9.10)(typescript@5.9.3)(viem@2.37.13(typescript@5.9.3))
+        specifier: ^0.15.0
+        version: 0.15.13(@opentelemetry/api@1.9.0)(@types/node@20.19.19)(hono@4.9.10)(typescript@5.9.3)(viem@2.37.13(typescript@5.9.3))
       viem:
         specifier: ^2.21.3
         version: 2.37.13(typescript@5.9.3)
@@ -446,8 +446,8 @@ packages:
     resolution: {integrity: sha512-ZpJxMqB+Qfe3rp6uszCQoag4nSw42icURnBRfFYSOmTgEeOe4rD0vYlbA8spvCu2TlCesNTlEN9BLWtQqLxabA==}
     engines: {node: '>=18.0.0'}
 
-  '@hono/node-server@1.13.3':
-    resolution: {integrity: sha512-tEo3hcyQ6chvSnJ3tKzfX4z2sd7Q+ZkBwwBdW1Ya8Mz29dukxC2xcWiB/lAMwGJrYMW8QTgknIsLu1AsnMBe7A==}
+  '@hono/node-server@1.19.5':
+    resolution: {integrity: sha512-iBuhh+uaaggeAuf+TftcjZyWh2GEgZcVGXkNtskLVoWaXhnJtC5HLHrU8W1KHDoucqO1MswwglmkWLFyiDn4WQ==}
     engines: {node: '>=18.14.1'}
     peerDependencies:
       hono: ^4
@@ -522,8 +522,8 @@ packages:
     resolution: {integrity: sha512-+1VkjdD0QBLPodGrJUeqarH8VAIvQODIbwh9XpP5Syisf7YoQgsJKPNFoqqLQlu+VQ/tVSshMR6loPMn8U+dPg==}
     engines: {node: '>=14'}
 
-  '@ponder/utils@0.2.12':
-    resolution: {integrity: sha512-pIlunpEoXXJlqSucidJl4r4s66DOnPRbqPY3lZ02uhBr6e2GYK7iNRg4IW7v4WnIhVoSugnWIRiEQYWA0yNLiw==}
+  '@ponder/utils@0.2.16':
+    resolution: {integrity: sha512-Q2TpJ1BywdZhGDjtWe6mDQXn/jF2YDfMwdblDytwGjQ6zuFyuujP+o/liVbuHfqSYmeUOPHugxk5yKAhHwWfJw==}
     peerDependencies:
       typescript: '>=5.0.4'
       viem: '>=2'
@@ -1758,8 +1758,8 @@ packages:
   pkg-types@1.3.1:
     resolution: {integrity: sha512-/Jm5M4RvtBFVkKWRu2BLUTNP8/M2a+UwuAX+ae4770q1qVGtfjG+WTCupoZixokjmHiry8uI+dlY8KXYV5HVVQ==}
 
-  ponder@0.12.26:
-    resolution: {integrity: sha512-8KZgMvyTK+mglWQU4Fn1W1hDpjHCo/JXtHZmr2BH9WoweFrdaSPrW0Kg9LHmaHsXrvRwl7+rPt/znOU3+RonAA==}
+  ponder@0.15.13:
+    resolution: {integrity: sha512-OF/1cu9SZowMlvlCJ/4UNegYZCGnZ1bOpb3qBPIT+wkseV6uYOQfDD+oLS61P5jSkDHUP1qnYRoiInB9GzjMPw==}
     engines: {node: '>=18.14'}
     hasBin: true
     peerDependencies:
@@ -2514,7 +2514,7 @@ snapshots:
       '@repeaterjs/repeater': 3.0.6
       tslib: 2.8.1
 
-  '@hono/node-server@1.13.3(hono@4.9.10)':
+  '@hono/node-server@1.19.5(hono@4.9.10)':
     dependencies:
       hono: 4.9.10
 
@@ -2584,7 +2584,7 @@ snapshots:
   '@pkgjs/parseargs@0.11.0':
     optional: true
 
-  '@ponder/utils@0.2.12(typescript@5.9.3)(viem@2.37.13(typescript@5.9.3))':
+  '@ponder/utils@0.2.16(typescript@5.9.3)(viem@2.37.13(typescript@5.9.3))':
     dependencies:
       viem: 2.37.13(typescript@5.9.3)
     optionalDependencies:
@@ -3710,7 +3710,7 @@ snapshots:
       mlly: 1.8.0
       pathe: 2.0.3
 
-  ponder@0.12.26(@opentelemetry/api@1.9.0)(@types/node@20.19.19)(hono@4.9.10)(typescript@5.9.3)(viem@2.37.13(typescript@5.9.3)):
+  ponder@0.15.13(@opentelemetry/api@1.9.0)(@types/node@20.19.19)(hono@4.9.10)(typescript@5.9.3)(viem@2.37.13(typescript@5.9.3)):
     dependencies:
       '@babel/code-frame': 7.27.1
       '@commander-js/extra-typings': 12.1.0(commander@12.1.0)
@@ -3718,8 +3718,8 @@ snapshots:
       '@escape.tech/graphql-armor-max-aliases': 2.6.2
       '@escape.tech/graphql-armor-max-depth': 2.4.2
       '@escape.tech/graphql-armor-max-tokens': 2.5.1
-      '@hono/node-server': 1.13.3(hono@4.9.10)
-      '@ponder/utils': 0.2.12(typescript@5.9.3)(viem@2.37.13(typescript@5.9.3))
+      '@hono/node-server': 1.19.5(hono@4.9.10)
+      '@ponder/utils': 0.2.16(typescript@5.9.3)(viem@2.37.13(typescript@5.9.3))
       abitype: 0.10.3(typescript@5.9.3)
       ansi-escapes: 7.1.1
       commander: 12.1.0
@@ -3782,6 +3782,7 @@ snapshots:
       - postgres
       - prisma
       - sass
+      - sass-embedded
       - sql.js
       - sqlite3
       - stylus
@@ -4061,12 +4062,13 @@ snapshots:
       debug: 4.4.3
       pathe: 1.1.2
       picocolors: 1.1.1
-      vite: 5.0.7(@types/node@20.19.19)
+      vite: 5.4.20(@types/node@20.19.19)
     transitivePeerDependencies:
       - '@types/node'
       - less
       - lightningcss
       - sass
+      - sass-embedded
       - stylus
       - sugarss
       - supports-color

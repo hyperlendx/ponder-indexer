@@ -67,9 +67,11 @@ export async function calculateUserDailyIsolatedPairPortfolioValue(
         const oneDaySeconds = 24 * 60 * 60;
         const dailyValues = [];
 
-        // Generate portfolio values for each day at midnight UTC
-        for (let ts = firstDayStart; ts <= lastDayStart; ts += oneDaySeconds) {
-            const positions = await calculateAllIsolatedPairPositions(context, user, ts);
+        // Generate portfolio values for each day at END of day (23:59:59 UTC)
+        for (let dayStart = firstDayStart; dayStart <= lastDayStart; dayStart += oneDaySeconds) {
+            // Calculate at END of day instead of start
+            const dayEnd = dayStart + oneDaySeconds - 1;
+            const positions = await calculateAllIsolatedPairPositions(context, user, dayEnd);
 
             if (positions.length === 0) {
                 continue; // Skip days with no positions
@@ -87,7 +89,7 @@ export async function calculateUserDailyIsolatedPairPortfolioValue(
                 // Get decimals for this pair
                 const decimals = await getDecimals(context, pos.pair) || 18;
 
-                // Get historical price at day start from events
+                // Get historical price at day end from events
                 // Try DepositIsolated first
                 let assetPrice: bigint | undefined = undefined;
 
@@ -98,7 +100,7 @@ export async function calculateUserDailyIsolatedPairPortfolioValue(
                         and(
                             eq(DepositIsolated.owner, user as `0x${string}`),
                             eq(DepositIsolated.pair, pos.pair as `0x${string}`),
-                            lte(DepositIsolated.timestamp, ts)
+                            lte(DepositIsolated.timestamp, dayEnd)
                         )
                     )
                     .orderBy(desc(DepositIsolated.timestamp))
@@ -118,7 +120,7 @@ export async function calculateUserDailyIsolatedPairPortfolioValue(
                             and(
                                 eq(BorrowAssetIsolated.borrower, user as `0x${string}`),
                                 eq(BorrowAssetIsolated.pair, pos.pair as `0x${string}`),
-                                lte(BorrowAssetIsolated.timestamp, ts)
+                                lte(BorrowAssetIsolated.timestamp, dayEnd)
                             )
                         )
                         .orderBy(desc(BorrowAssetIsolated.timestamp))
@@ -138,7 +140,7 @@ export async function calculateUserDailyIsolatedPairPortfolioValue(
                             and(
                                 eq(AddCollateralIsolated.borrower, user as `0x${string}`),
                                 eq(AddCollateralIsolated.pair, pos.pair as `0x${string}`),
-                                lte(AddCollateralIsolated.timestamp, ts)
+                                lte(AddCollateralIsolated.timestamp, dayEnd)
                             )
                         )
                         .orderBy(desc(AddCollateralIsolated.timestamp))
@@ -181,8 +183,8 @@ export async function calculateUserDailyIsolatedPairPortfolioValue(
             const portfolioValueUSD = totalSuppliedUSD - totalBorrowedUSD;
 
             dailyValues.push({
-                date: new Date(ts * 1000).toISOString().split('T')[0]!,
-                timestamp: ts,
+                date: new Date(dayStart * 1000).toISOString().split('T')[0]!,
+                timestamp: dayEnd,
                 portfolioValue,
                 totalSupplied,
                 totalBorrowed,

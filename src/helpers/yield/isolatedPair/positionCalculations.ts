@@ -402,6 +402,7 @@ export interface IsolatedPairYieldSegmentDetail {
     segmentYield: bigint;
     segmentYieldUSD: string; // USD value of yield for this segment
     durationDays: number;
+    assetPrice: string; // Oracle price of the asset during this segment (8 decimals precision)
 }
 
 /**
@@ -419,6 +420,7 @@ export interface IsolatedPairBorrowCostSegmentDetail {
     segmentBorrowCost: bigint;
     segmentBorrowCostUSD: string; // USD value of borrow cost for this segment
     durationDays: number;
+    assetPrice: string; // Oracle price of the asset during this segment (8 decimals precision)
 }
 
 /**

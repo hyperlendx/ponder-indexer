@@ -105,6 +105,7 @@ export const Withdraw = onchainTable("withdraw", (t) => ({
     pool: t.hex(),
     reserve: t.hex(),
     user: t.hex(),
+    onBehalfOf: t.hex(),
     to: t.hex(),
     amount: t.bigint(),
     timestamp: t.integer(),
@@ -625,5 +626,57 @@ export const UserMonthlyInterest = onchainTable(
         userAssetIdx: index().on(table.user, table.asset),
         yearMonthIdx: index().on(table.year, table.month),
         userYearMonthIdx: index().on(table.user, table.year, table.month),
+    })
+);
+
+// Store periodic oracle price snapshots for all assets
+export const AssetPriceSnapshot = onchainTable(
+    "asset_price_snapshot",
+    (t) => ({
+        id: t.text().primaryKey(), // asset-blockNumber
+        asset: t.hex(),
+        price: t.bigint(), // Oracle price (8 decimals precision)
+        blockNumber: t.bigint(),
+        timestamp: t.integer(),
+    }),
+    (table) => ({
+        assetIdx: index().on(table.asset),
+        timestampIdx: index().on(table.timestamp),
+        blockNumberIdx: index().on(table.blockNumber),
+        assetTimestampIdx: index().on(table.asset, table.timestamp),
+        assetBlockIdx: index().on(table.asset, table.blockNumber),
+    })
+);
+
+// Track all isolated pairs created by the factory
+export const IsolatedPairRegistry = onchainTable(
+    "isolated_pair_registry",
+    (t) => ({
+        id: t.hex().primaryKey(), // pair address
+        createdAtBlock: t.bigint(),
+        createdAtTimestamp: t.integer(),
+    }),
+    (table) => ({
+        createdAtBlockIdx: index().on(table.createdAtBlock),
+    })
+);
+
+// Store periodic oracle price snapshots for isolated pairs
+export const IsolatedPairPriceSnapshot = onchainTable(
+    "isolated_pair_price_snapshot",
+    (t) => ({
+        id: t.text().primaryKey(), // pair-blockNumber
+        pair: t.hex(),
+        priceLow: t.bigint(), // Oracle low price
+        priceHigh: t.bigint(), // Oracle high price
+        blockNumber: t.bigint(),
+        timestamp: t.integer(),
+    }),
+    (table) => ({
+        pairIdx: index().on(table.pair),
+        timestampIdx: index().on(table.timestamp),
+        blockNumberIdx: index().on(table.blockNumber),
+        pairTimestampIdx: index().on(table.pair, table.timestamp),
+        pairBlockIdx: index().on(table.pair, table.blockNumber),
     })
 );

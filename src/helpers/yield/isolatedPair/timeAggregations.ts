@@ -200,10 +200,12 @@ export async function calculateDailyIsolatedPairYields(
 
     while (currentDate <= endDateMidnight) {
         const dateStr = currentDate.toISOString().split('T')[0]!;
-        const dayTimestamp = Math.floor(currentDate.getTime() / 1000);
+        const dayStartTimestamp = Math.floor(currentDate.getTime() / 1000);
+        // Use END of day timestamp (23:59:59 UTC) for consistency with portfolio value endpoints
+        const dayEndTimestamp = dayStartTimestamp + oneDaySeconds - 1;
         dailyResults.set(dateStr, {
             date: dateStr,
-            timestamp: dayTimestamp,
+            timestamp: dayEndTimestamp,
             dailyYield: 0n,
             assetYieldUSD: 0,
             borrowCostUSD: 0,

@@ -24,28 +24,29 @@ import {
     LiquidateIsolated,
     DepositIsolated,
     WithdrawIsolated,
-    UserIsolatedPairTracking,
     UpdateRateIsolated,
     AddInterestIsolated,
-    IsolatedPairVaultState,
-    // UserCore,
-    // UserReserveCore,
     HTokenTransfer,
     StrategyDeployed,
-    User,
-    UserDeposit,
-    // New interest tracking tables
     ReserveDataEvent,
-    UserBalanceEvent,
-    UserPosition,
-    UserMonthlyInterest
+    AssetPriceSnapshot,
+    IsolatedPairRegistry,
+    IsolatedPairPriceSnapshot,
 } from "ponder:schema";
 
-import { getOraclePrice, getIsolatedOraclePrice } from "./helpers/getPrice";
+import { CorePoolAbi } from "../abis/CorePoolAbi";
+import { OracleAbi } from "../abis/OracleAbi";
+import { IsolatedPairRegistry as IsolatedPairRegistryAbi } from "../abis/IsolatedPairRegistry";
+import config from "../ponder.config";
+
+import { getOraclePrice, getIsolatedOraclePrice, getIsolatedOraclePrices } from "./helpers/getPrice";
 import { updateUserDepositBalance } from "./helpers/userBalanceManager";
 import { updateUserPosition } from "./helpers/userPositionManager";
 import { calculateScaledBalance, calculateLiquidityIndexAtTimestamp } from "./helpers/aave";
 import { updateUserIsolatedPairTracking } from "./helpers/userIsolatedPairTracker";
+import { getAddress } from 'viem'
+
+const wrappedTokenGatewayAddress = getAddress("0x49558c794ea2aC8974C9F27886DDfAa951E99171");
 
 // HToken Transfer Event Handler - Enhanced for Interest Tracking
 ponder.on("HTokens:BalanceTransfer", async ({ event, context }) => {
@@ -86,47 +87,6 @@ ponder.on("CorePool:Borrow", async ({ event, context }) => {
         timestamp: Number(event.block.timestamp),
         price: reservePrice,
     });
-
-    // // Update User table
-    // const existingUser = await db.find(UserCore, { id: event.args.onBehalfOf });
-    // if (existingUser) {
-    //     await db
-    //         .update(UserCore, { id: event.args.onBehalfOf })
-    //         .set({ totalBorrows: existingUser.totalBorrows || 0n + BigInt(event.args.amount) });
-    // } else {
-    //     await db.insert(UserCore).values({
-    //         id: event.args.onBehalfOf,
-    //         totalDeposits: 0n,
-    //         totalBorrows: BigInt(event.args.amount),
-    //         totalRepayments: 0n,
-    //         totalWithdrawals: 0n,
-    //         liquidationCount: 0,
-    //     });
-    // }
-
-    // // Update UserReserve table
-    // const userReserveId = `${event.args.onBehalfOf}_${event.args.reserve}`;
-    // const existingUserReserve = await db.find(UserReserveCore, { "id": userReserveId });
-    // if (existingUserReserve) {
-    //     await db
-    //         .update(UserReserveCore, { "id": userReserveId })
-    //         .set({ 
-    //             currentDebt: existingUserReserve.currentDebt || 0n + BigInt(event.args.amount),
-    //             totalBorrows: existingUserReserve.totalBorrows || 0n + BigInt(event.args.amount),
-    //         })
-    // } else {
-    //     await db.insert(UserReserveCore).values({
-    //         id: userReserveId,
-    //         user: event.args.onBehalfOf,
-    //         reserve: event.args.reserve,
-    //         currentATokenBalance: 0n,
-    //         currentDebt: BigInt(event.args.amount),
-    //         totalDeposits: 0n,
-    //         totalBorrows: BigInt(event.args.amount),
-    //         totalRepayments: 0n,
-    //         totalWithdrawals: 0n,
-    //     });
-    // }
 });
 
 // Repay Event Handler
@@ -202,21 +162,16 @@ ponder.on("CorePool:Supply", async ({ event, context }) => {
     );
 });
 
-// Withdraw Event Handler - Enhanced for Interest Tracking
+// Withdraw Event Handler
 ponder.on("CorePool:Withdraw", async ({ event, context }) => {
-    console.log("💸 Withdraw event detected!", {
-        txHash: event.transaction.hash,
-        reserve: event.args.reserve,
-        amount: event.args.amount.toString(),
-        user: event.args.user, // This might be WrappedTokenGateway
-        to: event.args.to, // This might also be WrappedTokenGateway
-        transactionFrom: event.transaction.from, // This is the actual user who initiated the transaction
-        logAddress: event.log.address
-    });
-
     const reservePrice = await getOraclePrice(context, event.args.reserve);
     const timestamp = Number(event.block.timestamp);
     const blockNumber = event.block.number;
+
+    // Determine the actual user:
+    // - For WrappedTokenGateway withdrawals: event.args.user is the gateway, actual user is transaction.from
+    const isGatewayWithdrawal = getAddress(event.args.user) === wrappedTokenGatewayAddress;
+    const actualUser = isGatewayWithdrawal ? event.transaction.from : event.args.user;
 
     // Insert the historical Withdraw transaction record
     await context.db.insert(Withdraw).values({
@@ -224,29 +179,18 @@ ponder.on("CorePool:Withdraw", async ({ event, context }) => {
         txHash: event.transaction.hash,
         pool: event.log.address,
         reserve: event.args.reserve,
-        user: event.args.user, // Keep as-is for historical accuracy (pool contract)
-        to: event.args.to, // The actual user receiving tokens
+        user: event.args.user,
+        onBehalfOf: actualUser,
+        to: event.args.to,
         amount: event.args.amount,
         timestamp: timestamp,
         price: reservePrice,
     });
 
     // Update user deposit balance (legacy system)
-    // For WrappedTokenGateway withdrawals, the actual user is transaction.from
-    const actualUser = event.transaction.from;
-
-    console.log(`🔄 Updating balance for withdrawal:`, {
-        eventUser: event.args.user,
-        eventTo: event.args.to,
-        actualUser: actualUser, // Use transaction.from as the real user
-        token: event.args.reserve,
-        withdrawAmount: event.args.amount.toString(),
-        negativeAmount: (-event.args.amount).toString()
-    });
-
     await updateUserDepositBalance(
         context,
-        actualUser, // Use transaction.from - the actual user who initiated the withdrawal
+        actualUser,
         event.args.reserve,
         -event.args.amount, // Negative amount for withdrawals
         timestamp
@@ -267,7 +211,7 @@ ponder.on("CorePool:Withdraw", async ({ event, context }) => {
     // Update user position with scaled balance tracking
     await updateUserPosition(
         context,
-        actualUser, // Use transaction.from - the actual user who initiated the withdrawal
+        actualUser,
         event.args.reserve,
         -scaledBalance, // Negative for withdrawals
         'withdraw',
@@ -497,16 +441,17 @@ ponder.on("CorePool:IsolationModeTotalDebtUpdated", async ({ event, context }) =
 /// ISOLATED PAIRS
 
 ponder.on("IsolatedPair:BorrowAsset", async ({ event, context }) => {
+    const pair = event.transaction.to;
+    if (!pair) {
+        throw new Error("transaction.to is null");
+    }
     let price = null;
 
     try {
-        //note: event.transaction.to can never be null
-        price = await getIsolatedOraclePrice(context, event.transaction.to || "0xNEW");
+        price = await getIsolatedOraclePrice(context, pair);
     } catch (e: any) {
         console.error(`Error fetching reserve price: ${e.message}`);
     }
-
-    const pair = event.transaction.to || "0xNEW";
 
     // Import vault state functions
     const { calculateExchangeRateFromVaultState, getVaultStateAtTimestamp } = await import("./helpers/yield/isolatedPair/vaultState");
@@ -517,18 +462,11 @@ ponder.on("IsolatedPair:BorrowAsset", async ({ event, context }) => {
         ? calculateExchangeRateFromVaultState(vaultState.totalAssetAmount, vaultState.totalAssetShares)
         : 1000000000000000000n; // Default 1:1 if no state
 
-    // Debug logging for the specific transaction we're tracking
-    if (event.transaction.hash === "0x6bbd20fdf8e170800f7c186cce5ee3dd8df668ee9fb70b6083a63cadbe079ef0") {
-        console.log(`[BorrowAsset] Transaction: ${event.transaction.hash}`);
-        console.log(`[BorrowAsset] Timestamp: ${event.block.timestamp}`);
-        console.log(`[BorrowAsset] Vault State:`, vaultState);
-        console.log(`[BorrowAsset] Exchange Rate: ${exchangeRate}`);
-    }
 
     await context.db.insert(BorrowAssetIsolated).values({
         id: event.id,
         txHash: event.transaction.hash,
-        pair: pair as `0x${string}`,
+        pair: pair,
         borrower: event.args._borrower,
         receiver: event.args._receiver,
         borrowAmount: event.args._borrowAmount,
@@ -549,15 +487,17 @@ ponder.on("IsolatedPair:BorrowAsset", async ({ event, context }) => {
 });
 
 ponder.on("IsolatedPair:RepayAsset", async ({ event, context }) => {
+    const pair = event.transaction.to;
+    if (!pair) {
+        throw new Error("transaction.to is null");
+    }
     let price = null;
 
     try {
-        price = await getIsolatedOraclePrice(context, event.transaction.to || "0xNEW");
+        price = await getIsolatedOraclePrice(context, pair);
     } catch (e: any) {
         console.error(`Error fetching reserve price: ${e.message}`);
     }
-
-    const pair = event.transaction.to || "0xNEW";
 
     // Import vault state functions
     const { calculateExchangeRateFromVaultState, getVaultStateAtTimestamp } = await import("./helpers/yield/isolatedPair/vaultState");
@@ -571,7 +511,7 @@ ponder.on("IsolatedPair:RepayAsset", async ({ event, context }) => {
     await context.db.insert(RepayAssetIsolated).values({
         id: event.id,
         txHash: event.transaction.hash,
-        pair: pair as `0x${string}`,
+        pair: pair,
         borrower: event.args.borrower,
         payer: event.args.payer,
         amountToRepay: event.args.amountToRepay,
@@ -592,10 +532,14 @@ ponder.on("IsolatedPair:RepayAsset", async ({ event, context }) => {
 });
 
 ponder.on("IsolatedPair:AddCollateral", async ({ event, context }) => {
+    const pair = event.transaction.to;
+    if (!pair) {
+        throw new Error("transaction.to is null");
+    }
     let price = null;
 
     try {
-        price = await getIsolatedOraclePrice(context, event.transaction.to || "0xNEW");
+        price = await getIsolatedOraclePrice(context, pair);
     } catch (e: any) {
         console.error(`Error fetching reserve price: ${e.message}`);
     }
@@ -603,7 +547,7 @@ ponder.on("IsolatedPair:AddCollateral", async ({ event, context }) => {
     await context.db.insert(AddCollateralIsolated).values({
         id: event.id,
         txHash: event.transaction.hash,
-        pair: event.transaction.to || "0xNEW",
+        pair: pair,
         borrower: event.args.borrower,
         sender: event.args.sender,
         collateralAmount: event.args.collateralAmount,
@@ -615,17 +559,21 @@ ponder.on("IsolatedPair:AddCollateral", async ({ event, context }) => {
     await updateUserIsolatedPairTracking(
         context,
         event.args.borrower,
-        event.transaction.to || "0xNEW",
+        pair,
         Number(event.block.timestamp),
         'addCollateral'
     );
 });
 
 ponder.on("IsolatedPair:RemoveCollateral", async ({ event, context }) => {
+    const pair = event.transaction.to;
+    if (!pair) {
+        throw new Error("transaction.to is null");
+    }
     let price = null;
 
     try {
-        price = await getIsolatedOraclePrice(context, event.transaction.to || "0xNEW");
+        price = await getIsolatedOraclePrice(context, pair);
     } catch (e: any) {
         console.error(`Error fetching reserve price: ${e.message}`);
     }
@@ -633,7 +581,7 @@ ponder.on("IsolatedPair:RemoveCollateral", async ({ event, context }) => {
     await context.db.insert(RemoveCollateralIsolated).values({
         id: event.id,
         txHash: event.transaction.hash,
-        pair: event.transaction.to || "0xNEW",
+        pair: pair,
         receiver: event.args._receiver,
         sender: event.args._sender,
         borrower: event.args._borrower,
@@ -646,22 +594,25 @@ ponder.on("IsolatedPair:RemoveCollateral", async ({ event, context }) => {
     await updateUserIsolatedPairTracking(
         context,
         event.args._borrower,
-        event.transaction.to || "0xNEW",
+        pair,
         Number(event.block.timestamp),
         'removeCollateral'
     );
 });
 
 ponder.on("IsolatedPair:Liquidate", async ({ event, context }) => {
+    const pair = event.transaction.to;
+    if (!pair) {
+        throw new Error("transaction.to is null");
+    }
     let price = null;
 
     try {
-        price = await getIsolatedOraclePrice(context, event.transaction.to || "0xNEW");
+        price = await getIsolatedOraclePrice(context, pair);
     } catch (e: any) {
         console.error(`Error fetching reserve price: ${e.message}`);
     }
 
-    const pair = event.transaction.to || "0xNEW";
     const sharesToAdjust = event.args._sharesToAdjust;
     const amountToAdjust = event.args._amountToAdjust;
 
@@ -688,7 +639,7 @@ ponder.on("IsolatedPair:Liquidate", async ({ event, context }) => {
     await context.db.insert(LiquidateIsolated).values({
         id: event.id,
         txHash: event.transaction.hash,
-        pair: pair as `0x${string}`,
+        pair: pair,
         borrower: event.args._borrower,
         liquidator: event.transaction.from,
         collateralForLiquidator: event.args._collateralForLiquidator,
@@ -721,15 +672,18 @@ ponder.on("IsolatedPair:Liquidate", async ({ event, context }) => {
 });
 
 ponder.on("IsolatedPair:Deposit", async ({ event, context }) => {
+    const pair = event.transaction.to;
+    if (!pair) {
+        throw new Error("transaction.to is null");
+    }
     let price = null;
 
     try {
-        price = await getIsolatedOraclePrice(context, event.transaction.to || "0xNEW");
+        price = await getIsolatedOraclePrice(context, pair);
     } catch (e: any) {
         console.error(`Error fetching reserve price: ${e.message}`);
     }
 
-    const pair = event.transaction.to || "0xNEW";
     const assets = event.args.assets;
     const shares = event.args.shares;
 
@@ -756,7 +710,7 @@ ponder.on("IsolatedPair:Deposit", async ({ event, context }) => {
     await context.db.insert(DepositIsolated).values({
         id: event.id,
         txHash: event.transaction.hash,
-        pair: pair as `0x${string}`,
+        pair: pair,
         caller: event.args.caller,
         owner: event.args.owner,
         assets: event.args.assets,
@@ -777,15 +731,18 @@ ponder.on("IsolatedPair:Deposit", async ({ event, context }) => {
 });
 
 ponder.on("IsolatedPair:Withdraw", async ({ event, context }) => {
+    const pair = event.transaction.to;
+    if (!pair) {
+        throw new Error("transaction.to is null");
+    }
     let price = null;
 
     try {
-        price = await getIsolatedOraclePrice(context, event.transaction.to || "0xNEW");
+        price = await getIsolatedOraclePrice(context, pair);
     } catch (e: any) {
         console.error(`Error fetching reserve price: ${e.message}`);
     }
 
-    const pair = event.transaction.to || "0xNEW";
     const assets = event.args.assets;
     const shares = event.args.shares;
 
@@ -812,7 +769,7 @@ ponder.on("IsolatedPair:Withdraw", async ({ event, context }) => {
     await context.db.insert(WithdrawIsolated).values({
         id: event.id,
         txHash: event.transaction.hash,
-        pair: pair as `0x${string}`,
+        pair: pair,
         caller: event.args.caller,
         owner: event.args.owner,
         receiver: event.args.receiver,
@@ -836,10 +793,14 @@ ponder.on("IsolatedPair:Withdraw", async ({ event, context }) => {
 // Isolated Pair Rate Events - Enable accurate exchange rate calculations
 
 ponder.on("IsolatedPair:UpdateRate", async ({ event, context }) => {
+    const pair = event.transaction.to;
+    if (!pair) {
+        throw new Error("transaction.to is null");
+    }
     await context.db.insert(UpdateRateIsolated).values({
         id: event.id,
         txHash: event.transaction.hash,
-        pair: event.transaction.to || "0xNEW",
+        pair: pair,
         oldRatePerSec: event.args.oldRatePerSec,
         oldFullUtilizationRate: event.args.oldFullUtilizationRate,
         newRatePerSec: event.args.newRatePerSec,
@@ -849,14 +810,9 @@ ponder.on("IsolatedPair:UpdateRate", async ({ event, context }) => {
 });
 
 ponder.on("IsolatedPair:AddInterest", async ({ event, context }) => {
-    const pair = event.transaction.to || "0xNEW";
-
-    // Debug logging for the specific transactions we're tracking
-    if (event.transaction.hash === "0x6bbd20fdf8e170800f7c186cce5ee3dd8df668ee9fb70b6083a63cadbe079ef0" ||
-        event.transaction.hash === "0x4c6af30269eb8844a3bfefdf417827bf9a6db6161c28764a7328914d57c4c833") {
-        console.log(`[AddInterest] Transaction: ${event.transaction.hash}`);
-        console.log(`[AddInterest] Interest Earned: ${event.args.interestEarned}`);
-        console.log(`[AddInterest] Fees Share: ${event.args.feesShare}`);
+    const pair = event.transaction.to;
+    if (!pair) {
+        throw new Error("transaction.to is null");
     }
 
     // Update vault state (totalAsset.amount increases by interestEarned, totalAsset.shares increases by feesShare)
@@ -873,19 +829,10 @@ ponder.on("IsolatedPair:AddInterest", async ({ event, context }) => {
         event.id
     );
 
-    if (event.transaction.hash === "0x6bbd20fdf8e170800f7c186cce5ee3dd8df668ee9fb70b6083a63cadbe079ef0" ||
-        event.transaction.hash === "0x4c6af30269eb8844a3bfefdf417827bf9a6db6161c28764a7328914d57c4c833") {
-        console.log(`[AddInterest] New Vault State:`, newVaultState);
-        if (newVaultState) {
-            const rate = (newVaultState.totalAssetAmount * 1000000000000000000n) / newVaultState.totalAssetShares;
-            console.log(`[AddInterest] Calculated Exchange Rate: ${rate}`);
-        }
-    }
-
     await context.db.insert(AddInterestIsolated).values({
         id: event.id,
         txHash: event.transaction.hash,
-        pair: pair as `0x${string}`,
+        pair: pair,
         interestEarned: event.args.interestEarned,
         rate: event.args.rate,
         feesAmount: event.args.feesAmount,
@@ -908,3 +855,111 @@ ponder.on("LoopingStrategyManagerFactory:StrategyDeployed", async ({ event, cont
         debtAsset: event.args.debtAsset,
     });
 });
+
+// Cache for reserves list - refreshed every ~1 hour (3600 blocks at ~1 block/sec)
+let cachedReservesList: readonly `0x${string}`[] | null = null;
+let cachedIsolatedPairsList: readonly `0x${string}`[] | null = null;
+let lastReservesRefreshBlock: bigint = 0n;
+const RESERVES_REFRESH_INTERVAL = 3600n; // Refresh reserves list every 3600 blocks
+
+// Handler for AddPair events - track new isolated pairs
+ponder.on("IsolatedPairRegistryContract:AddPair", async ({ event, context }) => {
+    const pairAddress = event.args.pairAddress;
+    const blockNumber = event.block.number;
+    const timestamp = Number(event.block.timestamp);
+
+    await context.db.insert(IsolatedPairRegistry).values({
+        id: pairAddress,
+        createdAtBlock: blockNumber,
+        createdAtTimestamp: timestamp,
+    });
+
+    // Invalidate cache so it gets refreshed on next block interval
+    cachedIsolatedPairsList = null;
+
+    console.log(`[IsolatedPairRegistry] New pair added: ${pairAddress} at block ${blockNumber}`);
+});
+
+// Oracle Price Updates every 300 blocks
+ponder.on("ChainlinkOracleUpdate:block", async ({ event, context }) => {
+    const blockNumber = event.block.number;
+    const timestamp = Number(event.block.timestamp);
+
+    try {
+        // Refresh reserves list if cache is empty or stale
+        if (!cachedReservesList || blockNumber - lastReservesRefreshBlock >= RESERVES_REFRESH_INTERVAL) {
+            const corePoolAddress = config.contracts.CorePool.address;
+            const poolAddress = Array.isArray(corePoolAddress) ? corePoolAddress[0] : corePoolAddress;
+
+            cachedReservesList = await context.client.readContract({
+                abi: CorePoolAbi,
+                address: poolAddress as `0x${string}`,
+                functionName: "getReservesList",
+                args: []
+            });
+
+            // Also refresh isolated pairs list
+            const registryAddress = config.contracts.IsolatedPairRegistryContract.address as `0x${string}`;
+            cachedIsolatedPairsList = await context.client.readContract({
+                abi: IsolatedPairRegistryAbi,
+                address: registryAddress,
+                functionName: "getAllPairAddresses",
+                args: []
+            });
+
+            lastReservesRefreshBlock = blockNumber;
+            console.log(`[ChainlinkOracleUpdate] Refreshed lists: ${cachedReservesList?.length} reserves, ${cachedIsolatedPairsList?.length} isolated pairs`);
+        }
+
+        // === Core Pool Assets ===
+        if (cachedReservesList && cachedReservesList.length > 0) {
+            const oracleAddress = config.contracts.Oracle.address as `0x${string}`;
+            const prices = await context.client.readContract({
+                abi: OracleAbi,
+                address: oracleAddress,
+                functionName: "getAssetsPrices",
+                args: [cachedReservesList]
+            });
+
+            for (let i = 0; i < cachedReservesList.length; i++) {
+                const asset = cachedReservesList[i];
+                const price = prices[i];
+
+                if (price && price > 0n) {
+                    await context.db.insert(AssetPriceSnapshot).values({
+                        id: `${asset}-${blockNumber}`,
+                        asset: asset,
+                        price: price,
+                        blockNumber: blockNumber,
+                        timestamp: timestamp,
+                    });
+                }
+            }
+        }
+
+        // === Isolated Pairs ===
+        if (cachedIsolatedPairsList && cachedIsolatedPairsList.length > 0) {
+            for (const pair of cachedIsolatedPairsList) {
+                const prices = await getIsolatedOraclePrices(context, pair);
+
+                if (prices && prices.priceLow > 0n && prices.priceHigh > 0n) {
+                    await context.db.insert(IsolatedPairPriceSnapshot).values({
+                        id: `${pair}-${blockNumber}`,
+                        pair: pair,
+                        priceLow: prices.priceLow,
+                        priceHigh: prices.priceHigh,
+                        blockNumber: blockNumber,
+                        timestamp: timestamp,
+                    });
+                }
+            }
+        }
+
+        const reservesCount = cachedReservesList?.length || 0;
+        const pairsCount = cachedIsolatedPairsList?.length || 0;
+        console.log(`[ChainlinkOracleUpdate] Saved ${reservesCount} reserve + ${pairsCount} isolated pair price snapshots at block ${blockNumber}`);
+
+    } catch (error) {
+        console.error(`[ChainlinkOracleUpdate] Error fetching prices at block ${blockNumber}:`, error);
+    }
+})

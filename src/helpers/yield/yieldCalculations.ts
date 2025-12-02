@@ -5,6 +5,7 @@ import { getScaledBalanceAtTimestamp, getScaledBorrowBalanceAtTimestamp } from "
 import { LiquidityIndexCache } from "./liquidityIndexCache";
 import { calculateVariableBorrowIndexAtTimestamp } from "../aave/borrowIndex";
 import { calculateUSDValueNumber } from "../usdCalculations";
+import { getAssetPriceForSegment } from "../getPrice";
 
 /**
  * Calculate interest earned in a specific time segment
@@ -105,7 +106,6 @@ export async function createTimeSegments(
 
 /**
  * Custom period yield calculation that handles intra-period positions
- * Adapts the monthly segmented calculation for arbitrary date ranges
  *
  * @param indexCache - Optional cache to avoid redundant liquidity index queries
  * @param decimals - Token decimals for USD calculation
@@ -254,8 +254,18 @@ export async function calculateSegmentedCustomPeriodYield(
         const actualBalance = calculateActualBalance(segment.scaledBalance, startLiquidityIndex);
         const durationDays = (Number(segment.endTime) - Number(segment.startTime)) / (24 * 60 * 60);
 
-        // Calculate USD value for this segment's yield using current price
-        const segmentYieldUSD = calculateUSDValueNumber(segmentInterest, currentPrice, decimals);
+        // Get segment-specific asset price
+        const segmentPrice = await getAssetPriceForSegment(
+            context,
+            asset,
+            segment.startTime,
+            segment.endTime,
+            false // not isolated pair
+        );
+        const priceToUse = segmentPrice > 0n ? segmentPrice : currentPrice;
+
+        // Calculate USD value for this segment's yield using segment-specific price
+        const segmentYieldUSD = calculateUSDValueNumber(segmentInterest, priceToUse, decimals);
         totalInterestUSD += segmentYieldUSD;
 
         detailedSegments.push({
@@ -269,7 +279,8 @@ export async function calculateSegmentedCustomPeriodYield(
             endLiquidityIndex,
             segmentYield: segmentInterest,
             segmentYieldUSD: segmentYieldUSD.toFixed(4),
-            durationDays: Math.round(durationDays * 100) / 100 // Round to 2 decimal places
+            durationDays: Math.round(durationDays * 100) / 100, // Round to 2 decimal places
+            assetPrice: priceToUse.toString() // Add asset price for this segment
         });
     }
 
@@ -583,8 +594,18 @@ export async function calculateSegmentedCustomPeriodBorrowCost(
         const actualBorrowBalance = calculateActualBalance(segment.scaledBorrowBalance, startBorrowIndex);
         const durationDays = (Number(segment.endTime) - Number(segment.startTime)) / (24 * 60 * 60);
 
-        // Calculate USD value for this segment's borrow cost using current price
-        const segmentBorrowCostUSD = calculateUSDValueNumber(segmentBorrowCost, currentPrice, decimals);
+        // Get segment-specific asset price (fallback to current price if not found)
+        const segmentPrice = await getAssetPriceForSegment(
+            context,
+            asset,
+            segment.startTime,
+            segment.endTime,
+            false // not isolated pair
+        );
+        const priceToUse = segmentPrice > 0n ? segmentPrice : currentPrice;
+
+        // Calculate USD value for this segment's borrow cost using segment-specific price
+        const segmentBorrowCostUSD = calculateUSDValueNumber(segmentBorrowCost, priceToUse, decimals);
         totalBorrowCostUSD += segmentBorrowCostUSD;
 
         detailedSegments.push({
@@ -598,7 +619,8 @@ export async function calculateSegmentedCustomPeriodBorrowCost(
             endBorrowIndex,
             segmentBorrowCost,
             segmentBorrowCostUSD: segmentBorrowCostUSD.toFixed(4),
-            durationDays: Math.round(durationDays * 100) / 100
+            durationDays: Math.round(durationDays * 100) / 100,
+            assetPrice: priceToUse.toString() // Add asset price for this segment
         });
     }
 

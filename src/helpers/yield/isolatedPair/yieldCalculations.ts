@@ -18,6 +18,7 @@ import { IsolatedPairBalanceCache } from "./balanceCache";
 import { DepositIsolated, WithdrawIsolated, BorrowAssetIsolated, RepayAssetIsolated, LiquidateIsolated } from "ponder:schema";
 import { eq, and, gte, lte, desc } from "ponder";
 import { calculateUSDValueNumber } from "../../usdCalculations";
+import { getAssetPriceForSegment } from "../../getPrice";
 
 /**
  * Yield data for a single isolated pair over a time period
@@ -475,8 +476,18 @@ export async function calculateSegmentedIsolatedPairYield(
         const segmentYield = (segment.assetShares * exchangeRateChange + EXCHANGE_PRECISION / 2n) / EXCHANGE_PRECISION;
         totalYield += segmentYield;
 
-        // Calculate USD value for this segment's yield
-        const segmentYieldUSD = calculateUSDValueNumber(segmentYield, currentPrice, decimals);
+        // Get segment-specific asset price (fallback to current price if not found)
+        const segmentPrice = await getAssetPriceForSegment(
+            context,
+            pair,
+            segment.startTime,
+            segment.endTime,
+            true // is isolated pair
+        );
+        const priceToUse = segmentPrice > 0n ? segmentPrice : currentPrice;
+
+        // Calculate USD value for this segment's yield using segment-specific price
+        const segmentYieldUSD = calculateUSDValueNumber(segmentYield, priceToUse, decimals);
         totalYieldUSD += segmentYieldUSD;
 
         // Use endExchangeRate to show actual asset value at end of segment (including yield earned)
@@ -494,7 +505,8 @@ export async function calculateSegmentedIsolatedPairYield(
             endExchangeRate,
             segmentYield,
             segmentYieldUSD: segmentYieldUSD.toFixed(4),
-            durationDays: Math.round(durationDays * 100) / 100
+            durationDays: Math.round(durationDays * 100) / 100,
+            assetPrice: priceToUse.toString() // Add asset price for this segment
         });
     }
 
@@ -710,8 +722,18 @@ export async function calculateSegmentedIsolatedPairBorrowCost(
         const segmentBorrowCost = (segment.borrowShares * exchangeRateChange + EXCHANGE_PRECISION / 2n) / EXCHANGE_PRECISION;
         totalBorrowCost += segmentBorrowCost;
 
-        // Calculate USD value for this segment's borrow cost
-        const segmentBorrowCostUSD = calculateUSDValueNumber(segmentBorrowCost, currentPrice, decimals);
+        // Get segment-specific asset price (fallback to current price if not found)
+        const segmentPrice = await getAssetPriceForSegment(
+            context,
+            pair,
+            segment.startTime,
+            segment.endTime,
+            true // is isolated pair
+        );
+        const priceToUse = segmentPrice > 0n ? segmentPrice : currentPrice;
+
+        // Calculate USD value for this segment's borrow cost using segment-specific price
+        const segmentBorrowCostUSD = calculateUSDValueNumber(segmentBorrowCost, priceToUse, decimals);
         totalBorrowCostUSD += segmentBorrowCostUSD;
 
         // Use endExchangeRate to show actual borrow value at end of segment (including interest accrued)
@@ -729,7 +751,8 @@ export async function calculateSegmentedIsolatedPairBorrowCost(
             endExchangeRate,
             segmentBorrowCost,
             segmentBorrowCostUSD: segmentBorrowCostUSD.toFixed(4),
-            durationDays: Math.round(durationDays * 100) / 100
+            durationDays: Math.round(durationDays * 100) / 100,
+            assetPrice: priceToUse.toString() // Add asset price for this segment
         });
     }
 
