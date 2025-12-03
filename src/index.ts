@@ -880,7 +880,7 @@ ponder.on("IsolatedPairRegistryContract:AddPair", async ({ event, context }) => 
     console.log(`[IsolatedPairRegistry] New pair added: ${pairAddress} at block ${blockNumber}`);
 });
 
-// Oracle Price Updates every 300 blocks
+// Oracle Price Updates for Core Pool Assets every 300 blocks
 ponder.on("ChainlinkOracleUpdate:block", async ({ event, context }) => {
     const blockNumber = event.block.number;
     const timestamp = Number(event.block.timestamp);
@@ -898,17 +898,8 @@ ponder.on("ChainlinkOracleUpdate:block", async ({ event, context }) => {
                 args: []
             });
 
-            // Also refresh isolated pairs list
-            const registryAddress = config.contracts.IsolatedPairRegistryContract.address as `0x${string}`;
-            cachedIsolatedPairsList = await context.client.readContract({
-                abi: IsolatedPairRegistryAbi,
-                address: registryAddress,
-                functionName: "getAllPairAddresses",
-                args: []
-            });
-
             lastReservesRefreshBlock = blockNumber;
-            console.log(`[ChainlinkOracleUpdate] Refreshed lists: ${cachedReservesList?.length} reserves, ${cachedIsolatedPairsList?.length} isolated pairs`);
+            console.log(`[ChainlinkOracleUpdate] Refreshed reserves list: ${cachedReservesList?.length} reserves`);
         }
 
         // === Core Pool Assets ===
@@ -937,6 +928,36 @@ ponder.on("ChainlinkOracleUpdate:block", async ({ event, context }) => {
             }
         }
 
+        console.log(`[ChainlinkOracleUpdate] Saved ${cachedReservesList?.length || 0} reserve price snapshots at block ${blockNumber}`);
+
+    } catch (error) {
+        console.error(`[ChainlinkOracleUpdate] Error fetching prices at block ${blockNumber}:`, error);
+    }
+});
+
+// Separate cache for isolated pairs refresh
+let lastIsolatedPairsRefreshBlock: bigint = 0n;
+
+// Oracle Price Updates for Isolated Pairs every 300 blocks
+ponder.on("ChainlinkOracleIsolatedUpdate:block", async ({ event, context }) => {
+    const blockNumber = event.block.number;
+    const timestamp = Number(event.block.timestamp);
+
+    try {
+        // Refresh isolated pairs list if cache is empty or stale
+        if (!cachedIsolatedPairsList || blockNumber - lastIsolatedPairsRefreshBlock >= RESERVES_REFRESH_INTERVAL) {
+            const registryAddress = config.contracts.IsolatedPairRegistryContract.address as `0x${string}`;
+            cachedIsolatedPairsList = await context.client.readContract({
+                abi: IsolatedPairRegistryAbi,
+                address: registryAddress,
+                functionName: "getAllPairAddresses",
+                args: []
+            });
+
+            lastIsolatedPairsRefreshBlock = blockNumber;
+            console.log(`[ChainlinkOracleIsolatedUpdate] Refreshed isolated pairs list: ${cachedIsolatedPairsList?.length} pairs`);
+        }
+
         // === Isolated Pairs ===
         if (cachedIsolatedPairsList && cachedIsolatedPairsList.length > 0) {
             for (const pair of cachedIsolatedPairsList) {
@@ -955,11 +976,9 @@ ponder.on("ChainlinkOracleUpdate:block", async ({ event, context }) => {
             }
         }
 
-        const reservesCount = cachedReservesList?.length || 0;
-        const pairsCount = cachedIsolatedPairsList?.length || 0;
-        console.log(`[ChainlinkOracleUpdate] Saved ${reservesCount} reserve + ${pairsCount} isolated pair price snapshots at block ${blockNumber}`);
+        console.log(`[ChainlinkOracleIsolatedUpdate] Saved ${cachedIsolatedPairsList?.length || 0} isolated pair price snapshots at block ${blockNumber}`);
 
     } catch (error) {
-        console.error(`[ChainlinkOracleUpdate] Error fetching prices at block ${blockNumber}:`, error);
+        console.error(`[ChainlinkOracleIsolatedUpdate] Error fetching prices at block ${blockNumber}:`, error);
     }
 })

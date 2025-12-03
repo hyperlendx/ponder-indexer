@@ -63,8 +63,9 @@ export default createConfig({
                 // The name of the parameter that contains the address of the new child contract.
                 parameter: "pairAddress",
             }),
-            startBlock: 249000,
+            startBlock: 7336100,
         },
+
         LoopingStrategyManagerFactory: {
             abi: LoopingStrategyManagerFactoryAbi,
             chain: "hyperEvm",
@@ -83,6 +84,11 @@ export default createConfig({
             chain: "hyperEvm",
             interval: 300, // Every 300 blocks
             startBlock: 787000,
+        },
+        ChainlinkOracleIsolatedUpdate: {
+            chain: "hyperEvm",
+            interval: 300, // Every 300 blocks
+            startBlock: 7336100,
         },
     },
 });
