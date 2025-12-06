@@ -19,11 +19,10 @@ import { calculateLiquidityIndexAtTimestamp } from "../aave/liquidityIndex";
 import { calculateVariableBorrowIndexAtTimestamp } from "../aave/borrowIndex";
 import { calculateActualBalance } from "../aave/balanceConversions";
 import { calculateTotalSupplied, calculateTotalWithdrawn, calculateTotalBorrowed, calculateTotalRepaid } from "../userPositionManager";
-import { UserBalanceEvent, Borrow, Repay, LiquidationCall, Supply, Withdraw } from "ponder:schema";
-import { eq, and, gte, lte, or } from "ponder";
+import { UserBalanceEvent, Borrow, Repay, LiquidationCall, Supply, Withdraw, AssetPriceSnapshot } from "ponder:schema";
+import { eq, and, gte, lte, or, desc } from "ponder";
 import { calculateSegmentedCustomPeriodYield, calculateSegmentedCustomPeriodBorrowCost } from "./yieldCalculations";
 import { LiquidityIndexCache } from "./liquidityIndexCache";
-import { getDecimals } from "../getDecimals";
 import { calculateUSDValueNumber } from "../usdCalculations";
 
 
@@ -396,8 +395,19 @@ export async function calculateUserYieldPositions(
     // Calculate yield positions for each asset in parallel
     const positions = await Promise.all(
         allAssets.map(async (asset) => {
-            // Get decimals first (needed for USD calculations in segmented functions)
-            const decimals = await getDecimals(context, asset) || 18; // Default to 18 if not found
+            // Get decimals from AssetPriceSnapshot (use endTimestamp to get most recent)
+            const priceSnapshots = await dbQuery
+                .select()
+                .from(AssetPriceSnapshot)
+                .where(
+                    and(
+                        eq(AssetPriceSnapshot.asset, asset as `0x${string}`),
+                        lte(AssetPriceSnapshot.timestamp, endTimestamp)
+                    )
+                )
+                .orderBy(desc(AssetPriceSnapshot.timestamp))
+                .limit(1);
+            const decimals = priceSnapshots.length > 0 && priceSnapshots[0].decimals != null ? priceSnapshots[0].decimals : 18;
 
             // Fetch data in parallel for performance
             const [

@@ -19,6 +19,7 @@ import {
     IsolationModeTotalDebtUpdated,
     BorrowAssetIsolated,
     RepayAssetIsolated,
+    RepayAssetWithCollateralIsolated,
     AddCollateralIsolated,
     RemoveCollateralIsolated,
     LiquidateIsolated,
@@ -37,16 +38,63 @@ import {
 import { CorePoolAbi } from "../abis/CorePoolAbi";
 import { OracleAbi } from "../abis/OracleAbi";
 import { IsolatedPairRegistry as IsolatedPairRegistryAbi } from "../abis/IsolatedPairRegistry";
+import { UiDataProviderIsolatedAbi } from "../abis/UiDataProviderIsolatedAbi";
+import { ChainlinkAggregatorAbi } from "../abis/ChainlinkAggregatorAbi";
+import { IsolatedAbi } from "../abis/IsolatedAbi";
+import { ERC20Abi } from "../abis/ERC20Abi";
 import config from "../ponder.config";
 
-import { getOraclePrice, getIsolatedOraclePrice, getIsolatedOraclePrices } from "./helpers/getPrice";
-import { updateUserDepositBalance } from "./helpers/userBalanceManager";
+import { getOraclePrice, getIsolatedOraclePrice, getIsolatedOraclePrices, getIsolatedPairAssetInfo } from "./helpers/getPrice";
 import { updateUserPosition } from "./helpers/userPositionManager";
 import { calculateScaledBalance, calculateLiquidityIndexAtTimestamp } from "./helpers/aave";
 import { updateUserIsolatedPairTracking } from "./helpers/userIsolatedPairTracker";
+import {
+    calculateExchangeRateFromVaultState,
+    getVaultStateAtTimestamp,
+    updateVaultStateAfterDeposit,
+    updateVaultStateAfterWithdraw,
+    updateVaultStateAfterAddInterest,
+    updateVaultStateAfterLiquidation,
+} from "./helpers/yield/isolatedPair/vaultState";
 import { getAddress } from 'viem'
 
 const wrappedTokenGatewayAddress = getAddress("0x49558c794ea2aC8974C9F27886DDfAa951E99171");
+
+// Cache for token decimals to avoid repeated contract calls
+const tokenDecimalsCache: Map<string, number> = new Map();
+
+/**
+ * Get token decimals with caching
+ * @param context - Ponder context with client
+ * @param tokenAddress - Token address
+ * @returns Token decimals
+ */
+async function getTokenDecimals(context: any, tokenAddress: `0x${string}`): Promise<number> {
+    const normalizedAddress = tokenAddress.toLowerCase();
+
+    // Check cache first
+    if (tokenDecimalsCache.has(normalizedAddress)) {
+        return tokenDecimalsCache.get(normalizedAddress)!;
+    }
+
+    // Fetch from contract
+    try {
+        const decimals = await context.client.readContract({
+            abi: ERC20Abi,
+            address: tokenAddress,
+            functionName: "decimals",
+            args: []
+        });
+
+        const decimalsNum = Number(decimals);
+        tokenDecimalsCache.set(normalizedAddress, decimalsNum);
+        return decimalsNum;
+    } catch (error) {
+        console.error(`[getTokenDecimals] Error fetching decimals for ${tokenAddress}:`, error);
+        // Default to 18 decimals if we can't fetch
+        return 18;
+    }
+}
 
 // HToken Transfer Event Handler - Enhanced for Interest Tracking
 ponder.on("HTokens:BalanceTransfer", async ({ event, context }) => {
@@ -92,6 +140,8 @@ ponder.on("CorePool:Borrow", async ({ event, context }) => {
 // Repay Event Handler
 ponder.on("CorePool:Repay", async ({ event, context }) => {
     const reservePrice = await getOraclePrice(context, event.args.reserve);
+    const timestamp = Number(event.block.timestamp);
+    const blockNumber = event.block.number;
 
     await context.db.insert(Repay).values({
         id: event.id,
@@ -102,9 +152,37 @@ ponder.on("CorePool:Repay", async ({ event, context }) => {
         repayer: event.args.repayer,
         amount: event.args.amount,
         useATokens: event.args.useATokens,
-        timestamp: Number(event.block.timestamp),
+        timestamp: timestamp,
         price: reservePrice,
     });
+
+    // When useATokens=true, the user is using their aTokens (supplied balance) to repay debt
+    // This means we need to reduce their supply position by the repay amount
+    if (event.args.useATokens) {
+        // Get current liquidity index to calculate scaled balance
+        const currentLiquidityIndex = await calculateLiquidityIndexAtTimestamp(
+            context,
+            event.args.reserve,
+            timestamp,
+            event.transaction.hash
+        );
+
+        // Calculate scaled balance from repay amount
+        const scaledBalance = calculateScaledBalance(event.args.amount, currentLiquidityIndex);
+
+        // Update user position with negative scaled balance (like a withdraw)
+        await updateUserPosition(
+            context,
+            event.args.user,
+            event.args.reserve,
+            -scaledBalance, // Negative for reducing supply
+            'withdraw', // Treat as withdraw since aTokens are being burned
+            timestamp,
+            event.transaction.hash,
+            blockNumber,
+            reservePrice
+        );
+    }
 });
 
 // Supply Event Handler - Enhanced for Interest Tracking
@@ -126,15 +204,6 @@ ponder.on("CorePool:Supply", async ({ event, context }) => {
         timestamp: timestamp,
         price: reservePrice,
     });
-
-    // Update user deposit balance (legacy system)
-    await updateUserDepositBalance(
-        context,
-        event.args.onBehalfOf,
-        event.args.reserve,
-        event.args.amount, // Positive amount for deposits
-        timestamp
-    );
 
     // Get current liquidity index to calculate scaled balance
     // Pass the transaction hash to check for ReserveDataUpdated events in the same transaction
@@ -186,15 +255,6 @@ ponder.on("CorePool:Withdraw", async ({ event, context }) => {
         timestamp: timestamp,
         price: reservePrice,
     });
-
-    // Update user deposit balance (legacy system)
-    await updateUserDepositBalance(
-        context,
-        actualUser,
-        event.args.reserve,
-        -event.args.amount, // Negative amount for withdrawals
-        timestamp
-    );
 
     // Get current liquidity index to calculate scaled balance
     // Pass the transaction hash to check for ReserveDataUpdated events in the same transaction
@@ -445,23 +505,15 @@ ponder.on("IsolatedPair:BorrowAsset", async ({ event, context }) => {
     if (!pair) {
         throw new Error("transaction.to is null");
     }
-    let price = null;
 
-    try {
-        price = await getIsolatedOraclePrice(context, pair);
-    } catch (e: any) {
-        console.error(`Error fetching reserve price: ${e.message}`);
-    }
-
-    // Import vault state functions
-    const { calculateExchangeRateFromVaultState, getVaultStateAtTimestamp } = await import("./helpers/yield/isolatedPair/vaultState");
+    // Get asset and collateral addresses and their USD prices from Chainlink oracles
+    const assetInfo = await getIsolatedPairAssetInfo(context, event, pair);
 
     // Get the vault exchange rate at this timestamp
     const vaultState = await getVaultStateAtTimestamp(context.db, pair, Number(event.block.timestamp));
     const exchangeRate = vaultState
         ? calculateExchangeRateFromVaultState(vaultState.totalAssetAmount, vaultState.totalAssetShares)
         : 1000000000000000000n; // Default 1:1 if no state
-
 
     await context.db.insert(BorrowAssetIsolated).values({
         id: event.id,
@@ -472,7 +524,10 @@ ponder.on("IsolatedPair:BorrowAsset", async ({ event, context }) => {
         borrowAmount: event.args._borrowAmount,
         sharesAdded: event.args._sharesAdded,
         timestamp: Number(event.block.timestamp),
-        price: price,
+        assetAddress: assetInfo.assetAddress,
+        collateralAddress: assetInfo.collateralAddress,
+        assetPrice: assetInfo.assetPrice,
+        collateralPrice: assetInfo.collateralPrice,
         exchangeRate: exchangeRate
     });
 
@@ -491,16 +546,9 @@ ponder.on("IsolatedPair:RepayAsset", async ({ event, context }) => {
     if (!pair) {
         throw new Error("transaction.to is null");
     }
-    let price = null;
 
-    try {
-        price = await getIsolatedOraclePrice(context, pair);
-    } catch (e: any) {
-        console.error(`Error fetching reserve price: ${e.message}`);
-    }
-
-    // Import vault state functions
-    const { calculateExchangeRateFromVaultState, getVaultStateAtTimestamp } = await import("./helpers/yield/isolatedPair/vaultState");
+    // Get asset and collateral addresses and their USD prices from Chainlink oracles
+    const assetInfo = await getIsolatedPairAssetInfo(context, event, pair);
 
     // Get the vault exchange rate at this timestamp
     const vaultState = await getVaultStateAtTimestamp(context.db, pair, Number(event.block.timestamp));
@@ -517,7 +565,10 @@ ponder.on("IsolatedPair:RepayAsset", async ({ event, context }) => {
         amountToRepay: event.args.amountToRepay,
         shares: event.args.shares,
         timestamp: Number(event.block.timestamp),
-        price: price,
+        assetAddress: assetInfo.assetAddress,
+        collateralAddress: assetInfo.collateralAddress,
+        assetPrice: assetInfo.assetPrice,
+        collateralPrice: assetInfo.collateralPrice,
         exchangeRate: exchangeRate
     });
 
@@ -531,18 +582,57 @@ ponder.on("IsolatedPair:RepayAsset", async ({ event, context }) => {
     );
 });
 
+ponder.on("IsolatedPair:RepayAssetWithCollateral", async ({ event, context }) => {
+    const pair = event.transaction.to;
+    if (!pair) {
+        throw new Error("transaction.to is null");
+    }
+
+    // Get asset and collateral addresses and their USD prices from Chainlink oracles
+    const assetInfo = await getIsolatedPairAssetInfo(context, event, pair);
+
+    // Get the vault exchange rate at this timestamp
+    const vaultState = await getVaultStateAtTimestamp(context.db, pair, Number(event.block.timestamp));
+    const exchangeRate = vaultState
+        ? calculateExchangeRateFromVaultState(vaultState.totalAssetAmount, vaultState.totalAssetShares)
+        : 1000000000000000000n; // Default 1:1 if no state
+
+    await context.db.insert(RepayAssetWithCollateralIsolated).values({
+        id: event.id,
+        txHash: event.transaction.hash,
+        pair: pair,
+        borrower: event.args._borrower,
+        swapperAddress: event.args._swapperAddress,
+        collateralToSwap: event.args._collateralToSwap,
+        amountAssetOut: event.args._amountAssetOut,
+        sharesRepaid: event.args._sharesRepaid,
+        timestamp: Number(event.block.timestamp),
+        assetAddress: assetInfo.assetAddress,
+        collateralAddress: assetInfo.collateralAddress,
+        assetPrice: assetInfo.assetPrice,
+        collateralPrice: assetInfo.collateralPrice,
+        exchangeRate: exchangeRate
+    });
+
+    // Update tracking table - this event both repays debt AND removes collateral
+    // Track as 'repayWithCollateral' to distinguish from regular repay
+    await updateUserIsolatedPairTracking(
+        context,
+        event.args._borrower,
+        pair,
+        Number(event.block.timestamp),
+        'repayWithCollateral'
+    );
+});
+
 ponder.on("IsolatedPair:AddCollateral", async ({ event, context }) => {
     const pair = event.transaction.to;
     if (!pair) {
         throw new Error("transaction.to is null");
     }
-    let price = null;
 
-    try {
-        price = await getIsolatedOraclePrice(context, pair);
-    } catch (e: any) {
-        console.error(`Error fetching reserve price: ${e.message}`);
-    }
+    // Get asset and collateral addresses and their USD prices from Chainlink oracles
+    const assetInfo = await getIsolatedPairAssetInfo(context, event, pair);
 
     await context.db.insert(AddCollateralIsolated).values({
         id: event.id,
@@ -552,7 +642,10 @@ ponder.on("IsolatedPair:AddCollateral", async ({ event, context }) => {
         sender: event.args.sender,
         collateralAmount: event.args.collateralAmount,
         timestamp: Number(event.block.timestamp),
-        price: price,
+        assetAddress: assetInfo.assetAddress,
+        collateralAddress: assetInfo.collateralAddress,
+        assetPrice: assetInfo.assetPrice,
+        collateralPrice: assetInfo.collateralPrice,
     });
 
     // Update tracking table
@@ -570,13 +663,9 @@ ponder.on("IsolatedPair:RemoveCollateral", async ({ event, context }) => {
     if (!pair) {
         throw new Error("transaction.to is null");
     }
-    let price = null;
 
-    try {
-        price = await getIsolatedOraclePrice(context, pair);
-    } catch (e: any) {
-        console.error(`Error fetching reserve price: ${e.message}`);
-    }
+    // Get asset and collateral addresses and their USD prices from Chainlink oracles
+    const assetInfo = await getIsolatedPairAssetInfo(context, event, pair);
 
     await context.db.insert(RemoveCollateralIsolated).values({
         id: event.id,
@@ -587,7 +676,10 @@ ponder.on("IsolatedPair:RemoveCollateral", async ({ event, context }) => {
         borrower: event.args._borrower,
         collateralAmount: event.args._collateralAmount,
         timestamp: Number(event.block.timestamp),
-        price: price,
+        assetAddress: assetInfo.assetAddress,
+        collateralAddress: assetInfo.collateralAddress,
+        assetPrice: assetInfo.assetPrice,
+        collateralPrice: assetInfo.collateralPrice,
     });
 
     // Update tracking table
@@ -605,19 +697,12 @@ ponder.on("IsolatedPair:Liquidate", async ({ event, context }) => {
     if (!pair) {
         throw new Error("transaction.to is null");
     }
-    let price = null;
 
-    try {
-        price = await getIsolatedOraclePrice(context, pair);
-    } catch (e: any) {
-        console.error(`Error fetching reserve price: ${e.message}`);
-    }
+    // Get asset and collateral addresses and their USD prices from Chainlink oracles
+    const assetInfo = await getIsolatedPairAssetInfo(context, event, pair);
 
     const sharesToAdjust = event.args._sharesToAdjust;
     const amountToAdjust = event.args._amountToAdjust;
-
-    // Import vault state functions
-    const { updateVaultStateAfterLiquidation, calculateExchangeRateFromVaultState } = await import("./helpers/yield/isolatedPair/vaultState");
 
     // Update vault state and get the new state back
     const newVaultState = await updateVaultStateAfterLiquidation(
@@ -649,7 +734,10 @@ ponder.on("IsolatedPair:Liquidate", async ({ event, context }) => {
         sharesToAdjust: event.args._sharesToAdjust,
         amountToAdjust: event.args._amountToAdjust,
         timestamp: Number(event.block.timestamp),
-        price: price,
+        assetAddress: assetInfo.assetAddress,
+        collateralAddress: assetInfo.collateralAddress,
+        assetPrice: assetInfo.assetPrice,
+        collateralPrice: assetInfo.collateralPrice,
         exchangeRate: exchangeRate
     });
 
@@ -676,19 +764,12 @@ ponder.on("IsolatedPair:Deposit", async ({ event, context }) => {
     if (!pair) {
         throw new Error("transaction.to is null");
     }
-    let price = null;
 
-    try {
-        price = await getIsolatedOraclePrice(context, pair);
-    } catch (e: any) {
-        console.error(`Error fetching reserve price: ${e.message}`);
-    }
+    // Get asset and collateral addresses and their USD prices from Chainlink oracles
+    const assetInfo = await getIsolatedPairAssetInfo(context, event, pair);
 
     const assets = event.args.assets;
     const shares = event.args.shares;
-
-    // Import vault state functions
-    const { updateVaultStateAfterDeposit, calculateExchangeRateFromVaultState } = await import("./helpers/yield/isolatedPair/vaultState");
 
     // Update vault state and get the new state back
     const newVaultState = await updateVaultStateAfterDeposit(
@@ -716,7 +797,10 @@ ponder.on("IsolatedPair:Deposit", async ({ event, context }) => {
         assets: event.args.assets,
         shares: event.args.shares,
         timestamp: Number(event.block.timestamp),
-        price: price,
+        assetAddress: assetInfo.assetAddress,
+        collateralAddress: assetInfo.collateralAddress,
+        assetPrice: assetInfo.assetPrice,
+        collateralPrice: assetInfo.collateralPrice,
         exchangeRate: exchangeRate
     });
 
@@ -735,19 +819,12 @@ ponder.on("IsolatedPair:Withdraw", async ({ event, context }) => {
     if (!pair) {
         throw new Error("transaction.to is null");
     }
-    let price = null;
 
-    try {
-        price = await getIsolatedOraclePrice(context, pair);
-    } catch (e: any) {
-        console.error(`Error fetching reserve price: ${e.message}`);
-    }
+    // Get asset and collateral addresses and their USD prices from Chainlink oracles
+    const assetInfo = await getIsolatedPairAssetInfo(context, event, pair);
 
     const assets = event.args.assets;
     const shares = event.args.shares;
-
-    // Import vault state functions
-    const { updateVaultStateAfterWithdraw, calculateExchangeRateFromVaultState } = await import("./helpers/yield/isolatedPair/vaultState");
 
     // Update vault state and get the new state back
     const newVaultState = await updateVaultStateAfterWithdraw(
@@ -776,7 +853,10 @@ ponder.on("IsolatedPair:Withdraw", async ({ event, context }) => {
         assets: event.args.assets,
         shares: event.args.shares,
         timestamp: Number(event.block.timestamp),
-        price: price,
+        assetAddress: assetInfo.assetAddress,
+        collateralAddress: assetInfo.collateralAddress,
+        assetPrice: assetInfo.assetPrice,
+        collateralPrice: assetInfo.collateralPrice,
         exchangeRate: exchangeRate
     });
 
@@ -816,8 +896,6 @@ ponder.on("IsolatedPair:AddInterest", async ({ event, context }) => {
     }
 
     // Update vault state (totalAsset.amount increases by interestEarned, totalAsset.shares increases by feesShare)
-    const { updateVaultStateAfterAddInterest } = await import("./helpers/yield/isolatedPair/vaultState");
-
     const newVaultState = await updateVaultStateAfterAddInterest(
         context.db,
         pair,
@@ -868,16 +946,64 @@ ponder.on("IsolatedPairRegistryContract:AddPair", async ({ event, context }) => 
     const blockNumber = event.block.number;
     const timestamp = Number(event.block.timestamp);
 
-    await context.db.insert(IsolatedPairRegistry).values({
-        id: pairAddress,
-        createdAtBlock: blockNumber,
-        createdAtTimestamp: timestamp,
-    });
+    try {
+        // Get asset and collateral addresses from pair contract
+        const assetAddress = await context.client.readContract({
+            abi: IsolatedAbi,
+            address: pairAddress,
+            functionName: "asset",
+            args: []
+        });
+
+        const collateralAddress = await context.client.readContract({
+            abi: IsolatedAbi,
+            address: pairAddress,
+            functionName: "collateralContract",
+            args: []
+        });
+
+        // Get decimals for asset and collateral tokens
+        const assetDecimals = await context.client.readContract({
+            abi: IsolatedAbi,
+            address: assetAddress as `0x${string}`,
+            functionName: "decimals",
+            args: []
+        });
+
+        const collateralDecimals = await context.client.readContract({
+            abi: IsolatedAbi,
+            address: collateralAddress as `0x${string}`,
+            functionName: "decimals",
+            args: []
+        });
+
+        await context.db.insert(IsolatedPairRegistry).values({
+            id: pairAddress,
+            asset: assetAddress as `0x${string}`,
+            collateral: collateralAddress as `0x${string}`,
+            assetDecimals: Number(assetDecimals),
+            collateralDecimals: Number(collateralDecimals),
+            createdAtBlock: blockNumber,
+            createdAtTimestamp: timestamp,
+        });
+
+        console.log(`[IsolatedPairRegistry] New pair added: ${pairAddress} (asset: ${assetAddress}, collateral: ${collateralAddress}) at block ${blockNumber}`);
+    } catch (error) {
+        console.error(`[IsolatedPairRegistry] Error fetching pair data for ${pairAddress}:`, error);
+        // Still insert the pair with minimal data
+        await context.db.insert(IsolatedPairRegistry).values({
+            id: pairAddress,
+            asset: "0x0000000000000000000000000000000000000000" as `0x${string}`,
+            collateral: "0x0000000000000000000000000000000000000000" as `0x${string}`,
+            assetDecimals: 0,
+            collateralDecimals: 0,
+            createdAtBlock: blockNumber,
+            createdAtTimestamp: timestamp,
+        });
+    }
 
     // Invalidate cache so it gets refreshed on next block interval
     cachedIsolatedPairsList = null;
-
-    console.log(`[IsolatedPairRegistry] New pair added: ${pairAddress} at block ${blockNumber}`);
 });
 
 // Oracle Price Updates for Core Pool Assets every 300 blocks
@@ -916,11 +1042,13 @@ ponder.on("ChainlinkOracleUpdate:block", async ({ event, context }) => {
                 const asset = cachedReservesList[i];
                 const price = prices[i];
 
-                if (price && price > 0n) {
+                if (asset && price && price > 0n) {
+                    const decimals = await getTokenDecimals(context, asset);
                     await context.db.insert(AssetPriceSnapshot).values({
                         id: `${asset}-${blockNumber}`,
                         asset: asset,
                         price: price,
+                        decimals: decimals,
                         blockNumber: blockNumber,
                         timestamp: timestamp,
                     });
@@ -938,10 +1066,26 @@ ponder.on("ChainlinkOracleUpdate:block", async ({ event, context }) => {
 // Separate cache for isolated pairs refresh
 let lastIsolatedPairsRefreshBlock: bigint = 0n;
 
+// Cache for pair metadata (asset, collateral, oracle addresses) - these don't change
+interface PairMetadata {
+    asset: `0x${string}`;
+    collateral: `0x${string}`;
+    chainlinkAssetOracle: `0x${string}`;
+    chainlinkCollateralOracle: `0x${string}`;
+    assetDecimals: number;
+    collateralDecimals: number;
+}
+const pairMetadataCache: Map<string, PairMetadata> = new Map();
+
 // Oracle Price Updates for Isolated Pairs every 300 blocks
+// Also snapshots USD prices for asset and collateral tokens from Chainlink oracles
 ponder.on("ChainlinkOracleIsolatedUpdate:block", async ({ event, context }) => {
     const blockNumber = event.block.number;
     const timestamp = Number(event.block.timestamp);
+    const uiDataProviderAddress = config.contracts.UiDataProviderIsolated.address as `0x${string}`;
+
+    // Track which assets we've already snapshotted to avoid duplicates
+    const snapshotedAssets = new Set<string>();
 
     try {
         // Refresh isolated pairs list if cache is empty or stale
@@ -960,9 +1104,102 @@ ponder.on("ChainlinkOracleIsolatedUpdate:block", async ({ event, context }) => {
 
         // === Isolated Pairs ===
         if (cachedIsolatedPairsList && cachedIsolatedPairsList.length > 0) {
-            for (const pair of cachedIsolatedPairsList) {
-                const prices = await getIsolatedOraclePrices(context, pair);
+            // Fetch all pair prices in parallel
+            const pricePromises = cachedIsolatedPairsList.map(pair => getIsolatedOraclePrices(context, pair));
+            const allPrices = await Promise.all(pricePromises);
 
+            // Fetch metadata for pairs not in cache (in parallel)
+            const uncachedPairs = cachedIsolatedPairsList.filter(pair => !pairMetadataCache.has(pair));
+            if (uncachedPairs.length > 0) {
+                const metadataPromises = uncachedPairs.map(async (pair) => {
+                    try {
+                        const pairData = await context.client.readContract({
+                            abi: UiDataProviderIsolatedAbi,
+                            address: uiDataProviderAddress,
+                            functionName: "getPairData",
+                            args: [pair]
+                        });
+                        if (pairData) {
+                            const assetAddress = pairData.asset as `0x${string}`;
+                            const collateralAddress = pairData.collateral as `0x${string}`;
+                            // Fetch decimals in parallel
+                            const [assetDecimals, collateralDecimals] = await Promise.all([
+                                getTokenDecimals(context, assetAddress),
+                                getTokenDecimals(context, collateralAddress)
+                            ]);
+                            return {
+                                pair,
+                                metadata: {
+                                    asset: assetAddress,
+                                    collateral: collateralAddress,
+                                    chainlinkAssetOracle: pairData.exchangeRate.chainlinkAssetAddress as `0x${string}`,
+                                    chainlinkCollateralOracle: pairData.exchangeRate.chainlinkCollateralAddress as `0x${string}`,
+                                    assetDecimals,
+                                    collateralDecimals
+                                }
+                            };
+                        }
+                        return null;
+                    } catch (e) {
+                        console.error(`[ChainlinkOracleIsolatedUpdate] Error fetching pair data for ${pair}:`, e);
+                        return null;
+                    }
+                });
+                const metadataResults = await Promise.all(metadataPromises);
+                for (const result of metadataResults) {
+                    if (result) {
+                        pairMetadataCache.set(result.pair, result.metadata);
+                    }
+                }
+            }
+
+            // Collect unique Chainlink oracles to query
+            const oraclesToQuery: Map<string, { oracle: `0x${string}`; asset: `0x${string}`; decimals: number }> = new Map();
+            for (const pair of cachedIsolatedPairsList) {
+                const metadata = pairMetadataCache.get(pair);
+                if (metadata) {
+                    const zeroAddr = "0x0000000000000000000000000000000000000000";
+                    if (metadata.chainlinkAssetOracle && metadata.chainlinkAssetOracle !== zeroAddr && !snapshotedAssets.has(metadata.asset)) {
+                        oraclesToQuery.set(metadata.asset, {
+                            oracle: metadata.chainlinkAssetOracle,
+                            asset: metadata.asset,
+                            decimals: metadata.assetDecimals
+                        });
+                        snapshotedAssets.add(metadata.asset);
+                    }
+                    if (metadata.chainlinkCollateralOracle && metadata.chainlinkCollateralOracle !== zeroAddr && !snapshotedAssets.has(metadata.collateral)) {
+                        oraclesToQuery.set(metadata.collateral, {
+                            oracle: metadata.chainlinkCollateralOracle,
+                            asset: metadata.collateral,
+                            decimals: metadata.collateralDecimals
+                        });
+                        snapshotedAssets.add(metadata.collateral);
+                    }
+                }
+            }
+
+            // Fetch all Chainlink prices in parallel
+            const oracleEntries = Array.from(oraclesToQuery.entries());
+            const chainlinkPricePromises = oracleEntries.map(async ([_, info]) => {
+                try {
+                    const priceData = await context.client.readContract({
+                        abi: ChainlinkAggregatorAbi,
+                        address: info.oracle,
+                        functionName: "latestRoundData",
+                        args: []
+                    });
+                    return { asset: info.asset, price: priceData?.[1] ?? 0n, decimals: info.decimals };
+                } catch (e) {
+                    console.error(`[ChainlinkOracleIsolatedUpdate] Error fetching Chainlink price for ${info.asset}:`, e);
+                    return { asset: info.asset, price: 0n, decimals: info.decimals };
+                }
+            });
+            const chainlinkPrices = await Promise.all(chainlinkPricePromises);
+
+            // Insert all snapshots
+            for (let i = 0; i < cachedIsolatedPairsList.length; i++) {
+                const pair = cachedIsolatedPairsList[i];
+                const prices = allPrices[i];
                 if (prices && prices.priceLow > 0n && prices.priceHigh > 0n) {
                     await context.db.insert(IsolatedPairPriceSnapshot).values({
                         id: `${pair}-${blockNumber}`,
@@ -974,9 +1211,22 @@ ponder.on("ChainlinkOracleIsolatedUpdate:block", async ({ event, context }) => {
                     });
                 }
             }
+
+            for (const { asset, price, decimals } of chainlinkPrices) {
+                if (price > 0n) {
+                    await context.db.insert(AssetPriceSnapshot).values({
+                        id: `${asset}-${blockNumber}`,
+                        asset: asset,
+                        price: price,
+                        decimals: decimals,
+                        blockNumber: blockNumber,
+                        timestamp: timestamp,
+                    });
+                }
+            }
         }
 
-        console.log(`[ChainlinkOracleIsolatedUpdate] Saved ${cachedIsolatedPairsList?.length || 0} isolated pair price snapshots at block ${blockNumber}`);
+        console.log(`[ChainlinkOracleIsolatedUpdate] Saved ${cachedIsolatedPairsList?.length || 0} isolated pair price snapshots and ${snapshotedAssets.size} asset USD price snapshots at block ${blockNumber}`);
 
     } catch (error) {
         console.error(`[ChainlinkOracleIsolatedUpdate] Error fetching prices at block ${blockNumber}:`, error);

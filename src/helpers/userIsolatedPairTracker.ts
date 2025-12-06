@@ -10,19 +10,19 @@ import { UserIsolatedPairTracking } from "ponder:schema";
 
 /**
  * Update the tracking table when a user interacts with an isolated pair
- * 
+ *
  * @param context - Ponder context with database access
  * @param user - User address
  * @param pair - Isolated pair address
  * @param timestamp - Timestamp of the interaction
- * @param interactionType - Type of interaction (deposit, withdraw, borrow, repay, addCollateral, removeCollateral, liquidate)
+ * @param interactionType - Type of interaction (deposit, withdraw, borrow, repay, repayWithCollateral, addCollateral, removeCollateral, liquidate)
  */
 export async function updateUserIsolatedPairTracking(
     context: any,
     user: string,
     pair: string,
     timestamp: number,
-    interactionType: 'deposit' | 'withdraw' | 'borrow' | 'repay' | 'addCollateral' | 'removeCollateral' | 'liquidate'
+    interactionType: 'deposit' | 'withdraw' | 'borrow' | 'repay' | 'repayWithCollateral' | 'addCollateral' | 'removeCollateral' | 'liquidate'
 ): Promise<void> {
     const trackingId = `${user}_${pair}`;
     
@@ -50,6 +50,11 @@ export async function updateUserIsolatedPairTracking(
                 case 'repay':
                     updates.hasRepays = true;
                     break;
+                case 'repayWithCollateral':
+                    // This action both repays debt AND removes collateral
+                    updates.hasRepays = true;
+                    updates.hasCollateralRemoved = true;
+                    break;
                 case 'addCollateral':
                     updates.hasCollateralAdded = true;
                     break;
@@ -71,14 +76,14 @@ export async function updateUserIsolatedPairTracking(
                 hasDeposits: interactionType === 'deposit',
                 hasWithdraws: interactionType === 'withdraw',
                 hasBorrows: interactionType === 'borrow',
-                hasRepays: interactionType === 'repay',
+                hasRepays: interactionType === 'repay' || interactionType === 'repayWithCollateral',
                 hasCollateralAdded: interactionType === 'addCollateral',
-                hasCollateralRemoved: interactionType === 'removeCollateral',
+                hasCollateralRemoved: interactionType === 'removeCollateral' || interactionType === 'repayWithCollateral',
                 hasLiquidations: interactionType === 'liquidate',
                 firstInteraction: timestamp,
                 lastInteraction: timestamp,
             };
-            
+
             await context.db.insert(UserIsolatedPairTracking).values(newRecord);
         }
     } catch (error: any) {

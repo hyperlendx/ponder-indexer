@@ -15,10 +15,9 @@ import { getUserIsolatedPairs } from "./pairTracking";
 import { EXCHANGE_PRECISION } from "./constants";
 import { ExchangeRateCache } from "./exchangeRateCache";
 import { IsolatedPairBalanceCache } from "./balanceCache";
-import { DepositIsolated, WithdrawIsolated, BorrowAssetIsolated, RepayAssetIsolated, LiquidateIsolated } from "ponder:schema";
+import { DepositIsolated, WithdrawIsolated, BorrowAssetIsolated, RepayAssetIsolated, LiquidateIsolated, IsolatedPairRegistry, AssetPriceSnapshot } from "ponder:schema";
 import { eq, and, gte, lte, desc } from "ponder";
 import { calculateUSDValueNumber } from "../../usdCalculations";
-import { getAssetPriceForSegment } from "../../getPrice";
 
 /**
  * Yield data for a single isolated pair over a time period
@@ -305,6 +304,7 @@ export async function calculateAllIsolatedPairYields(
  * @param startTimestamp - Start of time period
  * @param endTimestamp - End of time period
  * @param exchangeRateCache - Optional cache to avoid redundant exchange rate queries
+ * @param assetAddress - Optional asset address for price lookups (avoids redundant IsolatedPairRegistry query)
  */
 export async function calculateSegmentedIsolatedPairYield(
     context: any,
@@ -313,7 +313,8 @@ export async function calculateSegmentedIsolatedPairYield(
     startTimestamp: number,
     endTimestamp: number,
     decimals: number,
-    exchangeRateCache?: ExchangeRateCache
+    exchangeRateCache?: ExchangeRateCache,
+    assetAddress?: `0x${string}` | null
 ): Promise<{
     totalYield: bigint;
     totalYieldUSD: string;
@@ -329,6 +330,9 @@ export async function calculateSegmentedIsolatedPairYield(
         segmentYield: bigint;
         segmentYieldUSD: string;
         durationDays: number;
+        assetAddress: string;
+        assetPrice?: string;
+        assetPriceTimestamp?: number;
     }>;
 }> {
     // Get all deposit and withdraw events during the period, ordered chronologically
@@ -442,21 +446,16 @@ export async function calculateSegmentedIsolatedPairYield(
     ]);
     await rateCache.prefetch(context, prefetchList);
 
-    // Get the most recent price from DepositIsolated events for USD calculations
-    const recentEvent = await dbQuery
-        .select()
-        .from(DepositIsolated)
-        .where(
-            and(
-                eq(DepositIsolated.owner, user as `0x${string}`),
-                eq(DepositIsolated.pair, pair as `0x${string}`),
-                lte(DepositIsolated.timestamp, endTimestamp)
-            )
-        )
-        .orderBy(desc(DepositIsolated.timestamp))
-        .limit(1);
-
-    const currentPrice = recentEvent.length > 0 ? recentEvent[0].price : 0n;
+    // Get asset address from IsolatedPairRegistry for price lookups (if not provided)
+    let resolvedAssetAddress = assetAddress;
+    if (!resolvedAssetAddress) {
+        const pairInfo = await dbQuery
+            .select()
+            .from(IsolatedPairRegistry)
+            .where(eq(IsolatedPairRegistry.id, pair as `0x${string}`))
+            .limit(1);
+        resolvedAssetAddress = pairInfo.length > 0 ? pairInfo[0].asset : null;
+    }
 
     // Calculate yield for each segment and collect detailed information
     let totalYield = 0n;
@@ -476,18 +475,29 @@ export async function calculateSegmentedIsolatedPairYield(
         const segmentYield = (segment.assetShares * exchangeRateChange + EXCHANGE_PRECISION / 2n) / EXCHANGE_PRECISION;
         totalYield += segmentYield;
 
-        // Get segment-specific asset price (fallback to current price if not found)
-        const segmentPrice = await getAssetPriceForSegment(
-            context,
-            pair,
-            segment.startTime,
-            segment.endTime,
-            true // is isolated pair
-        );
-        const priceToUse = segmentPrice > 0n ? segmentPrice : currentPrice;
+        // Get asset USD price from AssetPriceSnapshot for this segment
+        let assetPrice: bigint | undefined;
+        let assetPriceTimestamp: number | undefined;
+        if (resolvedAssetAddress) {
+            const priceSnapshots = await dbQuery
+                .select()
+                .from(AssetPriceSnapshot)
+                .where(
+                    and(
+                        eq(AssetPriceSnapshot.asset, resolvedAssetAddress),
+                        lte(AssetPriceSnapshot.timestamp, segment.endTime)
+                    )
+                )
+                .orderBy(desc(AssetPriceSnapshot.timestamp))
+                .limit(1);
+            if (priceSnapshots.length > 0) {
+                assetPrice = priceSnapshots[0].price;
+                assetPriceTimestamp = Number(priceSnapshots[0].timestamp);
+            }
+        }
 
-        // Calculate USD value for this segment's yield using segment-specific price
-        const segmentYieldUSD = calculateUSDValueNumber(segmentYield, priceToUse, decimals);
+        // Calculate USD value for this segment's yield using asset price
+        const segmentYieldUSD = calculateUSDValueNumber(segmentYield, assetPrice, decimals);
         totalYieldUSD += segmentYieldUSD;
 
         // Use endExchangeRate to show actual asset value at end of segment (including yield earned)
@@ -504,15 +514,17 @@ export async function calculateSegmentedIsolatedPairYield(
             startExchangeRate,
             endExchangeRate,
             segmentYield,
-            segmentYieldUSD: segmentYieldUSD.toFixed(4),
+            segmentYieldUSD: segmentYieldUSD.toString(),
             durationDays: Math.round(durationDays * 100) / 100,
-            assetPrice: priceToUse.toString() // Add asset price for this segment
+            assetAddress: resolvedAssetAddress || '', // Asset token address
+            assetPrice: assetPrice?.toString(), // Asset USD price from Chainlink (8 decimals)
+            assetPriceTimestamp // Timestamp of the price snapshot
         });
     }
 
     return {
         totalYield,
-        totalYieldUSD: totalYieldUSD.toFixed(4),
+        totalYieldUSD: totalYieldUSD.toString(),
         segments: detailedSegments
     };
 }
@@ -527,6 +539,7 @@ export async function calculateSegmentedIsolatedPairYield(
  * @param startTimestamp - Start of time period
  * @param endTimestamp - End of time period
  * @param exchangeRateCache - Optional cache to avoid redundant exchange rate queries
+ * @param assetAddress - Optional asset address for price lookups (avoids redundant IsolatedPairRegistry query)
  */
 export async function calculateSegmentedIsolatedPairBorrowCost(
     context: any,
@@ -535,7 +548,8 @@ export async function calculateSegmentedIsolatedPairBorrowCost(
     startTimestamp: number,
     endTimestamp: number,
     decimals: number,
-    exchangeRateCache?: ExchangeRateCache
+    exchangeRateCache?: ExchangeRateCache,
+    assetAddress?: `0x${string}` | null
 ): Promise<{
     totalBorrowCost: bigint;
     totalBorrowCostUSD: string;
@@ -551,6 +565,9 @@ export async function calculateSegmentedIsolatedPairBorrowCost(
         segmentBorrowCost: bigint;
         segmentBorrowCostUSD: string;
         durationDays: number;
+        assetAddress: string;
+        assetPrice?: string;
+        assetPriceTimestamp?: number;
     }>;
 }> {
     // Get all borrow and repay events during the period, ordered chronologically
@@ -667,41 +684,15 @@ export async function calculateSegmentedIsolatedPairBorrowCost(
     ]);
     await rateCache.prefetch(context, prefetchList);
 
-    // Get the most recent price from BorrowAssetIsolated events for USD calculations
-    const recentBorrow = await dbQuery
-        .select()
-        .from(BorrowAssetIsolated)
-        .where(
-            and(
-                eq(BorrowAssetIsolated.borrower, user as `0x${string}`),
-                eq(BorrowAssetIsolated.pair, pair as `0x${string}`),
-                lte(BorrowAssetIsolated.timestamp, endTimestamp)
-            )
-        )
-        .orderBy(desc(BorrowAssetIsolated.timestamp))
-        .limit(1);
-
-    let currentPrice = 0n;
-    if (recentBorrow.length > 0) {
-        currentPrice = recentBorrow[0].price;
-    } else {
-        // Fallback to RepayAssetIsolated events if no borrow events found
-        const recentRepay = await dbQuery
+    // Get asset address from IsolatedPairRegistry for price lookups (if not provided)
+    let resolvedAssetAddress = assetAddress;
+    if (!resolvedAssetAddress) {
+        const pairInfo = await dbQuery
             .select()
-            .from(RepayAssetIsolated)
-            .where(
-                and(
-                    eq(RepayAssetIsolated.payer, user as `0x${string}`),
-                    eq(RepayAssetIsolated.pair, pair as `0x${string}`),
-                    lte(RepayAssetIsolated.timestamp, endTimestamp)
-                )
-            )
-            .orderBy(desc(RepayAssetIsolated.timestamp))
+            .from(IsolatedPairRegistry)
+            .where(eq(IsolatedPairRegistry.id, pair as `0x${string}`))
             .limit(1);
-
-        if (recentRepay.length > 0) {
-            currentPrice = recentRepay[0].price;
-        }
+        resolvedAssetAddress = pairInfo.length > 0 ? pairInfo[0].asset : null;
     }
 
     // Calculate borrow cost for each segment and collect detailed information
@@ -722,18 +713,29 @@ export async function calculateSegmentedIsolatedPairBorrowCost(
         const segmentBorrowCost = (segment.borrowShares * exchangeRateChange + EXCHANGE_PRECISION / 2n) / EXCHANGE_PRECISION;
         totalBorrowCost += segmentBorrowCost;
 
-        // Get segment-specific asset price (fallback to current price if not found)
-        const segmentPrice = await getAssetPriceForSegment(
-            context,
-            pair,
-            segment.startTime,
-            segment.endTime,
-            true // is isolated pair
-        );
-        const priceToUse = segmentPrice > 0n ? segmentPrice : currentPrice;
+        // Get asset USD price from AssetPriceSnapshot for this segment
+        let assetPrice: bigint | undefined;
+        let assetPriceTimestamp: number | undefined;
+        if (resolvedAssetAddress) {
+            const priceSnapshots = await dbQuery
+                .select()
+                .from(AssetPriceSnapshot)
+                .where(
+                    and(
+                        eq(AssetPriceSnapshot.asset, resolvedAssetAddress),
+                        lte(AssetPriceSnapshot.timestamp, segment.endTime)
+                    )
+                )
+                .orderBy(desc(AssetPriceSnapshot.timestamp))
+                .limit(1);
+            if (priceSnapshots.length > 0) {
+                assetPrice = priceSnapshots[0].price;
+                assetPriceTimestamp = Number(priceSnapshots[0].timestamp);
+            }
+        }
 
-        // Calculate USD value for this segment's borrow cost using segment-specific price
-        const segmentBorrowCostUSD = calculateUSDValueNumber(segmentBorrowCost, priceToUse, decimals);
+        // Calculate USD value for this segment's borrow cost using asset price
+        const segmentBorrowCostUSD = calculateUSDValueNumber(segmentBorrowCost, assetPrice, decimals);
         totalBorrowCostUSD += segmentBorrowCostUSD;
 
         // Use endExchangeRate to show actual borrow value at end of segment (including interest accrued)
@@ -750,15 +752,17 @@ export async function calculateSegmentedIsolatedPairBorrowCost(
             startExchangeRate,
             endExchangeRate,
             segmentBorrowCost,
-            segmentBorrowCostUSD: segmentBorrowCostUSD.toFixed(4),
+            segmentBorrowCostUSD: segmentBorrowCostUSD.toString(),
             durationDays: Math.round(durationDays * 100) / 100,
-            assetPrice: priceToUse.toString() // Add asset price for this segment
+            assetAddress: resolvedAssetAddress || '', // Asset token address
+            assetPrice: assetPrice?.toString(), // Asset USD price from Chainlink (8 decimals)
+            assetPriceTimestamp // Timestamp of the price snapshot
         });
     }
 
     return {
         totalBorrowCost,
-        totalBorrowCostUSD: totalBorrowCostUSD.toFixed(4),
+        totalBorrowCostUSD: totalBorrowCostUSD.toString(),
         segments: detailedSegments
     };
 }

@@ -1,8 +1,9 @@
-import {UserBalanceEvent} from "ponder:schema";
-import {eq} from "ponder";
+import {UserBalanceEvent, AssetPriceSnapshot} from "ponder:schema";
+import {eq, and, lte, desc} from "ponder";
 import {
     calculateLiquidityIndexAtTimestamp,
-    calculateActualBalance
+    calculateActualBalance,
+    calculateVariableBorrowIndexAtTimestamp
 } from "../aave";
 import {
     getUserAssetsForPeriod,
@@ -14,8 +15,64 @@ import {
 } from "./yieldCalculations";
 import {LiquidityIndexCache} from "./liquidityIndexCache";
 import {BorrowIndexCache} from "./borrowIndexCache";
-import {getDecimals} from "../getDecimals";
 import {calculateUSDValueNumber} from "../usdCalculations";
+
+/**
+ * Get decimals for an asset from the most recent AssetPriceSnapshot
+ * Falls back to default if no snapshot found
+ */
+async function getDecimalsFromSnapshot(
+    dbQuery: any,
+    asset: string,
+    timestamp: number,
+    defaultDecimals: number = 18
+): Promise<number> {
+    const snapshots = await dbQuery
+        .select()
+        .from(AssetPriceSnapshot)
+        .where(
+            and(
+                eq(AssetPriceSnapshot.asset, asset as `0x${string}`),
+                lte(AssetPriceSnapshot.timestamp, timestamp)
+            )
+        )
+        .orderBy(desc(AssetPriceSnapshot.timestamp))
+        .limit(1);
+
+    return snapshots.length > 0 && snapshots[0].decimals != null
+        ? snapshots[0].decimals
+        : defaultDecimals;
+}
+
+/**
+ * Get asset price at a specific timestamp from AssetPriceSnapshot
+ * Returns the most recent price snapshot at or before the given timestamp
+ */
+async function getAssetPriceAtTimestamp(
+    dbQuery: any,
+    asset: string,
+    timestamp: number
+): Promise<{price: bigint, priceTimestamp: number}> {
+    const snapshots = await dbQuery
+        .select()
+        .from(AssetPriceSnapshot)
+        .where(
+            and(
+                eq(AssetPriceSnapshot.asset, asset as `0x${string}`),
+                lte(AssetPriceSnapshot.timestamp, timestamp)
+            )
+        )
+        .orderBy(desc(AssetPriceSnapshot.timestamp))
+        .limit(1);
+
+    if (snapshots.length > 0 && snapshots[0].price != null) {
+        return {
+            price: snapshots[0].price,
+            priceTimestamp: Number(snapshots[0].timestamp)
+        };
+    }
+    return { price: 0n, priceTimestamp: 0 };
+}
 
 /**
  * Daily yield data structure
@@ -31,6 +88,8 @@ export interface DailyYieldData {
     netYieldUSD: string;    // USD value of daily net yield
     assets: Array<{
         asset: string;
+        assetPrice?: string;     // Asset USD price (8 decimals)
+        assetPriceTimestamp?: number; // Timestamp of the price snapshot
         assetYield: bigint;
         borrowCost: bigint;
         netYield: bigint;
@@ -43,6 +102,8 @@ export interface DailyYieldData {
             scaledBalance: string; // String for JSON serialization
             segmentYield: string;  // String for JSON serialization
             segmentYieldUSD: string; // USD value of segment yield
+            assetPrice: string; // Asset USD price (8 decimals)
+            assetPriceTimestamp: number; // Timestamp of the price snapshot
             durationHours: number;
         }>;
         borrowSegments: Array<{
@@ -51,6 +112,8 @@ export interface DailyYieldData {
             scaledBorrowBalance: string; // String for JSON serialization
             segmentBorrowCost: string;  // String for JSON serialization
             segmentBorrowCostUSD: string; // USD value of segment borrow cost
+            assetPrice: string; // Asset USD price (8 decimals)
+            assetPriceTimestamp: number; // Timestamp of the price snapshot
             durationHours: number;
         }>;
     }>;
@@ -88,6 +151,8 @@ export async function calculateUserDailyYieldBreakdown(
     currentValue?: DailyYieldData & { isPartialDay: boolean };
 }> {
     try {
+        const dbQuery = context.db.sql || context.db;
+
         // Get all assets user had positions in during this period
         // Include both supply assets AND borrow-only assets
         const supplyAssets = await getUserAssetsForPeriod(context, user, startTimestamp, endTimestamp);
@@ -120,6 +185,8 @@ export async function calculateUserDailyYieldBreakdown(
             netYieldUSD: number;
             assets: Map<string, {
                 asset: string;
+                assetPrice?: bigint;
+                assetPriceTimestamp?: number;
                 assetYield: bigint;
                 borrowCost: bigint;
                 netYield: bigint;
@@ -132,6 +199,8 @@ export async function calculateUserDailyYieldBreakdown(
                     scaledBalance: string;
                     segmentYield: string;
                     segmentYieldUSD: string;
+                    assetPrice: string;
+                    assetPriceTimestamp: number;
                     durationHours: number;
                 }>;
                 borrowSegments: Array<{
@@ -140,6 +209,8 @@ export async function calculateUserDailyYieldBreakdown(
                     scaledBorrowBalance: string;
                     segmentBorrowCost: string;
                     segmentBorrowCostUSD: string;
+                    assetPrice: string;
+                    assetPriceTimestamp: number;
                     durationHours: number;
                 }>;
             }>;
@@ -179,14 +250,32 @@ export async function calculateUserDailyYieldBreakdown(
         // Process each asset
         for (const asset of assets) {
             try {
-                // Get decimals for USD calculations
-                const decimals = await getDecimals(context, asset) || 18;
+                // Get decimals from AssetPriceSnapshot (use endTimestamp to get most recent)
+                const decimals = await getDecimalsFromSnapshot(dbQuery, asset, endTimestamp);
 
-                // Initialize this asset in all days with zero yield (for consistent asset-level breakdown)
+                // Initialize this asset in all days with zero yield and fetch price for each day
                 for (const [dateStr, dayData] of dailyResults) {
                     if (!dayData.assets.has(asset)) {
+                        // Get asset price for this day's timestamp
+                        const priceSnapshots = await dbQuery
+                            .select()
+                            .from(AssetPriceSnapshot)
+                            .where(
+                                and(
+                                    eq(AssetPriceSnapshot.asset, asset as `0x${string}`),
+                                    lte(AssetPriceSnapshot.timestamp, dayData.timestamp)
+                                )
+                            )
+                            .orderBy(desc(AssetPriceSnapshot.timestamp))
+                            .limit(1);
+
+                        const assetPrice = priceSnapshots.length > 0 ? priceSnapshots[0].price : undefined;
+                        const assetPriceTimestamp = priceSnapshots.length > 0 ? Number(priceSnapshots[0].timestamp) : undefined;
+
                         dayData.assets.set(asset, {
                             asset,
+                            assetPrice,
+                            assetPriceTimestamp,
                             assetYield: 0n,
                             borrowCost: 0n,
                             netYield: 0n,
@@ -254,17 +343,20 @@ export async function calculateUserDailyYieldBreakdown(
                             const assetData = dayData.assets.get(asset)!;
                             assetData.assetYield += segment.segmentYield;
 
-                            // Parse segmentYieldUSD from string to number and add to total
-                            const segmentYieldUSD = parseFloat(segment.segmentYieldUSD || "0");
+                            // Get price at segment end for USD calculation
+                            const priceData = await getAssetPriceAtTimestamp(dbQuery, asset, segment.endTime);
+                            const segmentYieldUSD = calculateUSDValueNumber(segment.segmentYield, priceData.price, decimals);
                             assetData.assetYieldUSD += segmentYieldUSD;
-                            dayData.assetYieldUSD += segmentYieldUSD; // Add to day-level total
+                            dayData.assetYieldUSD += segmentYieldUSD;
 
                             assetData.segments.push({
                                 startTime: segment.startTime,
                                 endTime: segment.endTime,
                                 scaledBalance: segment.scaledBalance.toString(),
                                 segmentYield: segment.segmentYield.toString(),
-                                segmentYieldUSD: segment.segmentYieldUSD,
+                                segmentYieldUSD: segmentYieldUSD.toString(),
+                                assetPrice: priceData.price.toString(),
+                                assetPriceTimestamp: priceData.priceTimestamp,
                                 durationHours: segment.durationDays * 24
                             });
                         }
@@ -337,24 +429,20 @@ export async function calculateUserDailyYieldBreakdown(
                             const assetData = dayData.assets.get(asset)!;
                             assetData.assetYield += actualYield;
 
-                            // Calculate proportional USD value for this day's portion
-                            // segmentYieldUSD is the total USD for the entire segment
-                            // We need to calculate the proportion for this specific day
-                            const totalSegmentYieldUSD = parseFloat(segment.segmentYieldUSD || "0");
-                            const segmentDuration = segment.endTime - segment.startTime;
-                            const dayDuration = overlapEnd - overlapStart;
-                            const proportionalYieldUSD = segmentDuration > 0
-                                ? (totalSegmentYieldUSD * dayDuration) / segmentDuration
-                                : 0;
-                            assetData.assetYieldUSD += proportionalYieldUSD;
-                            dayData.assetYieldUSD += proportionalYieldUSD; // Add to day-level total
+                            // Calculate USD value using actual yield and price at end of overlap
+                            const priceData = await getAssetPriceAtTimestamp(dbQuery, asset, overlapEnd);
+                            const yieldUSD = calculateUSDValueNumber(actualYield, priceData.price, decimals);
+                            assetData.assetYieldUSD += yieldUSD;
+                            dayData.assetYieldUSD += yieldUSD;
 
                             assetData.segments.push({
                                 startTime: overlapStart,
                                 endTime: overlapEnd,
                                 scaledBalance: segment.scaledBalance.toString(),
                                 segmentYield: actualYield.toString(),
-                                segmentYieldUSD: proportionalYieldUSD.toFixed(4),
+                                segmentYieldUSD: yieldUSD.toString(),
+                                assetPrice: priceData.price.toString(),
+                                assetPriceTimestamp: priceData.priceTimestamp,
                                 durationHours: (overlapEnd - overlapStart) / 3600
                             });
                         }
@@ -396,26 +484,29 @@ export async function calculateUserDailyYieldBreakdown(
                             const assetData = dayData.assets.get(asset)!;
                             assetData.borrowCost += segment.segmentBorrowCost;
 
-                            // Parse segmentBorrowCostUSD from string to number and add to total
-                            const segmentBorrowCostUSD = parseFloat(segment.segmentBorrowCostUSD || "0");
-                            assetData.borrowCostUSD += segmentBorrowCostUSD;
-                            dayData.borrowCostUSD += segmentBorrowCostUSD; // Add to day-level total
+                            // Calculate USD value using actual borrow cost and price at segment end
+                            const priceData = await getAssetPriceAtTimestamp(dbQuery, asset, segment.endTime);
+                            const borrowCostUSD = calculateUSDValueNumber(segment.segmentBorrowCost, priceData.price, decimals);
+                            assetData.borrowCostUSD += borrowCostUSD;
+                            dayData.borrowCostUSD += borrowCostUSD;
 
                             assetData.borrowSegments.push({
                                 startTime: segment.startTime,
                                 endTime: segment.endTime,
                                 scaledBorrowBalance: segment.scaledBorrowBalance.toString(),
                                 segmentBorrowCost: segment.segmentBorrowCost.toString(),
-                                segmentBorrowCostUSD: segment.segmentBorrowCostUSD,
+                                segmentBorrowCostUSD: borrowCostUSD.toString(),
+                                assetPrice: priceData.price.toString(),
+                                assetPriceTimestamp: priceData.priceTimestamp,
                                 durationHours: segment.durationDays * 24
                             });
                         }
                     } else {
-                        // Segment spans multiple days - use proportional distribution for simplicity
-                        // (More complex accurate calculation would require borrow index at day boundaries)
-                        const totalDuration = segment.endTime - segment.startTime;
+                        // Segment spans multiple days - calculate accurate borrow cost using borrow indices
                         const segmentDays = Math.ceil((segmentEndDate.getTime() - segmentStartDate.getTime()) / (24 * 60 * 60 * 1000)) + 1;
 
+                        // Collect day overlaps for this borrow segment
+                        const borrowDayOverlaps: Array<{dateStr: string, overlapStart: number, overlapEnd: number}> = [];
                         for (let dayOffset = 0; dayOffset < segmentDays; dayOffset++) {
                             const currentDate = new Date(segmentStartDate);
                             currentDate.setUTCDate(segmentStartDate.getUTCDate() + dayOffset);
@@ -429,45 +520,70 @@ export async function calculateUserDailyYieldBreakdown(
                             const overlapEnd = Math.min(segment.endTime, dayEnd);
 
                             if (overlapEnd > overlapStart) {
-                                const overlapDuration = overlapEnd - overlapStart;
-                                const proportionalCost = (segment.segmentBorrowCost * BigInt(overlapDuration)) / BigInt(totalDuration);
+                                borrowDayOverlaps.push({dateStr: currentDateStr, overlapStart, overlapEnd});
+                            }
+                        }
 
-                                dayData.borrowCost += proportionalCost;
+                        // Collect all unique timestamps needed for borrow index calculation
+                        const borrowTimestampsNeeded = new Set<number>();
+                        for (const {overlapStart, overlapEnd} of borrowDayOverlaps) {
+                            borrowTimestampsNeeded.add(overlapStart);
+                            borrowTimestampsNeeded.add(overlapEnd);
+                        }
 
-                                if (!dayData.assets.has(asset)) {
-                                    dayData.assets.set(asset, {
-                                        asset,
-                                        assetYield: 0n,
-                                        borrowCost: 0n,
-                                        netYield: 0n,
-                                        assetYieldUSD: 0,
-                                        borrowCostUSD: 0,
-                                        netYieldUSD: 0,
-                                        segments: [],
-                                        borrowSegments: []
-                                    });
-                                }
+                        // First pass: calculate all borrow indices in parallel
+                        const borrowIndexCache = new Map<number, bigint>();
+                        for (const timestamp of borrowTimestampsNeeded) {
+                            const index = await calculateVariableBorrowIndexAtTimestamp(context, asset, timestamp);
+                            borrowIndexCache.set(timestamp, index);
+                        }
 
-                                const assetData = dayData.assets.get(asset)!;
-                                assetData.borrowCost += proportionalCost;
+                        // Second pass: use cached indices to calculate borrow costs
+                        for (const {dateStr, overlapStart, overlapEnd} of borrowDayOverlaps) {
+                            const dayData = dailyResults.get(dateStr)!;
+                            const startIndex = borrowIndexCache.get(overlapStart)!;
+                            const endIndex = borrowIndexCache.get(overlapEnd)!;
 
-                                // Calculate proportional USD value for this day's portion
-                                const totalSegmentBorrowCostUSD = parseFloat(segment.segmentBorrowCostUSD || "0");
-                                const proportionalBorrowCostUSD = totalDuration > 0
-                                    ? (totalSegmentBorrowCostUSD * overlapDuration) / totalDuration
-                                    : 0;
-                                assetData.borrowCostUSD += proportionalBorrowCostUSD;
-                                dayData.borrowCostUSD += proportionalBorrowCostUSD; // Add to day-level total
+                            // Calculate actual borrow cost for this specific time period
+                            const startBalance = calculateActualBalance(segment.scaledBorrowBalance, startIndex);
+                            const endBalance = calculateActualBalance(segment.scaledBorrowBalance, endIndex);
+                            const actualBorrowCost = endBalance - startBalance;
 
-                                assetData.borrowSegments.push({
-                                    startTime: overlapStart,
-                                    endTime: overlapEnd,
-                                    scaledBorrowBalance: segment.scaledBorrowBalance.toString(),
-                                    segmentBorrowCost: proportionalCost.toString(),
-                                    segmentBorrowCostUSD: proportionalBorrowCostUSD.toFixed(4),
-                                    durationHours: (overlapEnd - overlapStart) / 3600
+                            dayData.borrowCost += actualBorrowCost;
+
+                            if (!dayData.assets.has(asset)) {
+                                dayData.assets.set(asset, {
+                                    asset,
+                                    assetYield: 0n,
+                                    borrowCost: 0n,
+                                    netYield: 0n,
+                                    assetYieldUSD: 0,
+                                    borrowCostUSD: 0,
+                                    netYieldUSD: 0,
+                                    segments: [],
+                                    borrowSegments: []
                                 });
                             }
+
+                            const assetData = dayData.assets.get(asset)!;
+                            assetData.borrowCost += actualBorrowCost;
+
+                            // Calculate USD value using actual borrow cost and price at end of overlap
+                            const priceData = await getAssetPriceAtTimestamp(dbQuery, asset, overlapEnd);
+                            const borrowCostUSD = calculateUSDValueNumber(actualBorrowCost, priceData.price, decimals);
+                            assetData.borrowCostUSD += borrowCostUSD;
+                            dayData.borrowCostUSD += borrowCostUSD;
+
+                            assetData.borrowSegments.push({
+                                startTime: overlapStart,
+                                endTime: overlapEnd,
+                                scaledBorrowBalance: segment.scaledBorrowBalance.toString(),
+                                segmentBorrowCost: actualBorrowCost.toString(),
+                                segmentBorrowCostUSD: borrowCostUSD.toString(),
+                                assetPrice: priceData.price.toString(),
+                                assetPriceTimestamp: priceData.priceTimestamp,
+                                durationHours: (overlapEnd - overlapStart) / 3600
+                            });
                         }
                     }
                 }
@@ -500,23 +616,27 @@ export async function calculateUserDailyYieldBreakdown(
                 assetYield: dayData.assetYield,
                 borrowCost: dayData.borrowCost,
                 netYield: dayData.netYield,
-                assetYieldUSD: dayData.assetYieldUSD.toFixed(4),
-                borrowCostUSD: dayData.borrowCostUSD.toFixed(4),
-                netYieldUSD: dayData.netYieldUSD.toFixed(4),
+                assetYieldUSD: dayData.assetYieldUSD,
+                borrowCostUSD: dayData.borrowCostUSD,
+                netYieldUSD: dayData.netYieldUSD,
                 assets: Array.from(dayData.assets.values()).map(assetData => ({
                     asset: assetData.asset,
+                    assetPrice: assetData.assetPrice?.toString(),
+                    assetPriceTimestamp: assetData.assetPriceTimestamp,
                     assetYield: assetData.assetYield,
                     borrowCost: assetData.borrowCost,
                     netYield: assetData.netYield,
-                    assetYieldUSD: assetData.assetYieldUSD.toFixed(4),
-                    borrowCostUSD: assetData.borrowCostUSD.toFixed(4),
-                    netYieldUSD: assetData.netYieldUSD.toFixed(4),
+                    assetYieldUSD: assetData.assetYieldUSD,
+                    borrowCostUSD: assetData.borrowCostUSD,
+                    netYieldUSD: assetData.netYieldUSD,
                     segments: (assetData.segments || []).map(seg => ({
                         startTime: seg.startTime,
                         endTime: seg.endTime,
                         scaledBalance: seg.scaledBalance, // Already a string
                         segmentYield: seg.segmentYield,   // Already a string
                         segmentYieldUSD: seg.segmentYieldUSD,
+                        assetPrice: seg.assetPrice,
+                        assetPriceTimestamp: seg.assetPriceTimestamp,
                         durationHours: seg.durationHours
                     })),
                     borrowSegments: (assetData.borrowSegments || []).map(seg => ({
@@ -525,6 +645,8 @@ export async function calculateUserDailyYieldBreakdown(
                         scaledBorrowBalance: seg.scaledBorrowBalance, // Already a string
                         segmentBorrowCost: seg.segmentBorrowCost,     // Already a string
                         segmentBorrowCostUSD: seg.segmentBorrowCostUSD,
+                        assetPrice: seg.assetPrice,
+                        assetPriceTimestamp: seg.assetPriceTimestamp,
                         durationHours: seg.durationHours
                     }))
                 }))
@@ -671,6 +793,8 @@ export async function calculateUserDailyPortfolioValue(
             suppliedUSD: string;
             borrowedUSD: string;
             netPositionUSD: string;
+            assetPrice?: string; // Oracle price used for USD calculations (8 decimals)
+            assetPriceTimestamp?: number; // Timestamp when the price was recorded
         }>;
     }>;
 }> {
@@ -755,6 +879,8 @@ export async function calculateUserDailyPortfolioValue(
                 borrowed: bigint;
                 suppliedUSD: number;
                 borrowedUSD: number;
+                assetPrice?: bigint; // Oracle price used for USD calculations
+                assetPriceTimestamp?: number; // Timestamp when the price was recorded
             }>;
         }>();
 
@@ -806,9 +932,6 @@ export async function calculateUserDailyPortfolioValue(
             const borrows = borrowsByAsset.get(asset) || [];
             const repays = repaysByAsset.get(asset) || [];
 
-            // Get decimals for USD calculations
-            const decimals = await getDecimals(context, asset) || 18;
-
             // For each day, calculate supplied and borrowed balances at END of day (23:59:59 UTC)
             for (const [dateStr, dayData] of dailyResults) {
                 const dayEndTimestamp = dayData.timestamp;
@@ -822,15 +945,23 @@ export async function calculateUserDailyPortfolioValue(
                 const variableBorrowIndex = await borrowIndexCache.get(context, asset, dayEndTimestamp);
                 const borrowedBalance = calculateBorrowedFromEvents(borrows, repays, dayEndTimestamp, variableBorrowIndex);
 
-                // Get historical price at day end from UserBalanceEvent
-                // Find the most recent event at or before dayEndTimestamp
-                let assetPrice: bigint | undefined = undefined;
-                for (let i = balanceEvents.length - 1; i >= 0; i--) {
-                    if (balanceEvents[i].timestamp <= dayEndTimestamp) {
-                        assetPrice = balanceEvents[i].assetPrice;
-                        break;
-                    }
-                }
+                // Get historical price and decimals at day end from AssetPriceSnapshot
+                // Query the most recent snapshot at or before dayEndTimestamp
+                const priceSnapshots = await dbQuery
+                    .select()
+                    .from(AssetPriceSnapshot)
+                    .where(
+                        and(
+                            eq(AssetPriceSnapshot.asset, asset as `0x${string}`),
+                            lte(AssetPriceSnapshot.timestamp, dayEndTimestamp)
+                        )
+                    )
+                    .orderBy(desc(AssetPriceSnapshot.timestamp))
+                    .limit(1);
+
+                const assetPrice = priceSnapshots.length > 0 ? priceSnapshots[0].price : undefined;
+                const assetPriceTimestamp = priceSnapshots.length > 0 ? priceSnapshots[0].timestamp : undefined;
+                const decimals = priceSnapshots.length > 0 && priceSnapshots[0].decimals != null ? priceSnapshots[0].decimals : 18;
 
                 // Only add to assets map if there's a non-zero position
                 if (suppliedBalance > 0n || borrowedBalance > 0n) {
@@ -843,7 +974,9 @@ export async function calculateUserDailyPortfolioValue(
                         supplied: suppliedBalance,
                         borrowed: borrowedBalance,
                         suppliedUSD,
-                        borrowedUSD
+                        borrowedUSD,
+                        assetPrice,
+                        assetPriceTimestamp
                     });
 
                     dayData.totalSupplied += suppliedBalance;
@@ -879,7 +1012,9 @@ export async function calculateUserDailyPortfolioValue(
                             netPosition,
                             suppliedUSD: assetData.suppliedUSD.toFixed(4),
                             borrowedUSD: assetData.borrowedUSD.toFixed(4),
-                            netPositionUSD: netPositionUSD.toFixed(4)
+                            netPositionUSD: netPositionUSD.toFixed(4),
+                            assetPrice: assetData.assetPrice?.toString(), // Oracle price (8 decimals)
+                            assetPriceTimestamp: assetData.assetPriceTimestamp // Timestamp when the price was recorded
                         };
                     })
                 };

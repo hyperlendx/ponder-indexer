@@ -146,7 +146,8 @@ app.get("/user/:address/custom-period-yield", async (c) => {
                 segmentYield: seg.segmentYield.toString(),
                 segmentYieldUSD: seg.segmentYieldUSD, // USD value for this segment
                 durationDays: seg.durationDays,
-                assetPrice: seg.assetPrice // Asset price during this segment
+                assetPrice: seg.assetPrice, // Asset price during this segment
+                assetPriceTimestamp: seg.assetPriceTimestamp // Timestamp of the price snapshot
             })),
             borrowCostSegments: pos.borrowCostSegments.map(seg => ({
                 startTime: seg.startTime,
@@ -160,7 +161,8 @@ app.get("/user/:address/custom-period-yield", async (c) => {
                 segmentBorrowCost: seg.segmentBorrowCost.toString(),
                 segmentBorrowCostUSD: seg.segmentBorrowCostUSD, // USD value for this segment
                 durationDays: seg.durationDays,
-                assetPrice: seg.assetPrice // Asset price during this segment
+                assetPrice: seg.assetPrice, // Asset price during this segment
+                assetPriceTimestamp: seg.assetPriceTimestamp // Timestamp of the price snapshot
             }))
         }));
 
@@ -317,7 +319,9 @@ app.get("/user/:address/custom-period-yield-isolated", async (c) => {
                     segmentYield: seg.segmentYield?.toString() ?? '0',
                     segmentYieldUSD: seg.segmentYieldUSD ?? '0.00', // USD value for this segment
                     durationDays: seg.durationDays ?? 0,
-                    assetPrice: seg.assetPrice ?? '0' // Asset price during this segment
+                    assetAddress: seg.assetAddress ?? '', // Asset token address
+                    assetPrice: seg.assetPrice ?? '0', // Asset price during this segment
+                    assetPriceTimestamp: seg.assetPriceTimestamp // Timestamp of the price snapshot
                 };
             }),
             borrowCostSegments: (pos.borrowCostSegments ?? []).map((seg) => {
@@ -337,7 +341,9 @@ app.get("/user/:address/custom-period-yield-isolated", async (c) => {
                     segmentBorrowCost: seg.segmentBorrowCost?.toString() ?? '0',
                     segmentBorrowCostUSD: seg.segmentBorrowCostUSD ?? '0.00', // USD value for this segment
                     durationDays: seg.durationDays ?? 0,
-                    assetPrice: seg.assetPrice ?? '0' // Asset price during this segment
+                    assetAddress: seg.assetAddress ?? '', // Asset token address
+                    assetPrice: seg.assetPrice ?? '0', // Asset price during this segment
+                    assetPriceTimestamp: seg.assetPriceTimestamp // Timestamp of the price snapshot
                 };
             })
         };
@@ -457,6 +463,8 @@ app.get("/user/:address/daily-yield-breakdown", async (c) => {
             netYieldUSD: day.netYieldUSD,
             assets: day.assets.map(asset => ({
                 asset: asset.asset,
+                assetPrice: asset.assetPrice,
+                assetPriceTimestamp: asset.assetPriceTimestamp,
                 assetYield: asset.assetYield.toString(),
                 borrowCost: asset.borrowCost.toString(),
                 netYield: asset.netYield.toString(),
@@ -573,6 +581,9 @@ app.get("/user/:address/daily-yield-breakdown-isolated", async (c) => {
             netYieldUSD: day.netYieldUSD,
             pairs: day.pairs.map(pair => ({
                 pair: pair.pair,
+                assetAddress: pair.assetAddress,
+                assetPrice: pair.assetPrice,
+                assetPriceTimestamp: pair.assetPriceTimestamp,
                 assetYield: pair.assetYield.toString(),
                 borrowCost: pair.borrowCost.toString(),
                 netYield: pair.netYield.toString(),
@@ -687,7 +698,9 @@ app.get("/user/:address/daily-portfolio-value", async (c) => {
                 netPosition: asset.netPosition.toString(),
                 suppliedUSD: asset.suppliedUSD,
                 borrowedUSD: asset.borrowedUSD,
-                netPositionUSD: asset.netPositionUSD
+                netPositionUSD: asset.netPositionUSD,
+                assetPrice: asset.assetPrice, // Oracle price used for USD calculations (8 decimals)
+                assetPriceTimestamp: asset.assetPriceTimestamp // Timestamp when the price was recorded
             }))
         }));
 
@@ -790,6 +803,8 @@ app.get("/user/:address/daily-portfolio-value-isolated", async (c) => {
             totalBorrowedUSD: day.totalBorrowedUSD,
             pairs: day.pairs.map(pair => ({
                 pair: pair.pair,
+                collateralAddress: pair.collateralAddress,
+                assetAddress: pair.assetAddress,
                 collateralAmount: pair.collateralAmount.toString(),
                 assetAmount: pair.assetAmount.toString(),
                 borrowAmount: pair.borrowAmount.toString(),
@@ -797,7 +812,11 @@ app.get("/user/:address/daily-portfolio-value-isolated", async (c) => {
                 collateralUSD: pair.collateralUSD,
                 assetUSD: pair.assetUSD,
                 borrowedUSD: pair.borrowedUSD,
-                netPositionUSD: pair.netPositionUSD
+                netPositionUSD: pair.netPositionUSD,
+                collateralPrice: pair.collateralPrice, // Collateral USD price from Chainlink (8 decimals)
+                collateralPriceTimestamp: pair.collateralPriceTimestamp, // Timestamp when the collateral price was recorded
+                assetPrice: pair.assetPrice, // Asset USD price from Chainlink (8 decimals)
+                assetPriceTimestamp: pair.assetPriceTimestamp // Timestamp when the asset price was recorded
             }))
         }));
 

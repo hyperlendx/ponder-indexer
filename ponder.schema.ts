@@ -272,7 +272,10 @@ export const BorrowAssetIsolated = onchainTable(
         borrowAmount: t.bigint(),
         sharesAdded: t.bigint(),
         timestamp: t.integer(),
-        price: t.bigint(),
+        assetAddress: t.hex(), // The borrowed asset address
+        collateralAddress: t.hex(), // The collateral asset address
+        assetPrice: t.bigint(), // USD price of the asset (8 decimals)
+        collateralPrice: t.bigint(), // USD price of the collateral (8 decimals)
         exchangeRate: t.bigint(), // Vault exchange rate (assets/shares)
     }),
     (table) => ({
@@ -295,12 +298,41 @@ export const RepayAssetIsolated = onchainTable(
         amountToRepay: t.bigint(),
         shares: t.bigint(),
         timestamp: t.integer(),
-        price: t.bigint(),
+        assetAddress: t.hex(), // The borrowed asset address
+        collateralAddress: t.hex(), // The collateral asset address
+        assetPrice: t.bigint(), // USD price of the asset (8 decimals)
+        collateralPrice: t.bigint(), // USD price of the collateral (8 decimals)
         exchangeRate: t.bigint(), // Vault exchange rate (assets/shares)
     }),
     (table) => ({
         borrowerIdx: index().on(table.borrower),
         payerIdx: index().on(table.payer),
+        // Composite indexes for efficient querying by user+pair+timestamp
+        borrowerPairTimestampIdx: index().on(table.borrower, table.pair, table.timestamp),
+        borrowerPairIdx: index().on(table.borrower, table.pair),
+    })
+);
+
+export const RepayAssetWithCollateralIsolated = onchainTable(
+    "repay_asset_with_collateral_isolated",
+    (t) => ({
+        id: t.text().primaryKey(),
+        txHash: t.hex(),
+        pair: t.hex(),
+        borrower: t.hex(),
+        swapperAddress: t.hex(),
+        collateralToSwap: t.bigint(),
+        amountAssetOut: t.bigint(),
+        sharesRepaid: t.bigint(),
+        timestamp: t.integer(),
+        assetAddress: t.hex(), // The borrowed asset address
+        collateralAddress: t.hex(), // The collateral asset address
+        assetPrice: t.bigint(), // USD price of the asset (8 decimals)
+        collateralPrice: t.bigint(), // USD price of the collateral (8 decimals)
+        exchangeRate: t.bigint(), // Vault exchange rate (assets/shares)
+    }),
+    (table) => ({
+        borrowerIdx: index().on(table.borrower),
         // Composite indexes for efficient querying by user+pair+timestamp
         borrowerPairTimestampIdx: index().on(table.borrower, table.pair, table.timestamp),
         borrowerPairIdx: index().on(table.borrower, table.pair),
@@ -317,7 +349,10 @@ export const AddCollateralIsolated = onchainTable(
         sender: t.hex(),
         collateralAmount: t.bigint(),
         timestamp: t.integer(),
-        price: t.bigint(),
+        assetAddress: t.hex(), // The borrowed asset address
+        collateralAddress: t.hex(), // The collateral asset address
+        assetPrice: t.bigint(), // USD price of the asset (8 decimals)
+        collateralPrice: t.bigint(), // USD price of the collateral (8 decimals)
     }),
     (table) => ({
         borrowerIdx: index().on(table.borrower),
@@ -339,7 +374,10 @@ export const RemoveCollateralIsolated = onchainTable(
         borrower: t.hex(),
         collateralAmount: t.bigint(),
         timestamp: t.integer(),
-        price: t.bigint(),
+        assetAddress: t.hex(), // The borrowed asset address
+        collateralAddress: t.hex(), // The collateral asset address
+        assetPrice: t.bigint(), // USD price of the asset (8 decimals)
+        collateralPrice: t.bigint(), // USD price of the collateral (8 decimals)
     }),
     (table) => ({
         receiverIdx: index().on(table.receiver),
@@ -366,7 +404,10 @@ export const LiquidateIsolated = onchainTable(
         sharesToAdjust: t.bigint(),
         amountToAdjust: t.bigint(),
         timestamp: t.integer(),
-        price: t.bigint(),
+        assetAddress: t.hex(), // The borrowed asset address
+        collateralAddress: t.hex(), // The collateral asset address
+        assetPrice: t.bigint(), // USD price of the asset (8 decimals)
+        collateralPrice: t.bigint(), // USD price of the collateral (8 decimals)
         exchangeRate: t.bigint(), // Vault exchange rate (assets/shares)
     }),
     (table) => ({
@@ -386,7 +427,10 @@ export const DepositIsolated = onchainTable(
         assets: t.bigint(),
         shares: t.bigint(),
         timestamp: t.integer(),
-        price: t.bigint(),
+        assetAddress: t.hex(), // The borrowed asset address
+        collateralAddress: t.hex(), // The collateral asset address
+        assetPrice: t.bigint(), // USD price of the asset (8 decimals)
+        collateralPrice: t.bigint(), // USD price of the collateral (8 decimals)
         exchangeRate: t.bigint(), // Vault exchange rate (assets/shares)
     }),
     (table) => ({
@@ -410,7 +454,10 @@ export const WithdrawIsolated = onchainTable(
         assets: t.bigint(),
         shares: t.bigint(),
         timestamp: t.integer(),
-        price: t.bigint(),
+        assetAddress: t.hex(), // The borrowed asset address
+        collateralAddress: t.hex(), // The collateral asset address
+        assetPrice: t.bigint(), // USD price of the asset (8 decimals)
+        collateralPrice: t.bigint(), // USD price of the collateral (8 decimals)
         exchangeRate: t.bigint(), // Vault exchange rate (assets/shares)
     }),
     (table) => ({
@@ -636,6 +683,7 @@ export const AssetPriceSnapshot = onchainTable(
         id: t.text().primaryKey(), // asset-blockNumber
         asset: t.hex(),
         price: t.bigint(), // Oracle price (8 decimals precision)
+        decimals: t.integer(), // Token decimals (e.g., 6 for USDT, 18 for WETH)
         blockNumber: t.bigint(),
         timestamp: t.integer(),
     }),
@@ -653,11 +701,17 @@ export const IsolatedPairRegistry = onchainTable(
     "isolated_pair_registry",
     (t) => ({
         id: t.hex().primaryKey(), // pair address
+        asset: t.hex(), // asset token address (e.g., USDT0)
+        collateral: t.hex(), // collateral token address (e.g., WHLP)
+        assetDecimals: t.integer(), // asset token decimals
+        collateralDecimals: t.integer(), // collateral token decimals
         createdAtBlock: t.bigint(),
         createdAtTimestamp: t.integer(),
     }),
     (table) => ({
         createdAtBlockIdx: index().on(table.createdAtBlock),
+        assetIdx: index().on(table.asset),
+        collateralIdx: index().on(table.collateral),
     })
 );
 

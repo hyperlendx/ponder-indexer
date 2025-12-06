@@ -278,7 +278,7 @@ export async function calculateSegmentedCustomPeriodYield(
             startLiquidityIndex,
             endLiquidityIndex,
             segmentYield: segmentInterest,
-            segmentYieldUSD: segmentYieldUSD.toFixed(4),
+            segmentYieldUSD: segmentYieldUSD.toString(),
             durationDays: Math.round(durationDays * 100) / 100, // Round to 2 decimal places
             assetPrice: priceToUse.toString() // Add asset price for this segment
         });
@@ -286,7 +286,7 @@ export async function calculateSegmentedCustomPeriodYield(
 
     return {
         totalYield: totalInterest,
-        totalYieldUSD: totalInterestUSD.toFixed(4),
+        totalYieldUSD: totalInterestUSD.toString(),
         segments: detailedSegments
     };
 }
@@ -618,7 +618,7 @@ export async function calculateSegmentedCustomPeriodBorrowCost(
             startBorrowIndex,
             endBorrowIndex,
             segmentBorrowCost,
-            segmentBorrowCostUSD: segmentBorrowCostUSD.toFixed(4),
+            segmentBorrowCostUSD: segmentBorrowCostUSD.toString(),
             durationDays: Math.round(durationDays * 100) / 100,
             assetPrice: priceToUse.toString() // Add asset price for this segment
         });
@@ -626,7 +626,7 @@ export async function calculateSegmentedCustomPeriodBorrowCost(
 
     return {
         totalBorrowCost,
-        totalBorrowCostUSD: totalBorrowCostUSD.toFixed(4),
+        totalBorrowCostUSD: totalBorrowCostUSD.toString(),
         segments: detailedSegments
     };
 }

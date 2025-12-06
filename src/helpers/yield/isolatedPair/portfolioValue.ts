@@ -6,8 +6,7 @@
  */
 
 import { calculateAllIsolatedPairPositions } from "./positionCalculations";
-import { getDecimals } from "../../getDecimals";
-import { DepositIsolated, BorrowAssetIsolated, AddCollateralIsolated } from "ponder:schema";
+import { AssetPriceSnapshot, IsolatedPairRegistry } from "ponder:schema";
 import { eq, and, lte, desc } from "ponder";
 import { calculateUSDValueNumber } from "../../usdCalculations";
 
@@ -41,6 +40,8 @@ export async function calculateUserDailyIsolatedPairPortfolioValue(
         totalBorrowedUSD: string;
         pairs: Array<{
             pair: string;
+            collateralAddress: string; // Collateral token address (e.g., WHLP)
+            assetAddress: string; // Asset token address (e.g., USDT0)
             collateralAmount: bigint;
             assetAmount: bigint;
             borrowAmount: bigint;
@@ -49,6 +50,10 @@ export async function calculateUserDailyIsolatedPairPortfolioValue(
             assetUSD: string;
             borrowedUSD: string;
             netPositionUSD: string;
+            collateralPrice?: string; // Collateral USD price from Chainlink (8 decimals)
+            collateralPriceTimestamp?: number; // Timestamp when the collateral price was recorded
+            assetPrice?: string; // Asset USD price from Chainlink (8 decimals)
+            assetPriceTimestamp?: number; // Timestamp when the asset price was recorded
         }>;
     }>;
 }> {
@@ -86,75 +91,60 @@ export async function calculateUserDailyIsolatedPairPortfolioValue(
 
             // Process each pair and calculate USD values
             for (const pos of positions) {
-                // Get decimals for this pair
-                const decimals = await getDecimals(context, pos.pair) || 18;
-
-                // Get historical price at day end from events
-                // Try DepositIsolated first
-                let assetPrice: bigint | undefined = undefined;
-
-                const depositEvents = await dbQuery
+                // Get pair info from IsolatedPairRegistry (asset, collateral addresses)
+                const pairInfo = await dbQuery
                     .select()
-                    .from(DepositIsolated)
-                    .where(
-                        and(
-                            eq(DepositIsolated.owner, user as `0x${string}`),
-                            eq(DepositIsolated.pair, pos.pair as `0x${string}`),
-                            lte(DepositIsolated.timestamp, dayEnd)
-                        )
-                    )
-                    .orderBy(desc(DepositIsolated.timestamp))
+                    .from(IsolatedPairRegistry)
+                    .where(eq(IsolatedPairRegistry.id, pos.pair as `0x${string}`))
                     .limit(1);
 
-                if (depositEvents.length > 0) {
-                    assetPrice = depositEvents[0].price;
+                if (pairInfo.length === 0) {
+                    console.warn(`[portfolioValue] Pair ${pos.pair} not found in registry, skipping`);
+                    continue;
                 }
 
+                const { asset: assetAddress, collateral: collateralAddress } = pairInfo[0];
 
-                // If no deposit events, try BorrowAssetIsolated
-                if (!assetPrice) {
-                    const borrowEvents = await dbQuery
-                        .select()
-                        .from(BorrowAssetIsolated)
-                        .where(
-                            and(
-                                eq(BorrowAssetIsolated.borrower, user as `0x${string}`),
-                                eq(BorrowAssetIsolated.pair, pos.pair as `0x${string}`),
-                                lte(BorrowAssetIsolated.timestamp, dayEnd)
-                            )
+                // Get collateral USD price and decimals from AssetPriceSnapshot
+                const collateralPriceSnapshots = await dbQuery
+                    .select()
+                    .from(AssetPriceSnapshot)
+                    .where(
+                        and(
+                            eq(AssetPriceSnapshot.asset, collateralAddress),
+                            lte(AssetPriceSnapshot.timestamp, dayEnd)
                         )
-                        .orderBy(desc(BorrowAssetIsolated.timestamp))
-                        .limit(1);
+                    )
+                    .orderBy(desc(AssetPriceSnapshot.timestamp))
+                    .limit(1);
 
-                    if (borrowEvents.length > 0) {
-                        assetPrice = borrowEvents[0].price;
-                    }
-                }
+                const collateralPrice = collateralPriceSnapshots.length > 0 ? collateralPriceSnapshots[0].price : undefined;
+                const collateralDecimals = collateralPriceSnapshots.length > 0 ? collateralPriceSnapshots[0].decimals : 18;
+                const collateralPriceTimestamp = collateralPriceSnapshots.length > 0 ? collateralPriceSnapshots[0].timestamp : undefined;
 
-                // If still no price, try AddCollateralIsolated
-                if (!assetPrice) {
-                    const collateralEvents = await dbQuery
-                        .select()
-                        .from(AddCollateralIsolated)
-                        .where(
-                            and(
-                                eq(AddCollateralIsolated.borrower, user as `0x${string}`),
-                                eq(AddCollateralIsolated.pair, pos.pair as `0x${string}`),
-                                lte(AddCollateralIsolated.timestamp, dayEnd)
-                            )
+                // Get asset USD price and decimals from AssetPriceSnapshot
+                const assetPriceSnapshots = await dbQuery
+                    .select()
+                    .from(AssetPriceSnapshot)
+                    .where(
+                        and(
+                            eq(AssetPriceSnapshot.asset, assetAddress),
+                            lte(AssetPriceSnapshot.timestamp, dayEnd)
                         )
-                        .orderBy(desc(AddCollateralIsolated.timestamp))
-                        .limit(1);
+                    )
+                    .orderBy(desc(AssetPriceSnapshot.timestamp))
+                    .limit(1);
 
-                    if (collateralEvents.length > 0) {
-                        assetPrice = collateralEvents[0].price;
-                    }
-                }
+                const assetPrice = assetPriceSnapshots.length > 0 ? assetPriceSnapshots[0].price : undefined;
+                const assetDecimals = assetPriceSnapshots.length > 0 ? assetPriceSnapshots[0].decimals : 6;
+                const assetPriceTimestamp = assetPriceSnapshots.length > 0 ? assetPriceSnapshots[0].timestamp : undefined;
 
-                // Calculate USD values
-                const collateralUSD = calculateUSDValueNumber(pos.collateralAmount, assetPrice, decimals);
-                const assetUSD = calculateUSDValueNumber(pos.assetAmount, assetPrice, decimals);
-                const borrowedUSD = calculateUSDValueNumber(pos.borrowAmount, assetPrice, decimals);
+                // Calculate USD values using direct USD prices from Chainlink
+                // Both prices are in 8 decimals (USD)
+                const collateralUSD = calculateUSDValueNumber(pos.collateralAmount, collateralPrice, collateralDecimals);
+                const assetUSD = calculateUSDValueNumber(pos.assetAmount, assetPrice, assetDecimals);
+                const borrowedUSD = calculateUSDValueNumber(pos.borrowAmount, assetPrice, assetDecimals);
+
                 const suppliedUSD = collateralUSD + assetUSD;
                 const netPositionUSD = suppliedUSD - borrowedUSD;
 
@@ -168,14 +158,20 @@ export async function calculateUserDailyIsolatedPairPortfolioValue(
 
                 pairsWithUSD.push({
                     pair: pos.pair,
+                    collateralAddress: collateralAddress as string,
+                    assetAddress: assetAddress as string,
                     collateralAmount: pos.collateralAmount,
                     assetAmount: pos.assetAmount,
                     borrowAmount: pos.borrowAmount,
                     netPosition,
-                    collateralUSD: collateralUSD.toFixed(4),
-                    assetUSD: assetUSD.toFixed(4),
-                    borrowedUSD: borrowedUSD.toFixed(4),
-                    netPositionUSD: netPositionUSD.toFixed(4)
+                    collateralUSD: collateralUSD.toString(),
+                    assetUSD: assetUSD.toString(),
+                    borrowedUSD: borrowedUSD.toString(),
+                    netPositionUSD: netPositionUSD.toString(),
+                    collateralPrice: collateralPrice?.toString(),
+                    collateralPriceTimestamp,
+                    assetPrice: assetPrice?.toString(),
+                    assetPriceTimestamp
                 });
             }
 
@@ -188,9 +184,9 @@ export async function calculateUserDailyIsolatedPairPortfolioValue(
                 portfolioValue,
                 totalSupplied,
                 totalBorrowed,
-                portfolioValueUSD: portfolioValueUSD.toFixed(4),
-                totalSuppliedUSD: totalSuppliedUSD.toFixed(4),
-                totalBorrowedUSD: totalBorrowedUSD.toFixed(4),
+                portfolioValueUSD: portfolioValueUSD.toString(),
+                totalSuppliedUSD: totalSuppliedUSD.toString(),
+                totalBorrowedUSD: totalBorrowedUSD.toString(),
                 pairs: pairsWithUSD
             });
         }

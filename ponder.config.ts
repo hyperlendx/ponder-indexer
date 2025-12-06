@@ -7,6 +7,7 @@ import {IsolatedAbi} from "./abis/IsolatedAbi";
 import {HTokenAbi} from "./abis/HTokenAbi";
 import {LoopingStrategyManagerFactoryAbi} from "./abis/LoopingStrategyManagerFactory";
 import {IsolatedPairRegistry as IsolatedPairRegistryAbi} from "./abis/IsolatedPairRegistry";
+import {UiDataProviderIsolatedAbi as UiDataProviderIsolatedAbi} from "./abis/UiDataProviderIsolatedAbi";
 
 export default createConfig({
     chains: {
@@ -66,17 +67,24 @@ export default createConfig({
             startBlock: 7336100,
         },
 
+        UiDataProviderIsolated: {
+            abi: UiDataProviderIsolatedAbi,
+            chain: "hyperEvm",
+            address: "0xa4622037080B84dCAf12d24593D3D7cf0f414578",
+            startBlock: 7350442,
+        },
+
         LoopingStrategyManagerFactory: {
             abi: LoopingStrategyManagerFactoryAbi,
             chain: "hyperEvm",
             address: "0xc3Ed646181Ca80562e96d9e6CF4AF317d22F34b0",
-            startBlock: 3414683,
+            startBlock: 7336100,
         },
         IsolatedPairRegistryContract: {
             abi: IsolatedPairRegistryAbi,
             chain: "hyperEvm",
             address: "0xf55af86c9ec3a7d5fa6367c00a120e6b262f718d",
-            startBlock: 787000,
+            startBlock: 7336100,
         },
     },
     blocks: {
@@ -88,7 +96,8 @@ export default createConfig({
         ChainlinkOracleIsolatedUpdate: {
             chain: "hyperEvm",
             interval: 300, // Every 300 blocks
-            startBlock: 7336100,
+            startBlock: 7350443,
         },
     },
 });
+
