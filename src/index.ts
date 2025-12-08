@@ -55,10 +55,13 @@ import {
     updateVaultStateAfterWithdraw,
     updateVaultStateAfterAddInterest,
     updateVaultStateAfterLiquidation,
+    updateVaultStateAfterBorrow,
+    updateVaultStateAfterRepay,
 } from "./helpers/yield/isolatedPair/vaultState";
 import { getAddress } from 'viem'
 
 const wrappedTokenGatewayAddress = getAddress("0x49558c794ea2aC8974C9F27886DDfAa951E99171");
+const collateralSwapperAddress = getAddress("0x7469AA4124cc6ee078f98B581198eB39d2487E79");
 
 // Cache for token decimals to avoid repeated contract calls
 const tokenDecimalsCache: Map<string, number> = new Map();
@@ -239,8 +242,10 @@ ponder.on("CorePool:Withdraw", async ({ event, context }) => {
 
     // Determine the actual user:
     // - For WrappedTokenGateway withdrawals: event.args.user is the gateway, actual user is transaction.from
+    // - For CollateralSwapper withdrawals: event.args.user is the swapper, actual user is transaction.from
     const isGatewayWithdrawal = getAddress(event.args.user) === wrappedTokenGatewayAddress;
-    const actualUser = isGatewayWithdrawal ? event.transaction.from : event.args.user;
+    const isCollateralSwapWithdrawal = getAddress(event.args.user) === collateralSwapperAddress;
+    const actualUser = (isGatewayWithdrawal || isCollateralSwapWithdrawal) ? event.transaction.from : event.args.user;
 
     // Insert the historical Withdraw transaction record
     await context.db.insert(Withdraw).values({
@@ -509,10 +514,24 @@ ponder.on("IsolatedPair:BorrowAsset", async ({ event, context }) => {
     // Get asset and collateral addresses and their USD prices from Chainlink oracles
     const assetInfo = await getIsolatedPairAssetInfo(context, event, pair);
 
-    // Get the vault exchange rate at this timestamp
-    const vaultState = await getVaultStateAtTimestamp(context.db, pair, Number(event.block.timestamp));
-    const exchangeRate = vaultState
-        ? calculateExchangeRateFromVaultState(vaultState.totalAssetAmount, vaultState.totalAssetShares)
+    const borrowAmount = event.args._borrowAmount;
+    const sharesAdded = event.args._sharesAdded;
+
+    // Update vault state with borrow (increases totalBorrow)
+    const newVaultState = await updateVaultStateAfterBorrow(
+        context.db,
+        pair,
+        borrowAmount,
+        sharesAdded,
+        Number(event.block.timestamp),
+        Number(event.block.number),
+        event.transaction.hash,
+        event.id
+    );
+
+    // Calculate exchange rate from the returned vault state
+    const exchangeRate = newVaultState
+        ? calculateExchangeRateFromVaultState(newVaultState.totalAssetAmount, newVaultState.totalAssetShares)
         : 1000000000000000000n; // Default 1:1 if no state
 
     await context.db.insert(BorrowAssetIsolated).values({
@@ -521,8 +540,8 @@ ponder.on("IsolatedPair:BorrowAsset", async ({ event, context }) => {
         pair: pair,
         borrower: event.args._borrower,
         receiver: event.args._receiver,
-        borrowAmount: event.args._borrowAmount,
-        sharesAdded: event.args._sharesAdded,
+        borrowAmount: borrowAmount,
+        sharesAdded: sharesAdded,
         timestamp: Number(event.block.timestamp),
         assetAddress: assetInfo.assetAddress,
         collateralAddress: assetInfo.collateralAddress,
@@ -550,10 +569,24 @@ ponder.on("IsolatedPair:RepayAsset", async ({ event, context }) => {
     // Get asset and collateral addresses and their USD prices from Chainlink oracles
     const assetInfo = await getIsolatedPairAssetInfo(context, event, pair);
 
-    // Get the vault exchange rate at this timestamp
-    const vaultState = await getVaultStateAtTimestamp(context.db, pair, Number(event.block.timestamp));
-    const exchangeRate = vaultState
-        ? calculateExchangeRateFromVaultState(vaultState.totalAssetAmount, vaultState.totalAssetShares)
+    const amountToRepay = event.args.amountToRepay;
+    const sharesRepaid = event.args.shares;
+
+    // Update vault state with repay (decreases totalBorrow)
+    const newVaultState = await updateVaultStateAfterRepay(
+        context.db,
+        pair,
+        amountToRepay,
+        sharesRepaid,
+        Number(event.block.timestamp),
+        Number(event.block.number),
+        event.transaction.hash,
+        event.id
+    );
+
+    // Calculate exchange rate from the returned vault state
+    const exchangeRate = newVaultState
+        ? calculateExchangeRateFromVaultState(newVaultState.totalAssetAmount, newVaultState.totalAssetShares)
         : 1000000000000000000n; // Default 1:1 if no state
 
     await context.db.insert(RepayAssetIsolated).values({
@@ -562,8 +595,8 @@ ponder.on("IsolatedPair:RepayAsset", async ({ event, context }) => {
         pair: pair,
         borrower: event.args.borrower,
         payer: event.args.payer,
-        amountToRepay: event.args.amountToRepay,
-        shares: event.args.shares,
+        amountToRepay: amountToRepay,
+        shares: sharesRepaid,
         timestamp: Number(event.block.timestamp),
         assetAddress: assetInfo.assetAddress,
         collateralAddress: assetInfo.collateralAddress,
@@ -591,10 +624,24 @@ ponder.on("IsolatedPair:RepayAssetWithCollateral", async ({ event, context }) =>
     // Get asset and collateral addresses and their USD prices from Chainlink oracles
     const assetInfo = await getIsolatedPairAssetInfo(context, event, pair);
 
-    // Get the vault exchange rate at this timestamp
-    const vaultState = await getVaultStateAtTimestamp(context.db, pair, Number(event.block.timestamp));
-    const exchangeRate = vaultState
-        ? calculateExchangeRateFromVaultState(vaultState.totalAssetAmount, vaultState.totalAssetShares)
+    const amountRepaid = event.args._amountAssetOut;
+    const sharesRepaid = event.args._sharesRepaid;
+
+    // Update vault state with repay (decreases totalBorrow)
+    const newVaultState = await updateVaultStateAfterRepay(
+        context.db,
+        pair,
+        amountRepaid,
+        sharesRepaid,
+        Number(event.block.timestamp),
+        Number(event.block.number),
+        event.transaction.hash,
+        event.id
+    );
+
+    // Calculate exchange rate from the returned vault state
+    const exchangeRate = newVaultState
+        ? calculateExchangeRateFromVaultState(newVaultState.totalAssetAmount, newVaultState.totalAssetShares)
         : 1000000000000000000n; // Default 1:1 if no state
 
     await context.db.insert(RepayAssetWithCollateralIsolated).values({
@@ -604,8 +651,8 @@ ponder.on("IsolatedPair:RepayAssetWithCollateral", async ({ event, context }) =>
         borrower: event.args._borrower,
         swapperAddress: event.args._swapperAddress,
         collateralToSwap: event.args._collateralToSwap,
-        amountAssetOut: event.args._amountAssetOut,
-        sharesRepaid: event.args._sharesRepaid,
+        amountAssetOut: amountRepaid,
+        sharesRepaid: sharesRepaid,
         timestamp: Number(event.block.timestamp),
         assetAddress: assetInfo.assetAddress,
         collateralAddress: assetInfo.collateralAddress,
@@ -701,15 +748,21 @@ ponder.on("IsolatedPair:Liquidate", async ({ event, context }) => {
     // Get asset and collateral addresses and their USD prices from Chainlink oracles
     const assetInfo = await getIsolatedPairAssetInfo(context, event, pair);
 
-    const sharesToAdjust = event.args._sharesToAdjust;
-    const amountToAdjust = event.args._amountToAdjust;
+    // Asset state adjustments
+    const assetSharesToAdjust = event.args._sharesToAdjust;
+    const assetAmountToAdjust = event.args._amountToAdjust;
+    // Borrow state adjustments (liquidation repays debt)
+    const borrowSharesRepaid = event.args._sharesToLiquidate;
+    const borrowAmountRepaid = event.args._amountLiquidatorToRepay;
 
     // Update vault state and get the new state back
     const newVaultState = await updateVaultStateAfterLiquidation(
         context.db,
         pair,
-        sharesToAdjust,
-        amountToAdjust,
+        assetSharesToAdjust,
+        assetAmountToAdjust,
+        borrowAmountRepaid,
+        borrowSharesRepaid,
         Number(event.block.timestamp),
         Number(event.block.number),
         event.transaction.hash,

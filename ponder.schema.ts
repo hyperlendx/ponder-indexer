@@ -541,8 +541,9 @@ export const AddInterestIsolated = onchainTable(
 // Note: UpdateExchangeRate event is for collateral/asset oracle prices, NOT vault exchange rate
 // We don't need to track it for vault accounting
 
-/// @notice Tracks the vault state (totalAsset.amount and totalAsset.shares) for each isolated pair
-/// @dev This mirrors the VaultAccount struct in the contract and is updated on every state-changing event
+/// @notice Tracks the vault state (totalAsset and totalBorrow) for each isolated pair
+/// @dev This mirrors the VaultAccount structs in the contract and is updated on every state-changing event
+/// @dev totalBorrow is needed for precise interest rate extrapolation (interest accrues on borrowed amount)
 export const IsolatedPairVaultState = onchainTable(
     "isolated_pair_vault_state",
     (t) => ({
@@ -550,6 +551,8 @@ export const IsolatedPairVaultState = onchainTable(
         pair: t.hex(),
         totalAssetAmount: t.bigint(), // totalAsset.amount - total assets in the vault
         totalAssetShares: t.bigint(), // totalAsset.shares - total shares outstanding
+        totalBorrowAmount: t.bigint(), // totalBorrow.amount - total borrowed assets
+        totalBorrowShares: t.bigint(), // totalBorrow.shares - total borrow shares outstanding
         timestamp: t.integer(),
         blockNumber: t.integer(),
         txHash: t.hex(),
