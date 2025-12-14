@@ -63,7 +63,7 @@ import { getAddress } from 'viem'
 
 const wrappedTokenGatewayAddress = getAddress("0x49558c794ea2aC8974C9F27886DDfAa951E99171");
 const collateralSwapperAddress = getAddress("0x7469AA4124cc6ee078f98B581198eB39d2487E79");
-const leverageHelperAddress = getAddress("0x6C674165E3AFaD857fab8CB0E91BCC057b813F03");
+const liquidSwapRepayAdapter = getAddress("0x6C674165E3AFaD857fab8CB0E91BCC057b813F03");
 
 // Option B runs in parallel with Option A, writing to separate tables for comparison
 // Option A (Primary): Uses proxy address attribution (UserPosition, UserBalanceEvent tables)
@@ -389,8 +389,8 @@ ponder.on("CorePool:Withdraw", async ({ event, context }) => {
     // - For LeverageHelper withdrawals: event.args.user is the helper, actual user is transaction.from
     const isGatewayWithdrawal = getAddress(event.args.user) === wrappedTokenGatewayAddress;
     const isCollateralSwapWithdrawal = getAddress(event.args.user) === collateralSwapperAddress;
-    const isLeverageHelperWithdrawal = getAddress(event.args.user) === leverageHelperAddress;
-    const actualUser = (isGatewayWithdrawal || isCollateralSwapWithdrawal || isLeverageHelperWithdrawal) ? event.transaction.from : event.args.user;
+    const isLiquidSwapRepayAdapterWithdrawal = getAddress(event.args.user) === liquidSwapRepayAdapter;
+    const actualUser = (isGatewayWithdrawal || isCollateralSwapWithdrawal || isLiquidSwapRepayAdapterWithdrawal) ? event.transaction.from : event.args.user;
 
     // Insert the historical Withdraw transaction record
     await context.db.insert(Withdraw).values({
