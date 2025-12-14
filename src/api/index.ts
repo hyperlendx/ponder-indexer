@@ -1,7 +1,7 @@
 import {db} from "ponder:api";
 import schema from "ponder:schema";
 import {Hono} from "hono";
-import {graphql} from "ponder";
+import {graphql, eq, and, desc} from "ponder";
 import {
     calculateUserDailyYieldBreakdown,
     calculateUserDailyPortfolioValue,
@@ -900,6 +900,229 @@ app.get("/debug/duplicate-events/:address", async (c) => {
     } catch (error) {
         console.error("Error checking for duplicate events:", error);
         return c.json({error: "Failed to check for duplicate events"}, 500);
+    }
+});
+
+// Compare Option A (proxy-based) vs Option B (transfer-based) position tracking
+// This endpoint helps evaluate which approach produces more accurate results
+app.get("/user/:address/compare-position-tracking", async (c) => {
+    const userAddress = c.req.param("address");
+    const assetParam = c.req.query("asset"); // Optional: filter by specific asset
+
+    if (!userAddress) {
+        return c.json({ error: "User address is required" }, 400);
+    }
+
+    // Validate hex address format
+    if (!/^0x[a-fA-F0-9]{40}$/.test(userAddress)) {
+        return c.json({ error: "Invalid user address format" }, 400);
+    }
+
+    try {
+        const normalizedUser = userAddress.toLowerCase() as `0x${string}`;
+
+        // Query Option A positions (proxy-based)
+        let optionAPositions;
+        if (assetParam) {
+            const normalizedAsset = assetParam.toLowerCase() as `0x${string}`;
+            optionAPositions = await db
+                .select()
+                .from(schema.UserPosition)
+                .where(
+                    and(
+                        eq(schema.UserPosition.user, normalizedUser),
+                        eq(schema.UserPosition.asset, normalizedAsset)
+                    )
+                );
+        } else {
+            optionAPositions = await db
+                .select()
+                .from(schema.UserPosition)
+                .where(eq(schema.UserPosition.user, normalizedUser));
+        }
+
+        // Query Option B positions (transfer-based)
+        let optionBPositions;
+        if (assetParam) {
+            const normalizedAsset = assetParam.toLowerCase() as `0x${string}`;
+            optionBPositions = await db
+                .select()
+                .from(schema.UserPositionTransferBased)
+                .where(
+                    and(
+                        eq(schema.UserPositionTransferBased.user, normalizedUser),
+                        eq(schema.UserPositionTransferBased.asset, normalizedAsset)
+                    )
+                );
+        } else {
+            optionBPositions = await db
+                .select()
+                .from(schema.UserPositionTransferBased)
+                .where(eq(schema.UserPositionTransferBased.user, normalizedUser));
+        }
+
+        // Create a map of all assets from both options
+        const allAssets = new Set<string>();
+        optionAPositions.forEach(p => p.asset && allAssets.add(p.asset));
+        optionBPositions.forEach(p => p.asset && allAssets.add(p.asset));
+
+        // Build comparison for each asset
+        const comparisons = Array.from(allAssets).map(asset => {
+            const optionA = optionAPositions.find(p => p.asset === asset);
+            const optionB = optionBPositions.find(p => p.asset === asset);
+
+            const scaledBalanceA = optionA?.scaledBalance ?? 0n;
+            const scaledBalanceB = optionB?.scaledBalance ?? 0n;
+            const actualBalanceA = optionA?.actualBalance ?? 0n;
+            const actualBalanceB = optionB?.actualBalance ?? 0n;
+
+            const scaledDiff = scaledBalanceA - scaledBalanceB;
+            const actualDiff = actualBalanceA - actualBalanceB;
+
+            return {
+                asset,
+                optionA: optionA ? {
+                    scaledBalance: scaledBalanceA.toString(),
+                    actualBalance: actualBalanceA.toString(),
+                    totalDeposits: (optionA.totalDeposits ?? 0n).toString(),
+                    totalWithdrawals: (optionA.totalWithdrawals ?? 0n).toString(),
+                    lastUpdated: optionA.lastUpdated,
+                    lastLiquidityIndex: (optionA.lastLiquidityIndex ?? 0n).toString(),
+                } : null,
+                optionB: optionB ? {
+                    scaledBalance: scaledBalanceB.toString(),
+                    actualBalance: actualBalanceB.toString(),
+                    totalDeposits: (optionB.totalDeposits ?? 0n).toString(),
+                    totalWithdrawals: (optionB.totalWithdrawals ?? 0n).toString(),
+                    lastUpdated: optionB.lastUpdated,
+                    lastLiquidityIndex: (optionB.lastLiquidityIndex ?? 0n).toString(),
+                } : null,
+                difference: {
+                    scaledBalance: scaledDiff.toString(),
+                    actualBalance: actualDiff.toString(),
+                    // Positive means Option A has more, negative means Option B has more
+                    interpretation: scaledDiff === 0n
+                        ? "MATCH"
+                        : scaledDiff > 0n
+                            ? "Option A shows MORE balance (possible missing withdraw in Option A)"
+                            : "Option B shows MORE balance (possible missing deposit in Option A)",
+                },
+                hasDiscrepancy: scaledDiff !== 0n,
+            };
+        });
+
+        // Summary statistics
+        const totalAssets = comparisons.length;
+        const matchingAssets = comparisons.filter(c => !c.hasDiscrepancy).length;
+        const discrepantAssets = comparisons.filter(c => c.hasDiscrepancy).length;
+
+        return c.json({
+            user: normalizedUser,
+            summary: {
+                totalAssets,
+                matchingAssets,
+                discrepantAssets,
+                allMatch: discrepantAssets === 0,
+            },
+            comparisons: comparisons.sort((a, b) => {
+                // Sort discrepancies first
+                if (a.hasDiscrepancy && !b.hasDiscrepancy) return -1;
+                if (!a.hasDiscrepancy && b.hasDiscrepancy) return 1;
+                return a.asset.localeCompare(b.asset);
+            }),
+            explanation: {
+                optionA: "Proxy-based tracking: Uses hardcoded proxy addresses (WrappedTokenGateway, CollateralSwapper, LeverageHelper) to attribute Supply/Withdraw events to the correct user",
+                optionB: "Transfer-based tracking: Tracks ALL hToken balance changes via BalanceTransfer events (mints, burns, transfers)",
+                recommendation: "If Option B shows correct on-chain balances while Option A doesn't, consider switching to Option B or adding missing proxy addresses to Option A",
+            },
+        });
+
+    } catch (error) {
+        console.error("Error comparing position tracking:", error);
+        return c.json({ error: "Failed to compare position tracking" }, 500);
+    }
+});
+
+// Get detailed event history comparison for a specific user and asset
+app.get("/user/:address/compare-events/:asset", async (c) => {
+    const userAddress = c.req.param("address");
+    const assetAddress = c.req.param("asset");
+    const limitParam = c.req.query("limit");
+
+    if (!userAddress || !assetAddress) {
+        return c.json({ error: "User address and asset address are required" }, 400);
+    }
+
+    // Validate hex address format
+    if (!/^0x[a-fA-F0-9]{40}$/.test(userAddress) || !/^0x[a-fA-F0-9]{40}$/.test(assetAddress)) {
+        return c.json({ error: "Invalid address format" }, 400);
+    }
+
+    const limit = limitParam ? parseInt(limitParam) : 100;
+
+    try {
+        const normalizedUser = userAddress.toLowerCase() as `0x${string}`;
+        const normalizedAsset = assetAddress.toLowerCase() as `0x${string}`;
+
+        // Query Option A events
+        const optionAEvents = await db
+            .select()
+            .from(schema.UserBalanceEvent)
+            .where(
+                and(
+                    eq(schema.UserBalanceEvent.user, normalizedUser),
+                    eq(schema.UserBalanceEvent.asset, normalizedAsset)
+                )
+            )
+            .orderBy(desc(schema.UserBalanceEvent.timestamp))
+            .limit(limit);
+
+        // Query Option B events
+        const optionBEvents = await db
+            .select()
+            .from(schema.UserBalanceEventTransferBased)
+            .where(
+                and(
+                    eq(schema.UserBalanceEventTransferBased.user, normalizedUser),
+                    eq(schema.UserBalanceEventTransferBased.asset, normalizedAsset)
+                )
+            )
+            .orderBy(desc(schema.UserBalanceEventTransferBased.timestamp))
+            .limit(limit);
+
+        // Format events for comparison
+        const formatEvent = (e: any) => ({
+            txHash: e.txHash,
+            eventType: e.eventType,
+            timestamp: e.timestamp,
+            date: new Date(e.timestamp * 1000).toISOString(),
+            transactionAmount: e.transactionAmount.toString(),
+            scaledBalanceAfter: e.scaledBalance.toString(),
+            liquidityIndex: e.liquidityIndex.toString(),
+        });
+
+        return c.json({
+            user: normalizedUser,
+            asset: normalizedAsset,
+            optionA: {
+                name: "Proxy-based tracking",
+                eventCount: optionAEvents.length,
+                events: optionAEvents.map(formatEvent),
+            },
+            optionB: {
+                name: "Transfer-based tracking",
+                eventCount: optionBEvents.length,
+                events: optionBEvents.map(formatEvent),
+            },
+            analysis: {
+                eventCountDiff: optionAEvents.length - optionBEvents.length,
+                note: "Compare event types and transaction amounts to identify discrepancies. Option B may have additional 'transfer_in'/'transfer_out' events that Option A misses.",
+            },
+        });
+
+    } catch (error) {
+        console.error("Error comparing events:", error);
+        return c.json({ error: "Failed to compare events" }, 500);
     }
 });
 

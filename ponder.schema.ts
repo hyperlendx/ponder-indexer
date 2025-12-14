@@ -737,3 +737,57 @@ export const IsolatedPairPriceSnapshot = onchainTable(
         pairBlockIdx: index().on(table.pair, table.blockNumber),
     })
 );
+
+// ============================================================================
+// OPTION B: Transfer-based position tracking (experimental)
+// These tables track positions based on hToken transfers instead of proxy address attribution
+// This is more robust as it handles ALL proxy contracts and direct user-to-user transfers
+// ============================================================================
+
+// Store user balance events for Option B (transfer-based tracking)
+export const UserBalanceEventTransferBased = onchainTable(
+    "user_balance_event_transfer_based",
+    (t) => ({
+        id: t.text().primaryKey(),
+        txHash: t.hex(),
+        user: t.hex(),
+        asset: t.hex(),
+        scaledBalance: t.bigint(), // Total balance after transaction
+        transactionAmount: t.bigint(), // Actual transaction amount (scaled)
+        eventType: t.text(), // 'deposit', 'withdraw', 'transfer_in', 'transfer_out'
+        timestamp: t.integer(),
+        blockNumber: t.bigint(),
+        liquidityIndex: t.bigint(),
+        assetPrice: t.bigint(), // Oracle price of the asset at the time of the event (8 decimals precision)
+    }),
+    (table) => ({
+        userIdx: index().on(table.user),
+        assetIdx: index().on(table.asset),
+        userAssetIdx: index().on(table.user, table.asset),
+        timestampIdx: index().on(table.timestamp),
+        eventTypeIdx: index().on(table.eventType),
+        userAssetTimestampIdx: index().on(table.user, table.asset, table.timestamp),
+    })
+);
+
+// Store current user positions for Option B (transfer-based tracking)
+export const UserPositionTransferBased = onchainTable(
+    "user_position_transfer_based",
+    (t) => ({
+        id: t.text().primaryKey(), // ${user}_${asset}
+        user: t.hex(),
+        asset: t.hex(),
+        scaledBalance: t.bigint(),
+        actualBalance: t.bigint(),
+        totalDeposits: t.bigint(), // Cumulative deposits in underlying asset
+        totalWithdrawals: t.bigint(), // Cumulative withdrawals in underlying asset
+        lastUpdated: t.integer(),
+        lastLiquidityIndex: t.bigint(),
+    }),
+    (table) => ({
+        userIdx: index().on(table.user),
+        assetIdx: index().on(table.asset),
+        userAssetIdx: index().on(table.user, table.asset),
+        lastUpdatedIdx: index().on(table.lastUpdated),
+    })
+);

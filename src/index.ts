@@ -42,10 +42,11 @@ import { UiDataProviderIsolatedAbi } from "../abis/UiDataProviderIsolatedAbi";
 import { ChainlinkAggregatorAbi } from "../abis/ChainlinkAggregatorAbi";
 import { IsolatedAbi } from "../abis/IsolatedAbi";
 import { ERC20Abi } from "../abis/ERC20Abi";
+import { HTokenAbi } from "../abis/HTokenAbi";
 import config from "../ponder.config";
 
 import { getOraclePrice, getIsolatedOraclePrice, getIsolatedOraclePrices, getIsolatedPairAssetInfo } from "./helpers/getPrice";
-import { updateUserPosition } from "./helpers/userPositionManager";
+import { updateUserPosition, updateUserPositionTransferBased } from "./helpers/userPositionManager";
 import { calculateScaledBalance, calculateLiquidityIndexAtTimestamp } from "./helpers/aave";
 import { updateUserIsolatedPairTracking } from "./helpers/userIsolatedPairTracker";
 import {
@@ -62,9 +63,48 @@ import { getAddress } from 'viem'
 
 const wrappedTokenGatewayAddress = getAddress("0x49558c794ea2aC8974C9F27886DDfAa951E99171");
 const collateralSwapperAddress = getAddress("0x7469AA4124cc6ee078f98B581198eB39d2487E79");
+const leverageHelperAddress = getAddress("0x6C674165E3AFaD857fab8CB0E91BCC057b813F03");
+
+// Option B runs in parallel with Option A, writing to separate tables for comparison
+// Option A (Primary): Uses proxy address attribution (UserPosition, UserBalanceEvent tables)
+// Option B (Secondary): Uses hToken transfer tracking (UserPositionTransferBased, UserBalanceEventTransferBased tables)
 
 // Cache for token decimals to avoid repeated contract calls
 const tokenDecimalsCache: Map<string, number> = new Map();
+
+// Cache for hToken to underlying asset mapping (Option B)
+const hTokenToUnderlyingCache: Map<string, `0x${string}`> = new Map();
+
+/**
+ * Get the underlying asset address for an hToken with caching
+ * @param context - Ponder context with client
+ * @param hTokenAddress - hToken address
+ * @returns Underlying asset address
+ */
+async function getUnderlyingAsset(context: any, hTokenAddress: `0x${string}`): Promise<`0x${string}`> {
+    const normalizedAddress = hTokenAddress.toLowerCase();
+
+    // Check cache first
+    if (hTokenToUnderlyingCache.has(normalizedAddress)) {
+        return hTokenToUnderlyingCache.get(normalizedAddress)!;
+    }
+
+    // Fetch from contract
+    try {
+        const underlyingAsset = await context.client.readContract({
+            abi: HTokenAbi,
+            address: hTokenAddress,
+            functionName: "UNDERLYING_ASSET_ADDRESS",
+            args: []
+        });
+
+        hTokenToUnderlyingCache.set(normalizedAddress, underlyingAsset as `0x${string}`);
+        return underlyingAsset as `0x${string}`;
+    } catch (error) {
+        console.error(`[getUnderlyingAsset] Error fetching underlying asset for ${hTokenAddress}:`, error);
+        throw error;
+    }
+}
 
 /**
  * Get token decimals with caching
@@ -101,16 +141,119 @@ async function getTokenDecimals(context: any, tokenAddress: `0x${string}`): Prom
 
 // HToken Transfer Event Handler - Enhanced for Interest Tracking
 ponder.on("HTokens:BalanceTransfer", async ({ event, context }) => {
-    // Insert historical transfer record
+    const hTokenAddress = event.log.address;
+    const zeroAddress = "0x0000000000000000000000000000000000000000";
+
+    // Get the underlying asset address for this hToken
+    let underlyingAsset: `0x${string}`;
+    try {
+        underlyingAsset = await getUnderlyingAsset(context, hTokenAddress);
+    } catch (error) {
+        console.error(`[BalanceTransfer] Failed to get underlying asset for hToken ${hTokenAddress}, skipping position update`);
+        // Still insert the transfer record even if we can't get the underlying asset
+        await context.db.insert(HTokenTransfer).values({
+            id: event.id,
+            txHash: event.transaction.hash,
+            reserve: hTokenAddress, // Use hToken address as fallback
+            from: event.args.from,
+            to: event.args.to,
+            value: event.args.value,
+            index: event.args.index
+        });
+        return;
+    }
+
+    // Insert historical transfer record with correct underlying asset
     await context.db.insert(HTokenTransfer).values({
         id: event.id,
         txHash: event.transaction.hash,
-        reserve: event.log.address,
+        reserve: underlyingAsset, // Use underlying asset, not hToken address
         from: event.args.from,
         to: event.args.to,
         value: event.args.value,
         index: event.args.index
     });
+
+    // Option B (Secondary): Track hToken transfers as position changes
+    // This writes to separate tables (UserPositionTransferBased, UserBalanceEventTransferBased)
+    // for comparison testing with Option A
+    //
+    // Option B tracks ALL balance changes via BalanceTransfer events:
+    // - Mints (from=0x0): User receives hTokens from supply
+    // - Burns (to=0x0): User loses hTokens from withdraw
+    // - Transfers: User sends/receives hTokens to/from another address
+    const timestamp = Number(event.block.timestamp);
+    const blockNumber = event.block.number;
+
+    const isFromZero = event.args.from.toLowerCase() === zeroAddress;
+    const isToZero = event.args.to.toLowerCase() === zeroAddress;
+
+    // The value in BalanceTransfer is already the scaled balance (not actual)
+    const scaledBalance = event.args.value;
+
+    // Get oracle price for the asset
+    let reservePrice: bigint | null = null;
+    try {
+        reservePrice = await getOraclePrice(context, underlyingAsset);
+    } catch (e: any) {
+        console.error(`[BalanceTransfer] Error fetching reserve price: ${e.message}`);
+    }
+
+    if (isFromZero) {
+        // Mint: User receives hTokens (supply)
+        // Only update the receiver (to address)
+        await updateUserPositionTransferBased(
+            context,
+            event.args.to,
+            underlyingAsset,
+            scaledBalance, // Positive for incoming
+            'deposit', // Treat mint as deposit
+            timestamp,
+            event.transaction.hash,
+            blockNumber,
+            reservePrice ?? 0n
+        );
+    } else if (isToZero) {
+        // Burn: User loses hTokens (withdraw)
+        // Only update the sender (from address)
+        await updateUserPositionTransferBased(
+            context,
+            event.args.from,
+            underlyingAsset,
+            -scaledBalance, // Negative for outgoing
+            'withdraw', // Treat burn as withdraw
+            timestamp,
+            event.transaction.hash,
+            blockNumber,
+            reservePrice ?? 0n
+        );
+    } else {
+        // Transfer between two non-zero addresses
+        // Update both sender and receiver
+        await updateUserPositionTransferBased(
+            context,
+            event.args.from,
+            underlyingAsset,
+            -scaledBalance, // Negative for outgoing transfer
+            'transfer_out',
+            timestamp,
+            event.transaction.hash,
+            blockNumber,
+            reservePrice ?? 0n
+        );
+
+        await updateUserPositionTransferBased(
+            context,
+            event.args.to,
+            underlyingAsset,
+            scaledBalance, // Positive for incoming transfer
+            'transfer_in',
+            timestamp,
+            event.transaction.hash,
+            blockNumber,
+            reservePrice ?? 0n
+        );
+    }
 });
 
 // Borrow Event Handler
@@ -243,9 +386,11 @@ ponder.on("CorePool:Withdraw", async ({ event, context }) => {
     // Determine the actual user:
     // - For WrappedTokenGateway withdrawals: event.args.user is the gateway, actual user is transaction.from
     // - For CollateralSwapper withdrawals: event.args.user is the swapper, actual user is transaction.from
+    // - For LeverageHelper withdrawals: event.args.user is the helper, actual user is transaction.from
     const isGatewayWithdrawal = getAddress(event.args.user) === wrappedTokenGatewayAddress;
     const isCollateralSwapWithdrawal = getAddress(event.args.user) === collateralSwapperAddress;
-    const actualUser = (isGatewayWithdrawal || isCollateralSwapWithdrawal) ? event.transaction.from : event.args.user;
+    const isLeverageHelperWithdrawal = getAddress(event.args.user) === leverageHelperAddress;
+    const actualUser = (isGatewayWithdrawal || isCollateralSwapWithdrawal || isLeverageHelperWithdrawal) ? event.transaction.from : event.args.user;
 
     // Insert the historical Withdraw transaction record
     await context.db.insert(Withdraw).values({

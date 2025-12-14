@@ -1,4 +1,4 @@
-import { UserPosition, UserBalanceEvent, Borrow, Repay, LiquidationCall } from "ponder:schema";
+import { UserPosition, UserBalanceEvent, UserPositionTransferBased, UserBalanceEventTransferBased, Borrow, Repay, LiquidationCall } from "ponder:schema";
 import { calculateLiquidityIndexAtTimestamp, calculateActualBalance, RAY } from "./aave";
 import { eq, and, gte, lte, desc } from "ponder";
 
@@ -338,4 +338,147 @@ export async function calculateTotalRepaid(
     }
 
     return totalRepaid;
+}
+
+/**
+ * Update or create a user position record for Option B (transfer-based tracking)
+ * This writes to separate tables (UserPositionTransferBased, UserBalanceEventTransferBased)
+ * so it can run in parallel with Option A for comparison testing
+ */
+export async function updateUserPositionTransferBased(
+    context: any,
+    user: string,
+    asset: string,
+    scaledBalanceDelta: bigint,
+    eventType: 'deposit' | 'withdraw' | 'transfer_in' | 'transfer_out',
+    timestamp: number,
+    txHash: string,
+    blockNumber: bigint,
+    assetPrice: bigint // Oracle price of the asset at the time of the event (8 decimals precision)
+): Promise<void> {
+    const { db } = context;
+    const positionId = `${user}_${asset}`;
+
+    // Get current liquidity index for this asset at this timestamp
+    const currentLiquidityIndex = await calculateLiquidityIndexAtTimestamp(
+        context,
+        asset,
+        timestamp,
+        txHash
+    );
+
+    // Get existing position from transfer-based table
+    const dbQuery = db.sql || db;
+    const existingPositions = await dbQuery
+        .select()
+        .from(UserPositionTransferBased)
+        .where(eq(UserPositionTransferBased.id, positionId));
+
+    const existingPosition = existingPositions[0] || null;
+
+    let newScaledBalance: bigint;
+    let totalDeposits: bigint;
+    let totalWithdrawals: bigint;
+
+    if (existingPosition) {
+        // Update existing position
+        newScaledBalance = existingPosition.scaledBalance + scaledBalanceDelta;
+        totalDeposits = existingPosition.totalDeposits;
+        totalWithdrawals = existingPosition.totalWithdrawals;
+
+        // Update cumulative deposits/withdrawals based on event type
+        if (eventType === 'deposit' || eventType === 'transfer_in') {
+            const actualAmount = calculateActualBalance(scaledBalanceDelta, currentLiquidityIndex);
+            totalDeposits += actualAmount;
+        } else if (eventType === 'withdraw' || eventType === 'transfer_out') {
+            const actualAmount = calculateActualBalance(
+                scaledBalanceDelta < 0n ? -scaledBalanceDelta : scaledBalanceDelta,
+                currentLiquidityIndex
+            );
+            totalWithdrawals += actualAmount;
+        }
+    } else {
+        // Create new position
+        newScaledBalance = scaledBalanceDelta;
+
+        if (eventType === 'deposit' || eventType === 'transfer_in') {
+            const actualAmount = calculateActualBalance(scaledBalanceDelta, currentLiquidityIndex);
+            totalDeposits = actualAmount;
+            totalWithdrawals = 0n;
+        } else {
+            totalDeposits = 0n;
+            const actualAmount = calculateActualBalance(
+                scaledBalanceDelta < 0n ? -scaledBalanceDelta : scaledBalanceDelta,
+                currentLiquidityIndex
+            );
+            totalWithdrawals = actualAmount;
+        }
+    }
+
+    if (newScaledBalance < 0n) {
+        console.error(`❌ [TransferBased] Negative scaled balance detected:`, {
+            user,
+            asset,
+            newScaledBalance: newScaledBalance.toString(),
+            scaledBalanceDelta: scaledBalanceDelta.toString(),
+            eventType,
+            txHash
+        });
+        // Set to 0 to prevent negative balances
+        newScaledBalance = 0n;
+    }
+
+    // Calculate new actual balance
+    const newActualBalance = calculateActualBalance(newScaledBalance, currentLiquidityIndex);
+
+    // Use a truly unique ID to avoid conflicts when multiple events occur in same transaction
+    const randomSuffix = Math.random().toString(36).substring(2, 8);
+    const eventId = `${txHash}_${user}_${asset}_${eventType}_${timestamp}_${randomSuffix}_tb`;
+
+    await db.insert(UserBalanceEventTransferBased).values({
+        id: eventId,
+        txHash: txHash as `0x${string}`,
+        user: user as `0x${string}`,
+        asset: asset as `0x${string}`,
+        scaledBalance: newScaledBalance, // Total balance after transaction
+        transactionAmount: scaledBalanceDelta, // Actual transaction amount (scaled)
+        eventType,
+        timestamp,
+        blockNumber,
+        liquidityIndex: currentLiquidityIndex,
+        assetPrice // Oracle price at the time of the event
+    });
+
+    if (newScaledBalance === 0n) {
+        // Remove position if balance is zero
+        if (existingPosition) {
+            const dbQuery = db.sql || db;
+            await dbQuery
+                .delete(UserPositionTransferBased)
+                .where(eq(UserPositionTransferBased.id, positionId));
+        }
+    } else {
+        // Update or create position
+        const positionData = {
+            id: positionId,
+            user: user as `0x${string}`,
+            asset: asset as `0x${string}`,
+            scaledBalance: newScaledBalance,
+            actualBalance: newActualBalance,
+            totalDeposits,
+            totalWithdrawals,
+            lastUpdated: timestamp,
+            lastLiquidityIndex: currentLiquidityIndex,
+        };
+
+        if (existingPosition) {
+            const dbQuery = db.sql || db;
+            await dbQuery
+                .update(UserPositionTransferBased)
+                .set(positionData)
+                .where(eq(UserPositionTransferBased.id, positionId));
+        } else {
+            await db.insert(UserPositionTransferBased).values(positionData);
+        }
+    }
 }

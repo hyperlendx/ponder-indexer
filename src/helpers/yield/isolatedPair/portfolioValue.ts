@@ -61,6 +61,7 @@ export async function calculateUserDailyIsolatedPairPortfolioValue(
         const dbQuery = context.db.sql || context.db;
 
         // Calculate start of first day and last day (midnight UTC)
+        // For partial days (today), use the actual endTimestamp instead of 23:59:59 UTC
         const startDate = new Date(startTimestamp * 1000);
         startDate.setUTCHours(0, 0, 0, 0);
         const firstDayStart = Math.floor(startDate.getTime() / 1000);
@@ -75,7 +76,14 @@ export async function calculateUserDailyIsolatedPairPortfolioValue(
         // Generate portfolio values for each day at END of day (23:59:59 UTC)
         for (let dayStart = firstDayStart; dayStart <= lastDayStart; dayStart += oneDaySeconds) {
             // Calculate at END of day instead of start
-            const dayEnd = dayStart + oneDaySeconds - 1;
+            let dayEnd = dayStart + oneDaySeconds - 1;
+
+            // For the last day, if dayEnd is in the future, use endTimestamp instead
+            // This handles partial days (e.g., today) correctly
+            if (dayEnd > endTimestamp) {
+                dayEnd = endTimestamp;
+            }
+
             const positions = await calculateAllIsolatedPairPositions(context, user, dayEnd);
 
             if (positions.length === 0) {

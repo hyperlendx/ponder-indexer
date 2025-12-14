@@ -133,12 +133,15 @@ export async function calculateDailyIsolatedPairYields(
         };
     }
 
-    // Calculate daily yields for complete days
-    // Use end of last complete day (next day's midnight) to include full 24 hours of the last day
+    // Calculate daily yields including partial days
+    // For the last day, if endTimestamp is before midnight, calculate yield up to endTimestamp
     const endDate = new Date(endTimestamp * 1000);
     const endDayStart = Date.UTC(endDate.getUTCFullYear(), endDate.getUTCMonth(), endDate.getUTCDate()) / 1000;
-    // Use end of last complete day (next day's midnight) to ensure all days are full 24-hour periods
-    const endTimestampForDays = endDayStart + 24 * 60 * 60;
+    // Check if endTimestamp is a partial day (not at or after midnight of next day)
+    const endOfLastDay = endDayStart + 24 * 60 * 60;
+    const isPartialDay = endTimestamp < endOfLastDay;
+    // Use endTimestamp for partial days, otherwise use end of day
+    const endTimestampForDays = isPartialDay ? endTimestamp : endOfLastDay;
 
     // Create caches for this request
     const exchangeRateCache = new ExchangeRateCache();
@@ -196,9 +199,8 @@ export async function calculateDailyIsolatedPairYields(
         }>;
     }>();
 
-    // Initialize all days with zero yield
+    // Initialize all days with zero yield (including partial day if applicable)
     // Days should be aligned to midnight UTC, not to startTimestamp
-    // Use endDayStart (not endTimestampForDays) to only include days within the query period
     const periodStartDate = new Date(startTimestamp * 1000);
     const periodEndDate = new Date(endDayStart * 1000);
 
@@ -208,8 +210,13 @@ export async function calculateDailyIsolatedPairYields(
     while (currentDate <= endDateMidnight) {
         const dateStr = currentDate.toISOString().split('T')[0]!;
         const dayStartTimestamp = Math.floor(currentDate.getTime() / 1000);
-        // Use END of day timestamp (23:59:59 UTC) for consistency with portfolio value endpoints
-        const dayEndTimestamp = dayStartTimestamp + oneDaySeconds - 1;
+        // Use END of day timestamp (23:59:59 UTC) for complete days
+        // For the last day, if it's a partial day, use endTimestamp instead
+        let dayEndTimestamp = dayStartTimestamp + oneDaySeconds - 1;
+        const isLastDay = currentDate.getTime() === endDateMidnight.getTime();
+        if (isLastDay && isPartialDay) {
+            dayEndTimestamp = endTimestamp;
+        }
         dailyResults.set(dateStr, {
             date: dateStr,
             timestamp: dayEndTimestamp,

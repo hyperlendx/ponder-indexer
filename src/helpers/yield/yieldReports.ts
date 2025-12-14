@@ -166,12 +166,15 @@ export async function calculateUserDailyYieldBreakdown(
             };
         }
 
-        // Always calculate only complete days (exclude partial day at the end)
-        // This ensures daily breakdown totals match custom-period-yield totals
+        // Calculate daily yields including partial days
+        // For the last day, if endTimestamp is before midnight, calculate yield up to endTimestamp
         const endDate = new Date(endTimestamp * 1000);
         const endDayStart = Date.UTC(endDate.getUTCFullYear(), endDate.getUTCMonth(), endDate.getUTCDate()) / 1000;
-        // Use end of last complete day (next day's midnight) to include full 24 hours of the last day
-        const endTimestampForDays = endDayStart + 24 * 60 * 60;
+        // Check if endTimestamp is a partial day (not at or after midnight of next day)
+        const endOfLastDay = endDayStart + 24 * 60 * 60;
+        const isPartialDay = endTimestamp < endOfLastDay;
+        // Use endTimestamp for partial days, otherwise use end of day
+        const endTimestampForDays = isPartialDay ? endTimestamp : endOfLastDay;
 
         // Create daily time buckets
         const dailyResults = new Map<string, {
@@ -216,11 +219,11 @@ export async function calculateUserDailyYieldBreakdown(
             }>;
         }>();
 
-        // Initialize daily buckets for complete days only
+        // Initialize daily buckets (including partial day if applicable)
         const startDate = new Date(startTimestamp * 1000);
         const oneDaySeconds = 24 * 60 * 60;
 
-        // Calculate number of complete days to iterate (use endDayStart, not endTimestampForDays)
+        // Calculate number of days to iterate (use endDayStart to include the last day)
         // endDayStart represents the last day in the query period
         const totalDays = Math.ceil((endDayStart - startTimestamp) / oneDaySeconds) + 1;
 
@@ -231,8 +234,13 @@ export async function calculateUserDailyYieldBreakdown(
             const dateStr = currentDate.toISOString().split('T')[0]!; // YYYY-MM-DD format
             // Use UTC to ensure consistent day boundaries regardless of server timezone
             const dayStartTimestamp = Math.floor(Date.UTC(currentDate.getUTCFullYear(), currentDate.getUTCMonth(), currentDate.getUTCDate()) / 1000);
-            // Use END of day timestamp (23:59:59 UTC) for consistency with portfolio value endpoints
-            const dayEndTimestamp = dayStartTimestamp + oneDaySeconds - 1;
+            // Use END of day timestamp (23:59:59 UTC) for complete days
+            // For the last day, if it's a partial day, use endTimestamp instead
+            let dayEndTimestamp = dayStartTimestamp + oneDaySeconds - 1;
+            const isLastDay = dayOffset === totalDays - 1;
+            if (isLastDay && isPartialDay) {
+                dayEndTimestamp = endTimestamp;
+            }
 
             dailyResults.set(dateStr, {
                 date: dateStr,
@@ -379,8 +387,11 @@ export async function calculateUserDailyYieldBreakdown(
 
                             const dayStart = Math.floor(Date.UTC(currentDate.getUTCFullYear(), currentDate.getUTCMonth(), currentDate.getUTCDate()) / 1000);
                             // Use full 86,400-second days with half-open interval [dayStart, dayEnd)
-                            // This ensures each day is exactly 24 hours (86,400 seconds)
-                            const dayEnd = dayStart + 24 * 60 * 60;
+                            // For partial days (last day when endTimestamp < midnight), cap at endTimestamp
+                            let dayEnd = dayStart + 24 * 60 * 60;
+                            if (dayEnd > endTimestampForDays) {
+                                dayEnd = endTimestampForDays;
+                            }
                             const overlapStart = Math.max(segment.startTime, dayStart);
                             const overlapEnd = Math.min(segment.endTime, dayEnd);
 
@@ -515,7 +526,11 @@ export async function calculateUserDailyYieldBreakdown(
                             if (!dayData) continue;
 
                             const dayStart = Math.floor(Date.UTC(currentDate.getUTCFullYear(), currentDate.getUTCMonth(), currentDate.getUTCDate()) / 1000);
-                            const dayEnd = dayStart + 24 * 60 * 60;
+                            // For partial days (last day when endTimestamp < midnight), cap at endTimestamp
+                            let dayEnd = dayStart + 24 * 60 * 60;
+                            if (dayEnd > endTimestampForDays) {
+                                dayEnd = endTimestampForDays;
+                            }
                             const overlapStart = Math.max(segment.startTime, dayStart);
                             const overlapEnd = Math.min(segment.endTime, dayEnd);
 
@@ -885,6 +900,7 @@ export async function calculateUserDailyPortfolioValue(
         }>();
 
         // Initialize daily buckets - calculate portfolio values at END of each day (23:59:59 UTC)
+        // For partial days (today), use the actual endTimestamp instead of 23:59:59 UTC
         const startDate = new Date(startTimestamp * 1000);
         const endDate = new Date(endTimestamp * 1000);
 
@@ -900,7 +916,13 @@ export async function calculateUserDailyPortfolioValue(
         for (let dayStart = firstDayStart; dayStart <= lastDayStart; dayStart += oneDaySeconds) {
             const dateStr = new Date(dayStart * 1000).toISOString().split('T')[0]!;
             // Calculate at END of day (23:59:59 UTC) instead of start
-            const dayEnd = dayStart + oneDaySeconds - 1;
+            let dayEnd = dayStart + oneDaySeconds - 1;
+
+            // For the last day, if dayEnd is in the future, use endTimestamp instead
+            // This handles partial days (e.g., today) correctly
+            if (dayEnd > endTimestamp) {
+                dayEnd = endTimestamp;
+            }
 
             dayTimestamps.push(dayEnd);
             dailyResults.set(dateStr, {
