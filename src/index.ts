@@ -27,6 +27,7 @@ import {
     WithdrawIsolated,
     UpdateRateIsolated,
     AddInterestIsolated,
+    WithdrawFeesIsolated,
     HTokenTransfer,
     StrategyDeployed,
     ReserveDataEvent,
@@ -58,6 +59,7 @@ import {
     updateVaultStateAfterLiquidation,
     updateVaultStateAfterBorrow,
     updateVaultStateAfterRepay,
+    updateVaultStateAfterWithdrawFees,
 } from "./helpers/yield/isolatedPair/vaultState";
 import { getAddress } from 'viem'
 
@@ -651,9 +653,9 @@ ponder.on("CorePool:IsolationModeTotalDebtUpdated", async ({ event, context }) =
 /// ISOLATED PAIRS
 
 ponder.on("IsolatedPair:BorrowAsset", async ({ event, context }) => {
-    const pair = event.transaction.to;
+    const pair = event.log.address;
     if (!pair) {
-        throw new Error("transaction.to is null");
+        throw new Error("log.address is null");
     }
 
     // Get asset and collateral addresses and their USD prices from Chainlink oracles
@@ -706,9 +708,9 @@ ponder.on("IsolatedPair:BorrowAsset", async ({ event, context }) => {
 });
 
 ponder.on("IsolatedPair:RepayAsset", async ({ event, context }) => {
-    const pair = event.transaction.to;
+    const pair = event.log.address;
     if (!pair) {
-        throw new Error("transaction.to is null");
+        throw new Error("log.address is null");
     }
 
     // Get asset and collateral addresses and their USD prices from Chainlink oracles
@@ -761,9 +763,9 @@ ponder.on("IsolatedPair:RepayAsset", async ({ event, context }) => {
 });
 
 ponder.on("IsolatedPair:RepayAssetWithCollateral", async ({ event, context }) => {
-    const pair = event.transaction.to;
+    const pair = event.log.address;
     if (!pair) {
-        throw new Error("transaction.to is null");
+        throw new Error("log.address is null");
     }
 
     // Get asset and collateral addresses and their USD prices from Chainlink oracles
@@ -818,9 +820,9 @@ ponder.on("IsolatedPair:RepayAssetWithCollateral", async ({ event, context }) =>
 });
 
 ponder.on("IsolatedPair:AddCollateral", async ({ event, context }) => {
-    const pair = event.transaction.to;
+    const pair = event.log.address;
     if (!pair) {
-        throw new Error("transaction.to is null");
+        throw new Error("log.address is null");
     }
 
     // Get asset and collateral addresses and their USD prices from Chainlink oracles
@@ -851,9 +853,9 @@ ponder.on("IsolatedPair:AddCollateral", async ({ event, context }) => {
 });
 
 ponder.on("IsolatedPair:RemoveCollateral", async ({ event, context }) => {
-    const pair = event.transaction.to;
+    const pair = event.log.address;
     if (!pair) {
-        throw new Error("transaction.to is null");
+        throw new Error("log.address is null");
     }
 
     // Get asset and collateral addresses and their USD prices from Chainlink oracles
@@ -885,9 +887,9 @@ ponder.on("IsolatedPair:RemoveCollateral", async ({ event, context }) => {
 });
 
 ponder.on("IsolatedPair:Liquidate", async ({ event, context }) => {
-    const pair = event.transaction.to;
+    const pair = event.log.address;
     if (!pair) {
-        throw new Error("transaction.to is null");
+        throw new Error("log.address is null");
     }
 
     // Get asset and collateral addresses and their USD prices from Chainlink oracles
@@ -958,9 +960,9 @@ ponder.on("IsolatedPair:Liquidate", async ({ event, context }) => {
 });
 
 ponder.on("IsolatedPair:Deposit", async ({ event, context }) => {
-    const pair = event.transaction.to;
+    const pair = event.log.address;
     if (!pair) {
-        throw new Error("transaction.to is null");
+        throw new Error("log.address is null");
     }
 
     // Get asset and collateral addresses and their USD prices from Chainlink oracles
@@ -1013,9 +1015,9 @@ ponder.on("IsolatedPair:Deposit", async ({ event, context }) => {
 });
 
 ponder.on("IsolatedPair:Withdraw", async ({ event, context }) => {
-    const pair = event.transaction.to;
+    const pair = event.log.address;
     if (!pair) {
-        throw new Error("transaction.to is null");
+        throw new Error("log.address is null");
     }
 
     // Get asset and collateral addresses and their USD prices from Chainlink oracles
@@ -1071,9 +1073,9 @@ ponder.on("IsolatedPair:Withdraw", async ({ event, context }) => {
 // Isolated Pair Rate Events - Enable accurate exchange rate calculations
 
 ponder.on("IsolatedPair:UpdateRate", async ({ event, context }) => {
-    const pair = event.transaction.to;
+    const pair = event.log.address;
     if (!pair) {
-        throw new Error("transaction.to is null");
+        throw new Error("log.address is null");
     }
     await context.db.insert(UpdateRateIsolated).values({
         id: event.id,
@@ -1088,9 +1090,9 @@ ponder.on("IsolatedPair:UpdateRate", async ({ event, context }) => {
 });
 
 ponder.on("IsolatedPair:AddInterest", async ({ event, context }) => {
-    const pair = event.transaction.to;
+    const pair = event.log.address;
     if (!pair) {
-        throw new Error("transaction.to is null");
+        throw new Error("log.address is null");
     }
 
     // Update vault state (totalAsset.amount increases by interestEarned, totalAsset.shares increases by feesShare)
@@ -1113,6 +1115,36 @@ ponder.on("IsolatedPair:AddInterest", async ({ event, context }) => {
         rate: event.args.rate,
         feesAmount: event.args.feesAmount,
         feesShare: event.args.feesShare,
+        timestamp: Number(event.block.timestamp),
+    });
+});
+
+ponder.on("IsolatedPair:WithdrawFees", async ({ event, context }) => {
+    const pair = event.log.address;
+    if (!pair) {
+        throw new Error("log.address is null");
+    }
+
+    // Update vault state (totalAsset.amount decreases by amountToTransfer, totalAsset.shares decreases by shares)
+    const newVaultState = await updateVaultStateAfterWithdrawFees(
+        context.db,
+        pair,
+        event.args.shares,
+        event.args.amountToTransfer,
+        Number(event.block.timestamp),
+        Number(event.block.number),
+        event.transaction.hash,
+        event.id
+    );
+
+    await context.db.insert(WithdrawFeesIsolated).values({
+        id: event.id,
+        txHash: event.transaction.hash,
+        pair: pair,
+        shares: event.args.shares,
+        recipient: event.args.recipient,
+        amountToTransfer: event.args.amountToTransfer,
+        collateralAmount: event.args.collateralAmount,
         timestamp: Number(event.block.timestamp),
     });
 });

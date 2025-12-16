@@ -359,9 +359,21 @@ export async function updateVaultStateAfterRepay(
 
 /**
  * Update vault state after liquidation
- * Liquidation adjusts both asset and borrow state
- * - Asset state: adjusted by sharesToAdjust and amountToAdjust (repaid amount goes to lenders)
- * - Borrow state: decreased by the repaid amount and shares
+ * Liquidation adjusts both asset and borrow state based on contract logic:
+ *
+ * When there's bad debt (borrower has no leftover collateral):
+ * - _sharesToAdjust = borrower's remaining shares after liquidation
+ * - _amountToAdjust = amount corresponding to those shares (bad debt)
+ * - totalBorrow.amount -= _amountToAdjust (before _repayAsset is called)
+ * - totalAsset.amount -= _amountToAdjust (bad debt is socialized to lenders)
+ * - totalAsset.shares is NOT modified
+ * - _repayAsset reduces totalBorrow by (_amountLiquidatorToRepay, _sharesToLiquidate + _sharesToAdjust)
+ *
+ * So the total effect is:
+ * - totalAsset.amount -= _amountToAdjust (bad debt writeoff)
+ * - totalAsset.shares unchanged
+ * - totalBorrow.amount -= (_amountLiquidatorToRepay + _amountToAdjust)
+ * - totalBorrow.shares -= (_sharesToLiquidate + _sharesToAdjust)
  */
 export async function updateVaultStateAfterLiquidation(
     db: any,
@@ -382,11 +394,59 @@ export async function updateVaultStateAfterLiquidation(
         return null;
     }
 
+    // Bad debt (assetAmountToAdjust) is subtracted from totalAsset.amount (socialized to lenders)
+    // totalAsset.shares is NOT modified during liquidation
+    // Borrow state is reduced by both the liquidator's repayment AND the bad debt adjustment
     const newState: VaultState = {
-        totalAssetAmount: currentState.totalAssetAmount + assetAmountToAdjust,
-        totalAssetShares: currentState.totalAssetShares + assetSharesToAdjust,
-        totalBorrowAmount: currentState.totalBorrowAmount - borrowAmountRepaid,
-        totalBorrowShares: currentState.totalBorrowShares - borrowSharesRepaid,
+        totalAssetAmount: currentState.totalAssetAmount - assetAmountToAdjust,
+        totalAssetShares: currentState.totalAssetShares, // No change to asset shares
+        totalBorrowAmount: currentState.totalBorrowAmount - borrowAmountRepaid - assetAmountToAdjust,
+        totalBorrowShares: currentState.totalBorrowShares - borrowSharesRepaid - assetSharesToAdjust,
+    };
+
+    await db.insert(IsolatedPairVaultState).values({
+        id: `${pair}-${eventId}`,
+        pair: pair as `0x${string}`,
+        totalAssetAmount: newState.totalAssetAmount,
+        totalAssetShares: newState.totalAssetShares,
+        totalBorrowAmount: newState.totalBorrowAmount,
+        totalBorrowShares: newState.totalBorrowShares,
+        timestamp,
+        blockNumber,
+        txHash: txHash as `0x${string}`,
+    });
+
+    return newState;
+}
+
+/**
+ * Update vault state after protocol fee withdrawal
+ * WithdrawFees reduces both totalAsset.amount and totalAsset.shares
+ * - shares: the fToken shares being burned
+ * - amountToTransfer: the underlying asset amount being withdrawn
+ */
+export async function updateVaultStateAfterWithdrawFees(
+    db: any,
+    pair: string,
+    shares: bigint,
+    amountToTransfer: bigint,
+    timestamp: number,
+    blockNumber: number,
+    txHash: string,
+    eventId: string
+): Promise<VaultState | null> {
+    const currentState = await getCurrentVaultState(db, pair);
+
+    if (!currentState) {
+        console.error(`No vault state found for pair ${pair} before withdrawFees`);
+        return null;
+    }
+
+    const newState: VaultState = {
+        totalAssetAmount: currentState.totalAssetAmount - amountToTransfer,
+        totalAssetShares: currentState.totalAssetShares - shares,
+        totalBorrowAmount: currentState.totalBorrowAmount,
+        totalBorrowShares: currentState.totalBorrowShares,
     };
 
     await db.insert(IsolatedPairVaultState).values({
