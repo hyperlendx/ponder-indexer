@@ -538,6 +538,25 @@ export const AddInterestIsolated = onchainTable(
     })
 );
 
+export const WithdrawFeesIsolated = onchainTable(
+    "withdraw_fees_isolated",
+    (t) => ({
+        id: t.text().primaryKey(),
+        txHash: t.hex(),
+        pair: t.hex(),
+        shares: t.bigint(),
+        recipient: t.hex(),
+        amountToTransfer: t.bigint(),
+        collateralAmount: t.bigint(),
+        timestamp: t.integer(),
+    }),
+    (table) => ({
+        pairIdx: index().on(table.pair),
+        timestampIdx: index().on(table.timestamp),
+        pairTimestampIdx: index().on(table.pair, table.timestamp),
+    })
+);
+
 // Note: UpdateExchangeRate event is for collateral/asset oracle prices, NOT vault exchange rate
 // We don't need to track it for vault accounting
 
