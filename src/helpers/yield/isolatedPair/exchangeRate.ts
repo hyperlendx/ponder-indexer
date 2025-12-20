@@ -2,15 +2,20 @@
  * Isolated Pair Exchange Rate Calculations
  *
  * Functions for calculating exchange rates at specific timestamps using vault state tracking.
- * Exchange rates are calculated by tracking totalAsset.amount and totalAsset.shares,
- * exactly as the contract does.
+ *
+ * IMPORTANT: There are TWO different exchange rates in isolated pairs:
+ * 1. Asset Exchange Rate = totalAsset.amount / totalAsset.shares (for deposits/withdrawals)
+ * 2. Borrow Exchange Rate = totalBorrow.amount / totalBorrow.shares (for borrows/repays)
+ *
+ * These are DIFFERENT because protocol fees are taken from the asset side by minting shares,
+ * so the borrow rate grows faster than the asset rate.
  */
 
-import { calculateIsolatedPairExchangeRate } from "./vaultExchangeRate";
+import { calculateIsolatedPairExchangeRate, calculateIsolatedPairBorrowExchangeRate } from "./vaultExchangeRate";
 
 /**
  * Request-scoped cache for exchange rates
- * Key format: `${pair}_${timestamp}`
+ * Key format: `${pair}_${timestamp}` for asset rate, `${pair}_${timestamp}_borrow` for borrow rate
  * This prevents redundant calculations within a single API request
  */
 const exchangeRateCache = new Map<string, bigint>();
@@ -85,3 +90,49 @@ export async function getIsolatedPairExchangeRate(
     return rate;
 }
 
+/**
+ * Calculate BORROW exchange rate at a specific timestamp
+ *
+ * This is DIFFERENT from the asset exchange rate because:
+ * - Borrowers pay the FULL interest (no fee deduction on borrow side)
+ * - Protocol fees are taken from the asset side by minting shares (diluting lenders)
+ * - So borrow rate grows FASTER than asset rate
+ *
+ * @param context - Ponder context with database access
+ * @param pair - Isolated pair address
+ * @param targetTimestamp - Target timestamp to calculate exchange rate for
+ * @returns Borrow exchange rate at target timestamp (1e18 precision)
+ */
+export async function calculateIsolatedPairBorrowExchangeRateAtTimestamp(
+    context: any,
+    pair: string,
+    targetTimestamp: number
+): Promise<bigint> {
+    return calculateIsolatedPairBorrowExchangeRate(context, pair, targetTimestamp);
+}
+
+/**
+ * Get BORROW exchange rate for an isolated pair at a specific timestamp (with caching)
+ *
+ * @param context - Ponder context with database access
+ * @param pair - Isolated pair address
+ * @param timestamp - Target timestamp
+ * @returns Borrow exchange rate at timestamp (1e18 precision)
+ */
+export async function getIsolatedPairBorrowExchangeRate(
+    context: any,
+    pair: string,
+    timestamp: number
+): Promise<bigint> {
+    // Check cache first (use different key suffix for borrow rate)
+    const cacheKey = `${pair}_${timestamp}_borrow`;
+    const cached = exchangeRateCache.get(cacheKey);
+    if (cached !== undefined) {
+        return cached;
+    }
+
+    // Calculate and cache
+    const rate = await calculateIsolatedPairBorrowExchangeRateAtTimestamp(context, pair, timestamp);
+    exchangeRateCache.set(cacheKey, rate);
+    return rate;
+}

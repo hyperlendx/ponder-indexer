@@ -28,6 +28,7 @@ import { EXCHANGE_PRECISION } from "./constants";
 import {
     getVaultStateWithTimestamp,
     calculateExchangeRateFromVaultState,
+    calculateBorrowExchangeRateFromVaultState,
 } from "./vaultState";
 import { getInterestRateAtTimestamp } from "./interestRateQueries";
 
@@ -156,3 +157,87 @@ export async function calculateIsolatedPairExchangeRate(
     }
 }
 
+/**
+ * Calculate BORROW exchange rate at a specific timestamp using vault state with interest extrapolation
+ *
+ * This function calculates the borrow exchange rate by:
+ * 1. Getting the most recent vault state (including borrow state) at or before the target timestamp
+ * 2. Getting the interest rate (ratePerSec) at that time
+ * 3. Calculating interest earned on the borrowed amount
+ * 4. Adding interest to totalBorrowAmount
+ * 5. Calculating the new borrow exchange rate
+ *
+ * IMPORTANT: The borrow exchange rate is DIFFERENT from the asset exchange rate because:
+ * - Borrowers pay the FULL interest (no fee deduction on borrow side)
+ * - Protocol fees are taken from the asset side by minting shares (diluting lenders)
+ * - So borrow rate grows FASTER than asset rate
+ *
+ * @param context - Ponder context with database access
+ * @param pair - Isolated pair address
+ * @param targetTimestamp - Target timestamp to calculate exchange rate for
+ * @returns Borrow exchange rate at target timestamp (1e18 precision)
+ */
+export async function calculateIsolatedPairBorrowExchangeRate(
+    context: any,
+    pair: string,
+    targetTimestamp: number
+): Promise<bigint> {
+    const { db } = context;
+
+    try {
+        // Get vault state WITH its timestamp so we can extrapolate
+        const vaultStateWithTime = await getVaultStateWithTimestamp(db, pair, targetTimestamp);
+
+        if (!vaultStateWithTime) {
+            // No vault state found - pair hasn't been initialized yet
+            return EXCHANGE_PRECISION; // Default 1:1
+        }
+
+        // Calculate base borrow exchange rate from vault state
+        const baseBorrowExchangeRate = calculateBorrowExchangeRateFromVaultState(
+            vaultStateWithTime.totalBorrowAmount,
+            vaultStateWithTime.totalBorrowShares
+        );
+
+        // If the vault state timestamp matches the target, no extrapolation needed
+        if (vaultStateWithTime.timestamp >= targetTimestamp) {
+            return baseBorrowExchangeRate;
+        }
+
+        // If there's no borrowed amount, no interest accrues
+        if (vaultStateWithTime.totalBorrowAmount === 0n || vaultStateWithTime.totalBorrowShares === 0n) {
+            return baseBorrowExchangeRate;
+        }
+
+        // Calculate time elapsed since the last vault state update
+        const timeElapsed = BigInt(targetTimestamp - vaultStateWithTime.timestamp);
+
+        // Get the interest rate at the vault state timestamp
+        const ratePerSec = await getInterestRateAtTimestamp(db, pair, vaultStateWithTime.timestamp);
+
+        if (ratePerSec === 0n) {
+            // No interest rate found or rate is 0, return base exchange rate
+            return baseBorrowExchangeRate;
+        }
+
+        // Calculate interest earned on borrowed amount
+        // RATE_PRECISION = EXCHANGE_PRECISION = 1e18
+        const interestEarned = (vaultStateWithTime.totalBorrowAmount * ratePerSec * timeElapsed) / EXCHANGE_PRECISION;
+
+        // Calculate new totalBorrowAmount (FULL interest, no fee deduction on borrow side)
+        const newTotalBorrowAmount = vaultStateWithTime.totalBorrowAmount + interestEarned;
+
+        // Borrow shares don't change from interest accrual (only from borrow/repay events)
+        // So the new borrow exchange rate is simply: newTotalBorrowAmount / totalBorrowShares
+        const extrapolatedBorrowRate = calculateBorrowExchangeRateFromVaultState(
+            newTotalBorrowAmount,
+            vaultStateWithTime.totalBorrowShares
+        );
+
+        return extrapolatedBorrowRate;
+
+    } catch (error: any) {
+        console.error(`Error calculating borrow exchange rate for pair ${pair} at timestamp ${targetTimestamp}:`, error);
+        return EXCHANGE_PRECISION;
+    }
+}

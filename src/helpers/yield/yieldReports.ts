@@ -3,6 +3,7 @@ import {eq, and, lte, desc} from "ponder";
 import {
     calculateLiquidityIndexAtTimestamp,
     calculateActualBalance,
+    calculateScaledBalance,
     calculateVariableBorrowIndexAtTimestamp
 } from "../aave";
 import {
@@ -706,30 +707,57 @@ function calculateBalanceFromEvents(
  * This avoids database queries by using in-memory event data
  * Returns the SCALED balance (constant value before applying borrow index)
  *
- * @param borrows - Pre-fetched borrow events
- * @param repays - Pre-fetched repay events
+ * IMPORTANT: In AAVE, borrow/repay events emit ACTUAL amounts (what the user receives/pays),
+ * not scaled amounts. To get the true scaled balance, we must convert each event's amount
+ * to scaled form using the variableBorrowIndex at that event's timestamp:
+ *   scaledAmount = actualAmount * RAY / variableBorrowIndex
+ *
+ * @param borrows - Pre-fetched borrow events (with amount as ACTUAL borrowed)
+ * @param repays - Pre-fetched repay events (with amount as ACTUAL repaid)
  * @param timestamp - Target timestamp
- * @returns Scaled borrow balance (constant value)
+ * @param borrowIndexAtEventTime - Map of event timestamp -> variableBorrowIndex at that time
+ * @returns Scaled borrow balance (constant value that can be multiplied by current index)
  */
 function calculateScaledBorrowBalanceFromEvents(
     borrows: any[],
     repays: any[],
-    timestamp: number
+    timestamp: number,
+    borrowIndexAtEventTime: Map<number, bigint>
 ): bigint {
-    // Calculate scaled borrow balance (constant value)
+    // Calculate scaled borrow balance by converting each event's actual amount to scaled
     let scaledBorrowBalance = 0n;
 
-    // Add all borrows up to timestamp
+    // Add all borrows up to timestamp (convert actual to scaled)
     for (const borrow of borrows) {
         if (borrow.timestamp <= timestamp) {
-            scaledBorrowBalance += borrow.amount;
+            const indexAtBorrow = borrowIndexAtEventTime.get(borrow.timestamp);
+            if (indexAtBorrow && indexAtBorrow > 0n) {
+                // Convert actual amount to scaled: scaled = actual * RAY / index
+                const scaledAmount = calculateScaledBalance(BigInt(borrow.amount), indexAtBorrow);
+                scaledBorrowBalance += scaledAmount;
+            } else {
+                throw new Error(
+                    `Missing borrow index for event at timestamp ${borrow.timestamp}. ` +
+                    `Cannot calculate scaled borrow balance without index data.`
+                );
+            }
         }
     }
 
-    // Subtract all repays up to timestamp
+    // Subtract all repays up to timestamp (convert actual to scaled)
     for (const repay of repays) {
         if (repay.timestamp <= timestamp) {
-            scaledBorrowBalance -= repay.amount;
+            const indexAtRepay = borrowIndexAtEventTime.get(repay.timestamp);
+            if (indexAtRepay && indexAtRepay > 0n) {
+                // Convert actual amount to scaled: scaled = actual * RAY / index
+                const scaledAmount = calculateScaledBalance(BigInt(repay.amount), indexAtRepay);
+                scaledBorrowBalance -= scaledAmount;
+            } else {
+                throw new Error(
+                    `Missing borrow index for repay event at timestamp ${repay.timestamp}. ` +
+                    `Cannot calculate scaled borrow balance without index data.`
+                );
+            }
         }
     }
 
@@ -740,23 +768,31 @@ function calculateScaledBorrowBalanceFromEvents(
  * Helper: Calculate borrowed balance at a specific timestamp from pre-fetched events
  * This avoids database queries by using in-memory event data
  *
- * IMPORTANT: This function now properly accounts for accrued borrow interest
- * by applying the variableBorrowIndex to the scaled borrow balance.
+ * IMPORTANT: This function properly accounts for accrued borrow interest by:
+ * 1. Converting each borrow/repay event's actual amount to scaled using the index at event time
+ * 2. Applying the current variableBorrowIndex to get the actual borrowed balance with interest
  *
  * @param borrows - Pre-fetched borrow events
  * @param repays - Pre-fetched repay events
  * @param timestamp - Target timestamp
  * @param variableBorrowIndex - Variable borrow index at the target timestamp
+ * @param borrowIndexAtEventTime - Map of event timestamp -> variableBorrowIndex at that time
  * @returns Actual borrowed balance with accrued interest
  */
 function calculateBorrowedFromEvents(
     borrows: any[],
     repays: any[],
     timestamp: number,
-    variableBorrowIndex: bigint
+    variableBorrowIndex: bigint,
+    borrowIndexAtEventTime: Map<number, bigint>
 ): bigint {
-    // Calculate scaled borrow balance (constant value)
-    const scaledBorrowBalance = calculateScaledBorrowBalanceFromEvents(borrows, repays, timestamp);
+    // Calculate scaled borrow balance (properly converted from actual amounts)
+    const scaledBorrowBalance = calculateScaledBorrowBalanceFromEvents(
+        borrows,
+        repays,
+        timestamp,
+        borrowIndexAtEventTime
+    );
 
     // If no net borrowed amount, return 0
     if (scaledBorrowBalance <= 0n) {
@@ -943,9 +979,24 @@ export async function calculateUserDailyPortfolioValue(
                 indexPrefetchList.push({asset, timestamp: dayStartTimestamp});
             }
         }
+
+        // Also collect all borrow/repay event timestamps to prefetch indices at event times
+        // This is needed for accurate scaled balance calculation
+        const eventTimestampPrefetchList: Array<{asset: string, timestamp: number}> = [];
+        for (const asset of allAssets) {
+            const borrows = borrowsByAsset.get(asset) || [];
+            const repays = repaysByAsset.get(asset) || [];
+            for (const borrow of borrows) {
+                eventTimestampPrefetchList.push({asset, timestamp: borrow.timestamp});
+            }
+            for (const repay of repays) {
+                eventTimestampPrefetchList.push({asset, timestamp: repay.timestamp});
+            }
+        }
+
         await Promise.all([
             indexCache.prefetch(context, indexPrefetchList),
-            borrowIndexCache.prefetch(context, indexPrefetchList)
+            borrowIndexCache.prefetch(context, [...indexPrefetchList, ...eventTimestampPrefetchList])
         ]);
 
         // Process each asset using pre-fetched data (NO database queries in loop)
@@ -953,6 +1004,18 @@ export async function calculateUserDailyPortfolioValue(
             const balanceEvents = balanceEventsByAsset.get(asset) || [];
             const borrows = borrowsByAsset.get(asset) || [];
             const repays = repaysByAsset.get(asset) || [];
+
+            // Build a map of event timestamp -> borrow index for this asset
+            // This is used to convert actual borrow/repay amounts to scaled amounts
+            const borrowIndexAtEventTime = new Map<number, bigint>();
+            for (const borrow of borrows) {
+                const index = await borrowIndexCache.get(context, asset, borrow.timestamp);
+                borrowIndexAtEventTime.set(borrow.timestamp, index);
+            }
+            for (const repay of repays) {
+                const index = await borrowIndexCache.get(context, asset, repay.timestamp);
+                borrowIndexAtEventTime.set(repay.timestamp, index);
+            }
 
             // For each day, calculate supplied and borrowed balances at END of day (23:59:59 UTC)
             for (const [dateStr, dayData] of dailyResults) {
@@ -964,8 +1027,15 @@ export async function calculateUserDailyPortfolioValue(
                 const suppliedBalance = calculateActualBalance(scaledBalance, liquidityIndex);
 
                 // Calculate borrowed balance from events with accrued interest at day end (no DB query)
+                // Now properly converts actual amounts to scaled using index at each event's timestamp
                 const variableBorrowIndex = await borrowIndexCache.get(context, asset, dayEndTimestamp);
-                const borrowedBalance = calculateBorrowedFromEvents(borrows, repays, dayEndTimestamp, variableBorrowIndex);
+                const borrowedBalance = calculateBorrowedFromEvents(
+                    borrows,
+                    repays,
+                    dayEndTimestamp,
+                    variableBorrowIndex,
+                    borrowIndexAtEventTime
+                );
 
                 // Get historical price and decimals at day end from AssetPriceSnapshot
                 // Query the most recent snapshot at or before dayEndTimestamp

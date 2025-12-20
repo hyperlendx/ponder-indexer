@@ -15,7 +15,7 @@ import {
     getIsolatedPairCollateralBalanceWithEvents,
     convertSharesToAssets,
 } from "./balanceQueries";
-import { getIsolatedPairExchangeRate } from "./exchangeRate";
+import { getIsolatedPairExchangeRate, getIsolatedPairBorrowExchangeRate } from "./exchangeRate";
 import { getUserIsolatedPairs } from "./pairTracking";
 import { getUserIsolatedPairsForPeriod } from "./periodTracking";
 import {
@@ -43,6 +43,13 @@ import { calculateUSDValueNumber } from "../../usdCalculations";
 
 /**
  * Position data for a single isolated pair
+ *
+ * IMPORTANT: There are TWO different exchange rates:
+ * - assetExchangeRate: Used for deposits/withdrawals (totalAsset.amount / totalAsset.shares)
+ * - borrowExchangeRate: Used for borrows/repays (totalBorrow.amount / totalBorrow.shares)
+ *
+ * These are different because protocol fees are taken from the asset side by minting shares,
+ * so the borrow rate grows faster than the asset rate.
  */
 export interface IsolatedPairPosition {
     pair: string;
@@ -51,7 +58,10 @@ export interface IsolatedPairPosition {
     borrowShares: bigint;
     assetAmount: bigint;
     borrowAmount: bigint;
+    /** @deprecated Use assetExchangeRate instead */
     exchangeRate: bigint;
+    assetExchangeRate: bigint;
+    borrowExchangeRate: bigint;
 }
 
 /**
@@ -122,17 +132,22 @@ export async function calculateIsolatedPairPosition(
     pair: string,
     timestamp: number
 ): Promise<IsolatedPairPosition> {
-    // Get all balances and exchange rate in parallel
-    const [collateralAmount, assetShares, borrowShares, exchangeRate] = await Promise.all([
+    // Get all balances and BOTH exchange rates in parallel
+    // IMPORTANT: Asset and Borrow exchange rates are DIFFERENT!
+    // - Asset rate = totalAsset.amount / totalAsset.shares (for deposits/withdrawals)
+    // - Borrow rate = totalBorrow.amount / totalBorrow.shares (for borrows/repays)
+    // Borrow rate grows faster because protocol fees are taken from asset side
+    const [collateralAmount, assetShares, borrowShares, assetExchangeRate, borrowExchangeRate] = await Promise.all([
         getIsolatedPairCollateralBalance(context, user, pair, timestamp),
         getIsolatedPairAssetShares(context, user, pair, timestamp),
         getIsolatedPairBorrowShares(context, user, pair, timestamp),
-        getIsolatedPairExchangeRate(context, pair, timestamp)
+        getIsolatedPairExchangeRate(context, pair, timestamp),
+        getIsolatedPairBorrowExchangeRate(context, pair, timestamp)
     ]);
 
-    // Convert shares to amounts using the exchange rate
-    const assetAmount = convertSharesToAssets(assetShares, exchangeRate);
-    const borrowAmount = convertSharesToAssets(borrowShares, exchangeRate);
+    // Convert shares to amounts using the CORRECT exchange rate for each
+    const assetAmount = convertSharesToAssets(assetShares, assetExchangeRate);
+    const borrowAmount = convertSharesToAssets(borrowShares, borrowExchangeRate);
 
     return {
         pair,
@@ -141,7 +156,9 @@ export async function calculateIsolatedPairPosition(
         borrowShares,
         assetAmount,
         borrowAmount,
-        exchangeRate
+        exchangeRate: assetExchangeRate, // Deprecated, kept for backward compatibility
+        assetExchangeRate,
+        borrowExchangeRate
     };
 }
 

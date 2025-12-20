@@ -501,3 +501,30 @@ export async function getExchangeRateAtTimestamp(
     );
 }
 
+/**
+ * Calculate borrow exchange rate from vault state
+ *
+ * Borrow Exchange Rate = totalBorrowAmount / totalBorrowShares
+ *
+ * This is DIFFERENT from the asset exchange rate because:
+ * - Borrowers pay interest (increases totalBorrowAmount)
+ * - No fee shares are minted on the borrow side
+ * - So borrow rate grows faster than asset rate (protocol takes the difference as fees)
+ *
+ * @param totalBorrowAmount - Total borrowed amount (including accrued interest)
+ * @param totalBorrowShares - Total borrow shares
+ * @returns Borrow exchange rate (1e18 precision)
+ */
+export function calculateBorrowExchangeRateFromVaultState(
+    totalBorrowAmount: bigint,
+    totalBorrowShares: bigint
+): bigint {
+    const EXCHANGE_PRECISION = 1000000000000000000n; // 1e18
+
+    if (totalBorrowShares === 0n) {
+        return EXCHANGE_PRECISION; // 1:1 if no shares
+    }
+
+    return (totalBorrowAmount * EXCHANGE_PRECISION) / totalBorrowShares;
+}
+

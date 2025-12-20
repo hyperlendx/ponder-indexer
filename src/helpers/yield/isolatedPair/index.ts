@@ -22,7 +22,9 @@ export {
 
 export {
     calculateIsolatedPairExchangeRateAtTimestamp,
-    getIsolatedPairExchangeRate
+    getIsolatedPairExchangeRate,
+    calculateIsolatedPairBorrowExchangeRateAtTimestamp,
+    getIsolatedPairBorrowExchangeRate
 } from "./exchangeRate";
 
 export {
