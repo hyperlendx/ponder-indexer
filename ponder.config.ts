@@ -9,6 +9,14 @@ import {LoopingStrategyManagerFactoryAbi} from "./abis/LoopingStrategyManagerFac
 import {IsolatedPairRegistry as IsolatedPairRegistryAbi} from "./abis/IsolatedPairRegistry";
 import {UiDataProviderIsolatedAbi as UiDataProviderIsolatedAbi} from "./abis/UiDataProviderIsolatedAbi";
 
+// kHYPE (Kinetiq Liquid Staking) ABIs
+import {KHYPEAbi} from "./abis/KHYPEAbi";
+import {ValidatorManagerAbi} from "./abis/ValidatorManagerAbi";
+
+// beHYPE (Hyperlend Liquid Staking) ABIs
+import {BEHYPEAbi} from "./abis/BEHYPEAbi";
+import {StakingCoreAbi} from "./abis/StakingCoreAbi";
+
 export default createConfig({
     chains: {
         hyperEvm: {
@@ -85,6 +93,51 @@ export default createConfig({
             chain: "hyperEvm",
             address: "0xf55af86c9ec3a7d5fa6367c00a120e6b262f718d",
             startBlock: 7336100,
+        },
+
+        // ============================================================================
+        // kHYPE (Kinetiq Liquid Staking) Contracts
+        // Only track Transfer, RewardEventReported, SlashingEventReported
+        // Exchange rate is read directly from the StakingAccountant contract
+        // ============================================================================
+
+        // kHYPE Token - Track Transfer events for user balance changes (mint/burn/transfer)
+        KHYPE: {
+            abi: KHYPEAbi,
+            chain: "hyperEvm",
+            address: "0xfD739d4e423301CE9385c1fb8850539D657C296D",
+            startBlock: 7635400,
+        },
+
+        // ValidatorManager - Track RewardEventReported and SlashingEventReported events
+        // These are the primary events that change the exchange rate
+        ValidatorManager: {
+            abi: ValidatorManagerAbi,
+            chain: "hyperEvm",
+            address: "0x4b797A93DfC3D18Cf98B7322a2b142FA8007508f",
+            startBlock: 7635400,
+        },
+
+        // ============================================================================
+        // beHYPE (Hyperlend Liquid Staking) Contracts
+        // Track Transfer events for user balances and ExchangeRatioUpdated for yield
+        // Exchange rate is stored in StakingCore.exchangeRatio state variable
+        // ============================================================================
+
+        // beHYPE Token - Track Transfer events for user balance changes (mint/burn/transfer)
+        BEHYPE: {
+            abi: BEHYPEAbi,
+            chain: "hyperEvm",
+            address: "0xd8FC8F0b03eBA61F64D08B0bef69d80916E5DdA9",
+            startBlock: 12965069,
+        },
+
+        // StakingCore - Track ExchangeRatioUpdated events for yield calculation
+        BeHYPEStakingCore: {
+            abi: StakingCoreAbi,
+            chain: "hyperEvm",
+            address: "0xCeaD893b162D38e714D82d06a7fe0b0dc3c38E0b",
+            startBlock: 12965190,
         },
     },
     blocks: {

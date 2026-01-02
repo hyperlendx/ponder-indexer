@@ -1126,4 +1126,522 @@ app.get("/user/:address/compare-events/:asset", async (c) => {
     }
 });
 
+// Get kHYPE staking yield for a user over a custom time period
+// kHYPE is Kinetiq's liquid staking token - exchange rate changes on reward/slashing events
+app.get("/user/:address/custom-period-yield-khype", async (c) => {
+    const userAddress = c.req.param("address");
+    const fromTimestampParam = c.req.query("fromTimestamp");
+    const toTimestampParam = c.req.query("toTimestamp");
+
+    if (!userAddress || !fromTimestampParam || !toTimestampParam) {
+        return c.json({error: "User address, fromTimestamp, and toTimestamp are required"}, 400);
+    }
+
+    // Validate hex address format
+    if (!/^0x[a-fA-F0-9]{40}$/.test(userAddress)) {
+        return c.json({error: "Invalid user address format"}, 400);
+    }
+
+    const fromTimestamp = parseInt(fromTimestampParam);
+    const toTimestamp = parseInt(toTimestampParam);
+
+    // Validate timestamps
+    if (isNaN(fromTimestamp) || isNaN(toTimestamp)) {
+        return c.json({error: "Invalid timestamp format. Must be Unix timestamps in seconds"}, 400);
+    }
+
+    if (fromTimestamp < 0 || toTimestamp < 0) {
+        return c.json({error: "Timestamps must be positive values"}, 400);
+    }
+
+    if (toTimestamp <= fromTimestamp) {
+        return c.json({error: "toTimestamp must be greater than fromTimestamp"}, 400);
+    }
+
+    // Validate reasonable time range (not more than 2 years)
+    const maxPeriodSeconds = 2 * 365 * 24 * 60 * 60; // 2 years
+    if (toTimestamp - fromTimestamp > maxPeriodSeconds) {
+        return c.json({error: "Time period cannot exceed 2 years"}, 400);
+    }
+
+    // Validate timestamps are not in the future (with 1 hour buffer for clock differences)
+    const currentTimestamp = Math.floor(Date.now() / 1000);
+    const futureBuffer = 3600; // 1 hour
+    if (toTimestamp > currentTimestamp + futureBuffer) {
+        return c.json({error: "toTimestamp cannot be in the future"}, 400);
+    }
+
+    try {
+        const context = {db};
+
+        const { calculateKHYPECustomPeriodYield } = await import("../helpers/kHYPE/yieldCalculations");
+        const result = await calculateKHYPECustomPeriodYield(context, userAddress, fromTimestamp, toTimestamp);
+
+        return c.json({
+            user: result.user,
+            fromTimestamp: result.startTimestamp,
+            toTimestamp: result.endTimestamp,
+            fromDate: new Date(result.startTimestamp * 1000).toISOString(),
+            toDate: new Date(result.endTimestamp * 1000).toISOString(),
+            days: Math.round((result.endTimestamp - result.startTimestamp) / (24 * 60 * 60) * 100) / 100,
+
+            // Activity during period
+            activity: {
+                totalMinted: result.totalMinted,
+                totalBurned: result.totalBurned,
+                totalTransferredIn: result.totalTransferredIn,
+                totalTransferredOut: result.totalTransferredOut,
+            },
+
+            // Yield earned (in HYPE and USD)
+            totalYieldEarned: result.totalYieldEarned,
+            totalYieldEarnedUSD: result.totalYieldEarnedUSD,
+
+            // Current state at end of period
+            endingState: {
+                kHYPEBalance: result.endingKHYPEBalance,
+                exchangeRate: result.endingExchangeRate,
+                hypeValue: result.endingHYPEValue,
+                hypeValueUSD: result.endingHYPEValueUSD,
+            },
+
+            // HYPE price at end of period (8 decimals)
+            hypePrice: result.hypePrice,
+
+            // Detailed breakdown by segment
+            segments: result.segments,
+
+            calculatedAt: Math.floor(Date.now() / 1000),
+        });
+
+    } catch (error) {
+        console.error("Error calculating kHYPE custom period yield:", error);
+        return c.json({
+            error: "Failed to calculate kHYPE custom period yield data",
+            details: error instanceof Error ? error.message : String(error)
+        }, 500);
+    }
+});
+
+// Get kHYPE daily yield breakdown for a user over a time period
+// Breaks down yield into complete 24-hour UTC days (midnight to midnight)
+app.get("/user/:address/daily-yield-breakdown-khype", async (c) => {
+    const userAddress = c.req.param("address");
+    const fromTimestampParam = c.req.query("fromTimestamp");
+    const toTimestampParam = c.req.query("toTimestamp");
+
+    if (!userAddress || !fromTimestampParam || !toTimestampParam) {
+        return c.json({error: "User address, fromTimestamp, and toTimestamp are required"}, 400);
+    }
+
+    // Validate hex address format
+    if (!/^0x[a-fA-F0-9]{40}$/.test(userAddress)) {
+        return c.json({error: "Invalid user address format"}, 400);
+    }
+
+    const fromTimestamp = parseInt(fromTimestampParam);
+    const toTimestamp = parseInt(toTimestampParam);
+
+    // Validate timestamps
+    if (isNaN(fromTimestamp) || isNaN(toTimestamp)) {
+        return c.json({error: "Invalid timestamp format. Must be Unix timestamps in seconds"}, 400);
+    }
+
+    if (fromTimestamp < 0 || toTimestamp < 0) {
+        return c.json({error: "Timestamps must be positive values"}, 400);
+    }
+
+    if (toTimestamp <= fromTimestamp) {
+        return c.json({error: "toTimestamp must be greater than fromTimestamp"}, 400);
+    }
+
+    // Validate reasonable time range (not more than 2 years)
+    const maxPeriodSeconds = 2 * 365 * 24 * 60 * 60; // 2 years
+    if (toTimestamp - fromTimestamp > maxPeriodSeconds) {
+        return c.json({error: "Time period cannot exceed 2 years"}, 400);
+    }
+
+    // Validate timestamps are not in the future (with 1 hour buffer for clock differences)
+    const currentTimestamp = Math.floor(Date.now() / 1000);
+    const futureBuffer = 3600; // 1 hour
+    if (toTimestamp > currentTimestamp + futureBuffer) {
+        return c.json({error: "toTimestamp cannot be in the future"}, 400);
+    }
+
+    try {
+        const context = {db};
+
+        const { calculateKHYPEDailyYieldBreakdown } = await import("../helpers/kHYPE/yieldCalculations");
+        const result = await calculateKHYPEDailyYieldBreakdown(context, userAddress, fromTimestamp, toTimestamp);
+
+        return c.json({
+            user: result.user,
+            fromTimestamp: result.fromTimestamp,
+            toTimestamp: result.toTimestamp,
+            fromDate: result.fromDate,
+            toDate: result.toDate,
+            totalYieldEarned: result.totalYieldEarned,
+            totalYieldEarnedUSD: result.totalYieldEarnedUSD,
+            hypePrice: result.hypePrice,
+            dailyBreakdown: result.dailyBreakdown,
+            calculatedAt: Math.floor(Date.now() / 1000),
+        });
+
+    } catch (error) {
+        console.error("Error calculating kHYPE daily yield breakdown:", error);
+        return c.json({
+            error: "Failed to calculate kHYPE daily yield breakdown",
+            details: error instanceof Error ? error.message : String(error)
+        }, 500);
+    }
+});
+
+// Get daily portfolio values for kHYPE holdings
+// Portfolio Value = kHYPE balance × exchange rate (in HYPE and USD)
+app.get("/user/:address/daily-portfolio-value-khype", async (c) => {
+    const userAddress = c.req.param("address");
+    const fromTimestampParam = c.req.query("fromTimestamp");
+    const toTimestampParam = c.req.query("toTimestamp");
+
+    if (!userAddress || !fromTimestampParam || !toTimestampParam) {
+        return c.json({error: "User address, fromTimestamp, and toTimestamp are required"}, 400);
+    }
+
+    // Validate hex address format
+    if (!/^0x[a-fA-F0-9]{40}$/.test(userAddress)) {
+        return c.json({error: "Invalid user address format"}, 400);
+    }
+
+    const fromTimestamp = parseInt(fromTimestampParam);
+    const toTimestamp = parseInt(toTimestampParam);
+
+    // Validate timestamps
+    if (isNaN(fromTimestamp) || isNaN(toTimestamp)) {
+        return c.json({error: "Invalid timestamp format. Must be Unix timestamps in seconds"}, 400);
+    }
+
+    if (fromTimestamp < 0 || toTimestamp < 0) {
+        return c.json({error: "Timestamps must be positive values"}, 400);
+    }
+
+    if (toTimestamp <= fromTimestamp) {
+        return c.json({error: "toTimestamp must be greater than fromTimestamp"}, 400);
+    }
+
+    // Validate reasonable time range (not more than 1 year for daily breakdown)
+    const maxPeriodSeconds = 365 * 24 * 60 * 60; // 1 year
+    if (toTimestamp - fromTimestamp > maxPeriodSeconds) {
+        return c.json({error: "Time period cannot exceed 1 year for daily breakdown"}, 400);
+    }
+
+    // Validate timestamps are not in the future (with 1 hour buffer for clock differences)
+    const currentTimestamp = Math.floor(Date.now() / 1000);
+    const futureBuffer = 3600; // 1 hour
+    if (toTimestamp > currentTimestamp + futureBuffer) {
+        return c.json({error: "toTimestamp cannot be in the future"}, 400);
+    }
+
+    try {
+        const context = {db};
+
+        const { calculateKHYPEDailyPortfolioValue } = await import("../helpers/kHYPE/yieldCalculations");
+        const result = await calculateKHYPEDailyPortfolioValue(context, userAddress, fromTimestamp, toTimestamp);
+
+        if (result.dailyPortfolioValues.length === 0) {
+            const expectedDays = Math.ceil((toTimestamp - fromTimestamp) / (24 * 60 * 60));
+            return c.json({
+                user: userAddress,
+                fromTimestamp,
+                toTimestamp,
+                fromDate: new Date(fromTimestamp * 1000).toISOString(),
+                toDate: new Date(toTimestamp * 1000).toISOString(),
+                days: expectedDays,
+                dailyPortfolioValues: [],
+                calculatedAt: Math.floor(Date.now() / 1000),
+                message: "No kHYPE positions found for this user during the specified period"
+            });
+        }
+
+        return c.json({
+            user: result.user,
+            fromTimestamp: result.fromTimestamp,
+            toTimestamp: result.toTimestamp,
+            fromDate: result.fromDate,
+            toDate: result.toDate,
+            days: result.days,
+            dailyPortfolioValues: result.dailyPortfolioValues,
+            calculatedAt: Math.floor(Date.now() / 1000),
+            note: "Portfolio values represent kHYPE holdings at the END of each day (23:59:59 UTC). USD values are calculated using HYPE oracle prices. For partial days (current day), values are calculated at the toTimestamp."
+        });
+
+    } catch (error) {
+        console.error("Error calculating kHYPE daily portfolio values:", error);
+        return c.json({
+            error: "Failed to calculate kHYPE daily portfolio values",
+            details: error instanceof Error ? error.message : String(error)
+        }, 500);
+    }
+});
+
+// ============================================================================
+// beHYPE (Hyperlend Liquid Staking) Endpoints
+// beHYPE is Hyperlend's liquid staking token - exchange rate changes via ExchangeRatioUpdated events (~2x/day)
+// ============================================================================
+
+// Get beHYPE staking yield for a user over a custom time period
+app.get("/user/:address/custom-period-yield-behype", async (c) => {
+    const userAddress = c.req.param("address");
+    const fromTimestampParam = c.req.query("fromTimestamp");
+    const toTimestampParam = c.req.query("toTimestamp");
+
+    if (!userAddress || !fromTimestampParam || !toTimestampParam) {
+        return c.json({error: "User address, fromTimestamp, and toTimestamp are required"}, 400);
+    }
+
+    // Validate hex address format
+    if (!/^0x[a-fA-F0-9]{40}$/.test(userAddress)) {
+        return c.json({error: "Invalid user address format"}, 400);
+    }
+
+    const fromTimestamp = parseInt(fromTimestampParam);
+    const toTimestamp = parseInt(toTimestampParam);
+
+    // Validate timestamps
+    if (isNaN(fromTimestamp) || isNaN(toTimestamp)) {
+        return c.json({error: "Invalid timestamp format. Must be Unix timestamps in seconds"}, 400);
+    }
+
+    if (fromTimestamp < 0 || toTimestamp < 0) {
+        return c.json({error: "Timestamps must be positive values"}, 400);
+    }
+
+    if (toTimestamp <= fromTimestamp) {
+        return c.json({error: "toTimestamp must be greater than fromTimestamp"}, 400);
+    }
+
+    // Validate reasonable time range (not more than 2 years)
+    const maxPeriodSeconds = 2 * 365 * 24 * 60 * 60; // 2 years
+    if (toTimestamp - fromTimestamp > maxPeriodSeconds) {
+        return c.json({error: "Time period cannot exceed 2 years"}, 400);
+    }
+
+    // Validate timestamps are not in the future (with 1 hour buffer for clock differences)
+    const currentTimestamp = Math.floor(Date.now() / 1000);
+    const futureBuffer = 3600; // 1 hour
+    if (toTimestamp > currentTimestamp + futureBuffer) {
+        return c.json({error: "toTimestamp cannot be in the future"}, 400);
+    }
+
+    try {
+        const context = {db};
+
+        const { calculateBeHYPECustomPeriodYield } = await import("../helpers/beHYPE/yieldCalculations");
+        const result = await calculateBeHYPECustomPeriodYield(context, userAddress, fromTimestamp, toTimestamp);
+
+        return c.json({
+            user: result.user,
+            fromTimestamp: result.startTimestamp,
+            toTimestamp: result.endTimestamp,
+            fromDate: new Date(result.startTimestamp * 1000).toISOString(),
+            toDate: new Date(result.endTimestamp * 1000).toISOString(),
+            days: Math.round((result.endTimestamp - result.startTimestamp) / (24 * 60 * 60) * 100) / 100,
+
+            // Activity during period
+            activity: {
+                totalMinted: result.totalMinted,
+                totalBurned: result.totalBurned,
+                totalTransferredIn: result.totalTransferredIn,
+                totalTransferredOut: result.totalTransferredOut,
+            },
+
+            // Yield earned (in HYPE and USD)
+            totalYieldEarned: result.totalYieldEarned,
+            totalYieldEarnedUSD: result.totalYieldEarnedUSD,
+
+            // Current state at end of period
+            endingState: {
+                beHYPEBalance: result.endingBeHYPEBalance,
+                exchangeRate: result.endingExchangeRate,
+                hypeValue: result.endingHYPEValue,
+                hypeValueUSD: result.endingHYPEValueUSD,
+            },
+
+            // HYPE price at end of period (8 decimals)
+            hypePrice: result.hypePrice,
+
+            // Detailed breakdown by segment
+            segments: result.segments,
+
+            calculatedAt: Math.floor(Date.now() / 1000),
+        });
+
+    } catch (error) {
+        console.error("Error calculating beHYPE custom period yield:", error);
+        return c.json({
+            error: "Failed to calculate beHYPE custom period yield data",
+            details: error instanceof Error ? error.message : String(error)
+        }, 500);
+    }
+});
+
+// Get daily portfolio values for beHYPE holdings
+// Portfolio Value = beHYPE balance × exchange rate (in HYPE and USD)
+app.get("/user/:address/daily-portfolio-value-behype", async (c) => {
+    const userAddress = c.req.param("address");
+    const fromTimestampParam = c.req.query("fromTimestamp");
+    const toTimestampParam = c.req.query("toTimestamp");
+
+    if (!userAddress || !fromTimestampParam || !toTimestampParam) {
+        return c.json({error: "User address, fromTimestamp, and toTimestamp are required"}, 400);
+    }
+
+    // Validate hex address format
+    if (!/^0x[a-fA-F0-9]{40}$/.test(userAddress)) {
+        return c.json({error: "Invalid user address format"}, 400);
+    }
+
+    const fromTimestamp = parseInt(fromTimestampParam);
+    const toTimestamp = parseInt(toTimestampParam);
+
+    // Validate timestamps
+    if (isNaN(fromTimestamp) || isNaN(toTimestamp)) {
+        return c.json({error: "Invalid timestamp format. Must be Unix timestamps in seconds"}, 400);
+    }
+
+    if (fromTimestamp < 0 || toTimestamp < 0) {
+        return c.json({error: "Timestamps must be positive values"}, 400);
+    }
+
+    if (toTimestamp <= fromTimestamp) {
+        return c.json({error: "toTimestamp must be greater than fromTimestamp"}, 400);
+    }
+
+    // Validate reasonable time range (not more than 1 year for daily breakdown)
+    const maxPeriodSeconds = 365 * 24 * 60 * 60; // 1 year
+    if (toTimestamp - fromTimestamp > maxPeriodSeconds) {
+        return c.json({error: "Time period cannot exceed 1 year for daily breakdown"}, 400);
+    }
+
+    // Validate timestamps are not in the future (with 1 hour buffer for clock differences)
+    const currentTimestamp = Math.floor(Date.now() / 1000);
+    const futureBuffer = 3600; // 1 hour
+    if (toTimestamp > currentTimestamp + futureBuffer) {
+        return c.json({error: "toTimestamp cannot be in the future"}, 400);
+    }
+
+    try {
+        const context = {db};
+
+        const { calculateBeHYPEDailyPortfolioValue } = await import("../helpers/beHYPE/yieldCalculations");
+        const result = await calculateBeHYPEDailyPortfolioValue(context, userAddress, fromTimestamp, toTimestamp);
+
+        if (result.dailyPortfolioValues.length === 0) {
+            const expectedDays = Math.ceil((toTimestamp - fromTimestamp) / (24 * 60 * 60));
+            return c.json({
+                user: userAddress,
+                fromTimestamp,
+                toTimestamp,
+                fromDate: new Date(fromTimestamp * 1000).toISOString(),
+                toDate: new Date(toTimestamp * 1000).toISOString(),
+                days: expectedDays,
+                dailyPortfolioValues: [],
+                calculatedAt: Math.floor(Date.now() / 1000),
+                message: "No beHYPE positions found for this user during the specified period"
+            });
+        }
+
+        return c.json({
+            user: result.user,
+            fromTimestamp: result.fromTimestamp,
+            toTimestamp: result.toTimestamp,
+            fromDate: result.fromDate,
+            toDate: result.toDate,
+            days: result.days,
+            dailyPortfolioValues: result.dailyPortfolioValues,
+            calculatedAt: Math.floor(Date.now() / 1000),
+            note: "Portfolio values represent beHYPE holdings at the END of each day (23:59:59 UTC). USD values are calculated using HYPE oracle prices. For partial days (current day), values are calculated at the toTimestamp."
+        });
+
+    } catch (error) {
+        console.error("Error calculating beHYPE daily portfolio values:", error);
+        return c.json({
+            error: "Failed to calculate beHYPE daily portfolio values",
+            details: error instanceof Error ? error.message : String(error)
+        }, 500);
+    }
+});
+
+// Get beHYPE daily yield breakdown for a user over a time period
+// Breaks down yield into complete 24-hour UTC days (midnight to midnight)
+app.get("/user/:address/daily-yield-breakdown-behype", async (c) => {
+    const userAddress = c.req.param("address");
+    const fromTimestampParam = c.req.query("fromTimestamp");
+    const toTimestampParam = c.req.query("toTimestamp");
+
+    if (!userAddress || !fromTimestampParam || !toTimestampParam) {
+        return c.json({error: "User address, fromTimestamp, and toTimestamp are required"}, 400);
+    }
+
+    // Validate hex address format
+    if (!/^0x[a-fA-F0-9]{40}$/.test(userAddress)) {
+        return c.json({error: "Invalid user address format"}, 400);
+    }
+
+    const fromTimestamp = parseInt(fromTimestampParam);
+    const toTimestamp = parseInt(toTimestampParam);
+
+    // Validate timestamps
+    if (isNaN(fromTimestamp) || isNaN(toTimestamp)) {
+        return c.json({error: "Invalid timestamp format. Must be Unix timestamps in seconds"}, 400);
+    }
+
+    if (fromTimestamp < 0 || toTimestamp < 0) {
+        return c.json({error: "Timestamps must be positive values"}, 400);
+    }
+
+    if (toTimestamp <= fromTimestamp) {
+        return c.json({error: "toTimestamp must be greater than fromTimestamp"}, 400);
+    }
+
+    // Validate reasonable time range (not more than 2 years)
+    const maxPeriodSeconds = 2 * 365 * 24 * 60 * 60; // 2 years
+    if (toTimestamp - fromTimestamp > maxPeriodSeconds) {
+        return c.json({error: "Time period cannot exceed 2 years"}, 400);
+    }
+
+    // Validate timestamps are not in the future (with 1 hour buffer for clock differences)
+    const currentTimestamp = Math.floor(Date.now() / 1000);
+    const futureBuffer = 3600; // 1 hour
+    if (toTimestamp > currentTimestamp + futureBuffer) {
+        return c.json({error: "toTimestamp cannot be in the future"}, 400);
+    }
+
+    try {
+        const context = {db};
+
+        const { calculateBeHYPEDailyYieldBreakdown } = await import("../helpers/beHYPE/yieldCalculations");
+        const result = await calculateBeHYPEDailyYieldBreakdown(context, userAddress, fromTimestamp, toTimestamp);
+
+        return c.json({
+            user: result.user,
+            fromTimestamp: result.fromTimestamp,
+            toTimestamp: result.toTimestamp,
+            fromDate: result.fromDate,
+            toDate: result.toDate,
+            totalYieldEarned: result.totalYieldEarned,
+            totalYieldEarnedUSD: result.totalYieldEarnedUSD,
+            hypePrice: result.hypePrice,
+            dailyBreakdown: result.dailyBreakdown,
+            calculatedAt: Math.floor(Date.now() / 1000),
+        });
+
+    } catch (error) {
+        console.error("Error calculating beHYPE daily yield breakdown:", error);
+        return c.json({
+            error: "Failed to calculate beHYPE daily yield breakdown",
+            details: error instanceof Error ? error.message : String(error)
+        }, 500);
+    }
+});
+
 export default app;

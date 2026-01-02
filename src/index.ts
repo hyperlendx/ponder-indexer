@@ -34,6 +34,16 @@ import {
     AssetPriceSnapshot,
     IsolatedPairRegistry,
     IsolatedPairPriceSnapshot,
+    // kHYPE (Kinetiq Liquid Staking) schema tables
+    KHYPEBalanceEvent,
+    UserKHYPEPosition,
+    KHYPEExchangeRateSnapshot,
+    KHYPERewardEvent,
+    KHYPESlashingEvent,
+    // beHYPE (Hyperlend Liquid Staking) schema tables
+    BeHYPEBalanceEvent,
+    UserBeHYPEPosition,
+    BeHYPEExchangeRateSnapshot,
 } from "ponder:schema";
 
 import { CorePoolAbi } from "../abis/CorePoolAbi";
@@ -45,6 +55,9 @@ import { IsolatedAbi } from "../abis/IsolatedAbi";
 import { ERC20Abi } from "../abis/ERC20Abi";
 import { HTokenAbi } from "../abis/HTokenAbi";
 import config from "../ponder.config";
+
+// kHYPE (Kinetiq Liquid Staking) ABIs
+import { StakingAccountantAbi } from "../abis/StakingAccountantAbi";
 
 import { getOraclePrice, getIsolatedOraclePrice, getIsolatedOraclePrices, getIsolatedPairAssetInfo } from "./helpers/getPrice";
 import { updateUserPosition, updateUserPositionTransferBased } from "./helpers/userPositionManager";
@@ -1026,22 +1039,32 @@ ponder.on("IsolatedPair:Withdraw", async ({ event, context }) => {
     const assets = event.args.assets;
     const shares = event.args.shares;
 
-    // Update vault state and get the new state back
-    const newVaultState = await updateVaultStateAfterWithdraw(
-        context.db,
-        pair,
-        assets,
-        shares,
-        Number(event.block.timestamp),
-        Number(event.block.number),
-        event.transaction.hash,
-        event.id
-    );
+    // Check if this is a fee withdrawal (owner === pair)
+    // When withdrawFees() is called, the contract emits BOTH a Withdraw event (with owner = pair)
+    // AND a WithdrawFees event. The WithdrawFees handler already updates the vault state,
+    // so we skip the vault state update here to avoid double-counting.
+    const isFeeWithdrawal = event.args.owner.toLowerCase() === pair.toLowerCase();
 
-    // Calculate exchange rate from the returned vault state
-    const exchangeRate = newVaultState
-        ? calculateExchangeRateFromVaultState(newVaultState.totalAssetAmount, newVaultState.totalAssetShares)
-        : 1000000000000000000n; // Default 1:1 if no state
+    let exchangeRate = 1000000000000000000n; // Default 1:1
+
+    if (!isFeeWithdrawal) {
+        // Update vault state and get the new state back (only for regular withdrawals)
+        const newVaultState = await updateVaultStateAfterWithdraw(
+            context.db,
+            pair,
+            assets,
+            shares,
+            Number(event.block.timestamp),
+            Number(event.block.number),
+            event.transaction.hash,
+            event.id
+        );
+
+        // Calculate exchange rate from the returned vault state
+        exchangeRate = newVaultState
+            ? calculateExchangeRateFromVaultState(newVaultState.totalAssetAmount, newVaultState.totalAssetShares)
+            : 1000000000000000000n;
+    }
 
     await context.db.insert(WithdrawIsolated).values({
         id: event.id,
@@ -1060,14 +1083,16 @@ ponder.on("IsolatedPair:Withdraw", async ({ event, context }) => {
         exchangeRate: exchangeRate
     });
 
-    // Update tracking table
-    await updateUserIsolatedPairTracking(
-        context,
-        event.args.owner,
-        pair,
-        Number(event.block.timestamp),
-        'withdraw'
-    );
+    // Update tracking table (only for regular withdrawals, not fee withdrawals)
+    if (!isFeeWithdrawal) {
+        await updateUserIsolatedPairTracking(
+            context,
+            event.args.owner,
+            pair,
+            Number(event.block.timestamp),
+            'withdraw'
+        );
+    }
 });
 
 // Isolated Pair Rate Events - Enable accurate exchange rate calculations
@@ -1462,3 +1487,364 @@ ponder.on("ChainlinkOracleIsolatedUpdate:block", async ({ event, context }) => {
         console.error(`[ChainlinkOracleIsolatedUpdate] Error fetching prices at block ${blockNumber}:`, error);
     }
 })
+
+// ============================================================================
+// kHYPE (Kinetiq Liquid Staking) Event Handlers
+// reads exchange rate directly from contract
+// Only tracks: Transfer (user balances), RewardEventReported, SlashingEventReported
+// ============================================================================
+
+const KHYPE_ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as `0x${string}`;
+
+// Contract addresses for kHYPE
+const KHYPE_STAKING_ACCOUNTANT = "0x9209648Ec9D448EF57116B73A2f081835643dc7A" as `0x${string}`;
+
+/**
+ * Read current exchange rate directly from StakingAccountant contract
+ * Uses kHYPEToHYPE(1e18) to get how much HYPE 1 kHYPE is worth
+ */
+async function readKHYPEExchangeRate(context: any): Promise<bigint> {
+    try {
+        const exchangeRate = await context.client.readContract({
+            abi: StakingAccountantAbi,
+            address: KHYPE_STAKING_ACCOUNTANT,
+            functionName: "kHYPEToHYPE",
+            args: [BigInt(1e18)], // 1 kHYPE
+        });
+        return exchangeRate as bigint;
+    } catch (error) {
+        console.error(`[kHYPE] Error reading exchange rate:`, error);
+        return BigInt(1e18); // Default 1:1 rate on error
+    }
+}
+
+
+// ============================================================================
+// 1. kHYPE Transfer Event Handler
+// Tracks user kHYPE balances (mint, burn, transfer)
+// Snapshots exchange rate on mint/burn events (supply changes)
+// ============================================================================
+ponder.on("KHYPE:Transfer", async ({ event, context }) => {
+    const { from, to, value } = event.args;
+    const timestamp = Number(event.block.timestamp);
+    const blockNumber = event.block.number;
+    const logIndex = event.log.logIndex;
+    const txHash = event.transaction.hash;
+
+    // Determine event type
+    const isMint = from === KHYPE_ZERO_ADDRESS;
+    const isBurn = to === KHYPE_ZERO_ADDRESS;
+
+    // Process sender (from) - decrease balance
+    if (from !== KHYPE_ZERO_ADDRESS) {
+        const existingPosition = await context.db.find(UserKHYPEPosition, { id: from });
+        const currentBalance = existingPosition?.balance ?? 0n;
+        const newBalance = currentBalance - value;
+
+        // Create balance event
+        await context.db.insert(KHYPEBalanceEvent).values({
+            id: `${txHash}-${logIndex}-from`,
+            txHash: txHash,
+            user: from,
+            balance: newBalance,
+            balanceChange: -value,
+            eventType: isBurn ? "burn" : "transfer_out",
+            counterparty: to,
+            timestamp: timestamp,
+            blockNumber: blockNumber,
+            logIndex: logIndex,
+        });
+
+        // Update or create position
+        if (existingPosition) {
+            await context.db.update(UserKHYPEPosition, { id: from }).set({
+                balance: newBalance,
+                totalBurned: isBurn ? (existingPosition.totalBurned ?? 0n) + value : (existingPosition.totalBurned ?? 0n),
+                totalTransferredOut: !isBurn ? (existingPosition.totalTransferredOut ?? 0n) + value : (existingPosition.totalTransferredOut ?? 0n),
+                lastUpdated: timestamp,
+            });
+        } else {
+            await context.db.insert(UserKHYPEPosition).values({
+                id: from,
+                balance: newBalance,
+                totalMinted: 0n,
+                totalBurned: isBurn ? value : 0n,
+                totalTransferredIn: 0n,
+                totalTransferredOut: !isBurn ? value : 0n,
+                lastUpdated: timestamp,
+            });
+        }
+    }
+
+    // Process receiver (to) - increase balance
+    if (to !== KHYPE_ZERO_ADDRESS) {
+        const existingPosition = await context.db.find(UserKHYPEPosition, { id: to });
+        const currentBalance = existingPosition?.balance ?? 0n;
+        const newBalance = currentBalance + value;
+
+        // Create balance event
+        await context.db.insert(KHYPEBalanceEvent).values({
+            id: `${txHash}-${logIndex}-to`,
+            txHash: txHash,
+            user: to,
+            balance: newBalance,
+            balanceChange: value,
+            eventType: isMint ? "mint" : "transfer_in",
+            counterparty: from,
+            timestamp: timestamp,
+            blockNumber: blockNumber,
+            logIndex: logIndex,
+        });
+
+        // Update or create position
+        if (existingPosition) {
+            await context.db.update(UserKHYPEPosition, { id: to }).set({
+                balance: newBalance,
+                totalMinted: isMint ? (existingPosition.totalMinted ?? 0n) + value : (existingPosition.totalMinted ?? 0n),
+                totalTransferredIn: !isMint ? (existingPosition.totalTransferredIn ?? 0n) + value : (existingPosition.totalTransferredIn ?? 0n),
+                lastUpdated: timestamp,
+            });
+        } else {
+            await context.db.insert(UserKHYPEPosition).values({
+                id: to,
+                balance: newBalance,
+                totalMinted: isMint ? value : 0n,
+                totalBurned: 0n,
+                totalTransferredIn: !isMint ? value : 0n,
+                totalTransferredOut: 0n,
+                lastUpdated: timestamp,
+            });
+        }
+    }
+
+    // Save exchange rate snapshot on mint/burn (supply changes affect rate)
+    // Read exchange rate directly from contract - guaranteed accurate
+    if (isMint || isBurn) {
+        const exchangeRate = await readKHYPEExchangeRate(context);
+        await context.db.insert(KHYPEExchangeRateSnapshot).values({
+            id: `${blockNumber}-${logIndex}`,
+            exchangeRate: exchangeRate,
+            eventType: isMint ? "mint" : "burn",
+            eventAmount: value,
+            timestamp: timestamp,
+            blockNumber: blockNumber,
+            logIndex: logIndex,
+            txHash: txHash,
+        });
+    }
+
+    console.log(`[kHYPE:Transfer] ${isMint ? "Mint" : isBurn ? "Burn" : "Transfer"}: ${value} from ${from} to ${to} at block ${blockNumber}`);
+});
+
+
+// ============================================================================
+// 2. ValidatorManager RewardEventReported Handler
+// Primary event for exchange rate increases (staking rewards)
+// This is when the exchange rate actually changes - rewards are distributed
+// ============================================================================
+ponder.on("ValidatorManager:RewardEventReported", async ({ event, context }) => {
+    const { validator, amount } = event.args;
+    const timestamp = Number(event.block.timestamp);
+    const blockNumber = event.block.number;
+    const logIndex = event.log.logIndex;
+    const txHash = event.transaction.hash;
+
+    // Store raw event for audit trail
+    await context.db.insert(KHYPERewardEvent).values({
+        id: `${txHash}-${logIndex}`,
+        txHash: txHash,
+        validator: validator,
+        amount: amount,
+        timestamp: timestamp,
+        blockNumber: blockNumber,
+        logIndex: logIndex,
+    });
+
+    // Read exchange rate directly from contract - this is the new rate after rewards
+    const exchangeRate = await readKHYPEExchangeRate(context);
+    await context.db.insert(KHYPEExchangeRateSnapshot).values({
+        id: `${blockNumber}-${logIndex}`,
+        exchangeRate: exchangeRate,
+        eventType: "reward",
+        eventAmount: amount,
+        timestamp: timestamp,
+        blockNumber: blockNumber,
+        logIndex: logIndex,
+        txHash: txHash,
+    });
+
+    console.log(`[ValidatorManager:RewardEventReported] Validator ${validator} rewarded ${amount} at block ${blockNumber}. Exchange rate: ${exchangeRate}`);
+});
+
+// ============================================================================
+// 3. ValidatorManager SlashingEventReported Handler
+// Primary event for exchange rate decreases (slashing penalties)
+// ============================================================================
+ponder.on("ValidatorManager:SlashingEventReported", async ({ event, context }) => {
+    const { validator, amount } = event.args;
+    const timestamp = Number(event.block.timestamp);
+    const blockNumber = event.block.number;
+    const logIndex = event.log.logIndex;
+    const txHash = event.transaction.hash;
+
+    // Store raw event for audit trail
+    await context.db.insert(KHYPESlashingEvent).values({
+        id: `${txHash}-${logIndex}`,
+        txHash: txHash,
+        validator: validator,
+        amount: amount,
+        timestamp: timestamp,
+        blockNumber: blockNumber,
+        logIndex: logIndex,
+    });
+
+    // Read exchange rate directly from contract - this is the new rate after slashing
+    const exchangeRate = await readKHYPEExchangeRate(context);
+    await context.db.insert(KHYPEExchangeRateSnapshot).values({
+        id: `${blockNumber}-${logIndex}`,
+        exchangeRate: exchangeRate,
+        eventType: "slash",
+        eventAmount: amount,
+        timestamp: timestamp,
+        blockNumber: blockNumber,
+        logIndex: logIndex,
+        txHash: txHash,
+    });
+
+    console.log(`[ValidatorManager:SlashingEventReported] Validator ${validator} slashed ${amount} at block ${blockNumber}. Exchange rate: ${exchangeRate}`);
+});
+
+// ============================================================================
+// beHYPE (Hyperlend Liquid Staking) Event Handlers
+// Similar to kHYPE but exchange rate comes from ExchangeRatioUpdated events
+// Exchange rate is stored in StakingCore.exchangeRatio and updated ~2x/day
+// ============================================================================
+
+const BEHYPE_ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as `0x${string}`;
+
+// ============================================================================
+// 1. beHYPE Transfer Event Handler
+// Tracks user beHYPE balances (mint, burn, transfer)
+// ============================================================================
+ponder.on("BEHYPE:Transfer", async ({ event, context }) => {
+    const { from, to, value } = event.args;
+    const timestamp = Number(event.block.timestamp);
+    const blockNumber = event.block.number;
+    const logIndex = event.log.logIndex;
+    const txHash = event.transaction.hash;
+
+    // Determine event type
+    const isMint = from === BEHYPE_ZERO_ADDRESS;
+    const isBurn = to === BEHYPE_ZERO_ADDRESS;
+
+    // Process sender (from) - decrease balance
+    if (from !== BEHYPE_ZERO_ADDRESS) {
+        const existingPosition = await context.db.find(UserBeHYPEPosition, { id: from });
+        const currentBalance = existingPosition?.balance ?? 0n;
+        const newBalance = currentBalance - value;
+
+        // Create balance event
+        await context.db.insert(BeHYPEBalanceEvent).values({
+            id: `${txHash}-${logIndex}-from`,
+            txHash: txHash,
+            user: from,
+            balance: newBalance,
+            balanceChange: -value,
+            eventType: isBurn ? "burn" : "transfer_out",
+            counterparty: to,
+            timestamp: timestamp,
+            blockNumber: blockNumber,
+            logIndex: logIndex,
+        });
+
+        // Update or create position
+        if (existingPosition) {
+            await context.db.update(UserBeHYPEPosition, { id: from }).set({
+                balance: newBalance,
+                totalBurned: isBurn ? (existingPosition.totalBurned ?? 0n) + value : (existingPosition.totalBurned ?? 0n),
+                totalTransferredOut: !isBurn ? (existingPosition.totalTransferredOut ?? 0n) + value : (existingPosition.totalTransferredOut ?? 0n),
+                lastUpdated: timestamp,
+            });
+        } else {
+            await context.db.insert(UserBeHYPEPosition).values({
+                id: from,
+                balance: newBalance,
+                totalMinted: 0n,
+                totalBurned: isBurn ? value : 0n,
+                totalTransferredIn: 0n,
+                totalTransferredOut: !isBurn ? value : 0n,
+                lastUpdated: timestamp,
+            });
+        }
+    }
+
+    // Process receiver (to) - increase balance
+    if (to !== BEHYPE_ZERO_ADDRESS) {
+        const existingPosition = await context.db.find(UserBeHYPEPosition, { id: to });
+        const currentBalance = existingPosition?.balance ?? 0n;
+        const newBalance = currentBalance + value;
+
+        // Create balance event
+        await context.db.insert(BeHYPEBalanceEvent).values({
+            id: `${txHash}-${logIndex}-to`,
+            txHash: txHash,
+            user: to,
+            balance: newBalance,
+            balanceChange: value,
+            eventType: isMint ? "mint" : "transfer_in",
+            counterparty: from,
+            timestamp: timestamp,
+            blockNumber: blockNumber,
+            logIndex: logIndex,
+        });
+
+        // Update or create position
+        if (existingPosition) {
+            await context.db.update(UserBeHYPEPosition, { id: to }).set({
+                balance: newBalance,
+                totalMinted: isMint ? (existingPosition.totalMinted ?? 0n) + value : (existingPosition.totalMinted ?? 0n),
+                totalTransferredIn: !isMint ? (existingPosition.totalTransferredIn ?? 0n) + value : (existingPosition.totalTransferredIn ?? 0n),
+                lastUpdated: timestamp,
+            });
+        } else {
+            await context.db.insert(UserBeHYPEPosition).values({
+                id: to,
+                balance: newBalance,
+                totalMinted: isMint ? value : 0n,
+                totalBurned: 0n,
+                totalTransferredIn: !isMint ? value : 0n,
+                totalTransferredOut: 0n,
+                lastUpdated: timestamp,
+            });
+        }
+    }
+
+    console.log(`[beHYPE:Transfer] ${isMint ? "Mint" : isBurn ? "Burn" : "Transfer"}: ${value} from ${from} to ${to} at block ${blockNumber}`);
+});
+
+// ============================================================================
+// 2. BeHYPEStakingCore ExchangeRatioUpdated Event Handler
+// Primary event for exchange rate changes (~2x/day via keeper)
+// This is when the exchange rate actually changes
+// ============================================================================
+ponder.on("BeHYPEStakingCore:ExchangeRatioUpdated", async ({ event, context }) => {
+    const { oldRatio, newRatio, yearlyRateInBps } = event.args;
+    const timestamp = Number(event.block.timestamp);
+    const blockNumber = event.block.number;
+    const logIndex = event.log.logIndex;
+    const txHash = event.transaction.hash;
+
+    // Store exchange rate snapshot
+    await context.db.insert(BeHYPEExchangeRateSnapshot).values({
+        id: `${blockNumber}-${logIndex}`,
+        oldExchangeRate: oldRatio,
+        newExchangeRate: newRatio,
+        yearlyRateInBps: Number(yearlyRateInBps),
+        timestamp: timestamp,
+        blockNumber: blockNumber,
+        logIndex: logIndex,
+        txHash: txHash,
+    });
+
+    console.log(`[beHYPE:ExchangeRatioUpdated] Rate changed from ${oldRatio} to ${newRatio} (${yearlyRateInBps} bps APY) at block ${blockNumber}`);
+});

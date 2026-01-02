@@ -810,3 +810,175 @@ export const UserPositionTransferBased = onchainTable(
         lastUpdatedIdx: index().on(table.lastUpdated),
     })
 );
+
+// ============================================================================
+// kHYPE STAKING YIELD TRACKING
+// Track kHYPE (Kinetiq Liquid Staking Token) balances and exchange rates
+// Exchange Rate = (totalStaked + totalRewards - totalClaimed - totalSlashing) / totalKHYPESupply
+// ============================================================================
+
+// Store kHYPE balance events (transfers, mints, burns)
+export const KHYPEBalanceEvent = onchainTable(
+    "khype_balance_event",
+    (t) => ({
+        id: t.text().primaryKey(),
+        txHash: t.hex(),
+        user: t.hex(),
+        balance: t.bigint(),              // User's kHYPE balance after this event (18 decimals)
+        balanceChange: t.bigint(),        // Amount changed (positive for receives, negative for sends)
+        eventType: t.text(),              // 'mint', 'burn', 'transfer_in', 'transfer_out'
+        counterparty: t.hex(),            // The other address in the transfer (from or to)
+        timestamp: t.integer(),
+        blockNumber: t.bigint(),
+        logIndex: t.integer(),            // For ordering events within same block
+    }),
+    (table) => ({
+        userIdx: index().on(table.user),
+        timestampIdx: index().on(table.timestamp),
+        userTimestampIdx: index().on(table.user, table.timestamp),
+        eventTypeIdx: index().on(table.eventType),
+        blockNumberIdx: index().on(table.blockNumber),
+    })
+);
+
+// Store current kHYPE user positions
+export const UserKHYPEPosition = onchainTable(
+    "user_khype_position",
+    (t) => ({
+        id: t.hex().primaryKey(),         // user address
+        balance: t.bigint(),              // Current kHYPE balance (18 decimals)
+        totalMinted: t.bigint(),          // Cumulative kHYPE received from minting (staking HYPE)
+        totalBurned: t.bigint(),          // Cumulative kHYPE burned (unstaking)
+        totalTransferredIn: t.bigint(),   // Cumulative kHYPE received from transfers
+        totalTransferredOut: t.bigint(),  // Cumulative kHYPE sent via transfers
+        lastUpdated: t.integer(),         // Timestamp of last update
+    }),
+    (table) => ({
+        balanceIdx: index().on(table.balance),
+        lastUpdatedIdx: index().on(table.lastUpdated),
+    })
+);
+
+// Store exchange rate snapshots when rate-changing events occur
+// Exchange rate is read directly from StakingAccountant.kHYPEToHYPE(1e18)
+// Snapshots are taken on: mint, burn, reward, slash events
+export const KHYPEExchangeRateSnapshot = onchainTable(
+    "khype_exchange_rate_snapshot",
+    (t) => ({
+        id: t.text().primaryKey(),        // blockNumber-logIndex
+        exchangeRate: t.bigint(),         // HYPE per kHYPE with 18 decimals precision
+        eventType: t.text(),              // 'reward', 'slash', 'mint', 'burn'
+        eventAmount: t.bigint(),          // Amount from the triggering event
+        timestamp: t.integer(),
+        blockNumber: t.bigint(),
+        logIndex: t.integer(),
+        txHash: t.hex(),
+    }),
+    (table) => ({
+        timestampIdx: index().on(table.timestamp),
+        blockNumberIdx: index().on(table.blockNumber),
+        eventTypeIdx: index().on(table.eventType),
+    })
+);
+
+// Store raw events from ValidatorManager for audit trail
+export const KHYPERewardEvent = onchainTable(
+    "khype_reward_event",
+    (t) => ({
+        id: t.text().primaryKey(),
+        txHash: t.hex(),
+        validator: t.hex(),
+        amount: t.bigint(),               // Reward amount (18 decimals)
+        timestamp: t.integer(),
+        blockNumber: t.bigint(),
+        logIndex: t.integer(),
+    }),
+    (table) => ({
+        validatorIdx: index().on(table.validator),
+        timestampIdx: index().on(table.timestamp),
+    })
+);
+
+export const KHYPESlashingEvent = onchainTable(
+    "khype_slashing_event",
+    (t) => ({
+        id: t.text().primaryKey(),
+        txHash: t.hex(),
+        validator: t.hex(),
+        amount: t.bigint(),               // Slashing amount (18 decimals)
+        timestamp: t.integer(),
+        blockNumber: t.bigint(),
+        logIndex: t.integer(),
+    }),
+    (table) => ({
+        validatorIdx: index().on(table.validator),
+        timestampIdx: index().on(table.timestamp),
+    })
+);
+
+// ============================================================================
+// beHYPE (Hyperlend Liquid Staking) Schema Tables
+// Similar to kHYPE but with different exchange rate mechanism
+// Exchange rate changes on ExchangeRatioUpdated events (~2x/day via keeper)
+// ============================================================================
+
+// Store beHYPE balance events (transfers, mints, burns)
+export const BeHYPEBalanceEvent = onchainTable(
+    "behype_balance_event",
+    (t) => ({
+        id: t.text().primaryKey(),
+        txHash: t.hex(),
+        user: t.hex(),
+        balance: t.bigint(),              // User's beHYPE balance after this event (18 decimals)
+        balanceChange: t.bigint(),        // Amount changed (positive for receives, negative for sends)
+        eventType: t.text(),              // 'mint', 'burn', 'transfer_in', 'transfer_out'
+        counterparty: t.hex(),            // The other address in the transfer (from or to)
+        timestamp: t.integer(),
+        blockNumber: t.bigint(),
+        logIndex: t.integer(),            // For ordering events within same block
+    }),
+    (table) => ({
+        userIdx: index().on(table.user),
+        timestampIdx: index().on(table.timestamp),
+        userTimestampIdx: index().on(table.user, table.timestamp),
+        eventTypeIdx: index().on(table.eventType),
+    })
+);
+
+// Store current beHYPE user positions
+export const UserBeHYPEPosition = onchainTable(
+    "user_behype_position",
+    (t) => ({
+        id: t.hex().primaryKey(),         // user address
+        balance: t.bigint(),              // Current beHYPE balance (18 decimals)
+        totalMinted: t.bigint(),          // Cumulative beHYPE received from minting (staking HYPE)
+        totalBurned: t.bigint(),          // Cumulative beHYPE burned (unstaking)
+        totalTransferredIn: t.bigint(),   // Cumulative beHYPE received from transfers
+        totalTransferredOut: t.bigint(),  // Cumulative beHYPE sent via transfers
+        lastUpdated: t.integer(),         // Timestamp of last update
+    }),
+    (table) => ({
+        balanceIdx: index().on(table.balance),
+        lastUpdatedIdx: index().on(table.lastUpdated),
+    })
+);
+
+// Store exchange rate snapshots when ExchangeRatioUpdated is emitted
+// This is the primary event that changes the exchange rate (~2x/day via keeper)
+export const BeHYPEExchangeRateSnapshot = onchainTable(
+    "behype_exchange_rate_snapshot",
+    (t) => ({
+        id: t.text().primaryKey(),        // blockNumber-logIndex
+        oldExchangeRate: t.bigint(),      // Previous exchange rate (18 decimals)
+        newExchangeRate: t.bigint(),      // New exchange rate (18 decimals) - HYPE per beHYPE
+        yearlyRateInBps: t.integer(),     // Annualized rate change in basis points
+        timestamp: t.integer(),
+        blockNumber: t.bigint(),
+        logIndex: t.integer(),
+        txHash: t.hex(),
+    }),
+    (table) => ({
+        timestampIdx: index().on(table.timestamp),
+        blockNumberIdx: index().on(table.blockNumber),
+    })
+);
