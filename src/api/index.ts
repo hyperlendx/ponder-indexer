@@ -838,294 +838,6 @@ app.get("/user/:address/daily-portfolio-value-isolated", async (c) => {
     }
 });
 
-// Debug endpoint to check for duplicate UserBalanceEvent records
-app.get("/debug/duplicate-events/:address", async (c) => {
-    const userAddress = c.req.param("address");
-
-    if (!userAddress || !/^0x[a-fA-F0-9]{40}$/.test(userAddress)) {
-        return c.json({error: "Invalid user address format"}, 400);
-    }
-
-    try {
-        const context = {db};
-        const dbQuery = context.db.sql || context.db;
-
-        // Get all UserBalanceEvent records for this user
-        const {UserBalanceEvent} = await import("ponder:schema");
-        const allEvents = await dbQuery
-            .select()
-            .from(UserBalanceEvent)
-            .where(eq(UserBalanceEvent.user, userAddress as `0x${string}`))
-            .orderBy(UserBalanceEvent.timestamp, UserBalanceEvent.asset);
-
-        // Group events by transaction hash, user, asset, and event type
-        const eventGroups = new Map();
-        const duplicates = [];
-
-        for (const event of allEvents) {
-            const key = `${event.txHash}_${event.user}_${event.asset}_${event.eventType}`;
-
-            if (!eventGroups.has(key)) {
-                eventGroups.set(key, []);
-            }
-            eventGroups.get(key).push(event);
-        }
-
-        // Find groups with multiple events (potential duplicates)
-        for (const [key, events] of eventGroups) {
-            if (events.length > 1) {
-                duplicates.push({
-                    key,
-                    count: events.length,
-                    events: events.map(e => ({
-                        id: e.id,
-                        txHash: e.txHash,
-                        asset: e.asset,
-                        scaledBalance: e.scaledBalance.toString(),
-                        transactionAmount: e.transactionAmount.toString(),
-                        eventType: e.eventType,
-                        timestamp: e.timestamp
-                    }))
-                });
-            }
-        }
-
-        return c.json({
-            user: userAddress,
-            totalEvents: allEvents.length,
-            duplicateGroups: duplicates.length,
-            duplicates: duplicates
-        });
-
-    } catch (error) {
-        console.error("Error checking for duplicate events:", error);
-        return c.json({error: "Failed to check for duplicate events"}, 500);
-    }
-});
-
-// Compare Option A (proxy-based) vs Option B (transfer-based) position tracking
-// This endpoint helps evaluate which approach produces more accurate results
-app.get("/user/:address/compare-position-tracking", async (c) => {
-    const userAddress = c.req.param("address");
-    const assetParam = c.req.query("asset"); // Optional: filter by specific asset
-
-    if (!userAddress) {
-        return c.json({ error: "User address is required" }, 400);
-    }
-
-    // Validate hex address format
-    if (!/^0x[a-fA-F0-9]{40}$/.test(userAddress)) {
-        return c.json({ error: "Invalid user address format" }, 400);
-    }
-
-    try {
-        const normalizedUser = userAddress.toLowerCase() as `0x${string}`;
-
-        // Query Option A positions (proxy-based)
-        let optionAPositions;
-        if (assetParam) {
-            const normalizedAsset = assetParam.toLowerCase() as `0x${string}`;
-            optionAPositions = await db
-                .select()
-                .from(schema.UserPosition)
-                .where(
-                    and(
-                        eq(schema.UserPosition.user, normalizedUser),
-                        eq(schema.UserPosition.asset, normalizedAsset)
-                    )
-                );
-        } else {
-            optionAPositions = await db
-                .select()
-                .from(schema.UserPosition)
-                .where(eq(schema.UserPosition.user, normalizedUser));
-        }
-
-        // Query Option B positions (transfer-based)
-        let optionBPositions;
-        if (assetParam) {
-            const normalizedAsset = assetParam.toLowerCase() as `0x${string}`;
-            optionBPositions = await db
-                .select()
-                .from(schema.UserPositionTransferBased)
-                .where(
-                    and(
-                        eq(schema.UserPositionTransferBased.user, normalizedUser),
-                        eq(schema.UserPositionTransferBased.asset, normalizedAsset)
-                    )
-                );
-        } else {
-            optionBPositions = await db
-                .select()
-                .from(schema.UserPositionTransferBased)
-                .where(eq(schema.UserPositionTransferBased.user, normalizedUser));
-        }
-
-        // Create a map of all assets from both options
-        const allAssets = new Set<string>();
-        optionAPositions.forEach(p => p.asset && allAssets.add(p.asset));
-        optionBPositions.forEach(p => p.asset && allAssets.add(p.asset));
-
-        // Build comparison for each asset
-        const comparisons = Array.from(allAssets).map(asset => {
-            const optionA = optionAPositions.find(p => p.asset === asset);
-            const optionB = optionBPositions.find(p => p.asset === asset);
-
-            const scaledBalanceA = optionA?.scaledBalance ?? 0n;
-            const scaledBalanceB = optionB?.scaledBalance ?? 0n;
-            const actualBalanceA = optionA?.actualBalance ?? 0n;
-            const actualBalanceB = optionB?.actualBalance ?? 0n;
-
-            const scaledDiff = scaledBalanceA - scaledBalanceB;
-            const actualDiff = actualBalanceA - actualBalanceB;
-
-            return {
-                asset,
-                optionA: optionA ? {
-                    scaledBalance: scaledBalanceA.toString(),
-                    actualBalance: actualBalanceA.toString(),
-                    totalDeposits: (optionA.totalDeposits ?? 0n).toString(),
-                    totalWithdrawals: (optionA.totalWithdrawals ?? 0n).toString(),
-                    lastUpdated: optionA.lastUpdated,
-                    lastLiquidityIndex: (optionA.lastLiquidityIndex ?? 0n).toString(),
-                } : null,
-                optionB: optionB ? {
-                    scaledBalance: scaledBalanceB.toString(),
-                    actualBalance: actualBalanceB.toString(),
-                    totalDeposits: (optionB.totalDeposits ?? 0n).toString(),
-                    totalWithdrawals: (optionB.totalWithdrawals ?? 0n).toString(),
-                    lastUpdated: optionB.lastUpdated,
-                    lastLiquidityIndex: (optionB.lastLiquidityIndex ?? 0n).toString(),
-                } : null,
-                difference: {
-                    scaledBalance: scaledDiff.toString(),
-                    actualBalance: actualDiff.toString(),
-                    // Positive means Option A has more, negative means Option B has more
-                    interpretation: scaledDiff === 0n
-                        ? "MATCH"
-                        : scaledDiff > 0n
-                            ? "Option A shows MORE balance (possible missing withdraw in Option A)"
-                            : "Option B shows MORE balance (possible missing deposit in Option A)",
-                },
-                hasDiscrepancy: scaledDiff !== 0n,
-            };
-        });
-
-        // Summary statistics
-        const totalAssets = comparisons.length;
-        const matchingAssets = comparisons.filter(c => !c.hasDiscrepancy).length;
-        const discrepantAssets = comparisons.filter(c => c.hasDiscrepancy).length;
-
-        return c.json({
-            user: normalizedUser,
-            summary: {
-                totalAssets,
-                matchingAssets,
-                discrepantAssets,
-                allMatch: discrepantAssets === 0,
-            },
-            comparisons: comparisons.sort((a, b) => {
-                // Sort discrepancies first
-                if (a.hasDiscrepancy && !b.hasDiscrepancy) return -1;
-                if (!a.hasDiscrepancy && b.hasDiscrepancy) return 1;
-                return a.asset.localeCompare(b.asset);
-            }),
-            explanation: {
-                optionA: "Proxy-based tracking: Uses hardcoded proxy addresses (WrappedTokenGateway, CollateralSwapper, LeverageHelper) to attribute Supply/Withdraw events to the correct user",
-                optionB: "Transfer-based tracking: Tracks ALL hToken balance changes via BalanceTransfer events (mints, burns, transfers)",
-                recommendation: "If Option B shows correct on-chain balances while Option A doesn't, consider switching to Option B or adding missing proxy addresses to Option A",
-            },
-        });
-
-    } catch (error) {
-        console.error("Error comparing position tracking:", error);
-        return c.json({ error: "Failed to compare position tracking" }, 500);
-    }
-});
-
-// Get detailed event history comparison for a specific user and asset
-app.get("/user/:address/compare-events/:asset", async (c) => {
-    const userAddress = c.req.param("address");
-    const assetAddress = c.req.param("asset");
-    const limitParam = c.req.query("limit");
-
-    if (!userAddress || !assetAddress) {
-        return c.json({ error: "User address and asset address are required" }, 400);
-    }
-
-    // Validate hex address format
-    if (!/^0x[a-fA-F0-9]{40}$/.test(userAddress) || !/^0x[a-fA-F0-9]{40}$/.test(assetAddress)) {
-        return c.json({ error: "Invalid address format" }, 400);
-    }
-
-    const limit = limitParam ? parseInt(limitParam) : 100;
-
-    try {
-        const normalizedUser = userAddress.toLowerCase() as `0x${string}`;
-        const normalizedAsset = assetAddress.toLowerCase() as `0x${string}`;
-
-        // Query Option A events
-        const optionAEvents = await db
-            .select()
-            .from(schema.UserBalanceEvent)
-            .where(
-                and(
-                    eq(schema.UserBalanceEvent.user, normalizedUser),
-                    eq(schema.UserBalanceEvent.asset, normalizedAsset)
-                )
-            )
-            .orderBy(desc(schema.UserBalanceEvent.timestamp))
-            .limit(limit);
-
-        // Query Option B events
-        const optionBEvents = await db
-            .select()
-            .from(schema.UserBalanceEventTransferBased)
-            .where(
-                and(
-                    eq(schema.UserBalanceEventTransferBased.user, normalizedUser),
-                    eq(schema.UserBalanceEventTransferBased.asset, normalizedAsset)
-                )
-            )
-            .orderBy(desc(schema.UserBalanceEventTransferBased.timestamp))
-            .limit(limit);
-
-        // Format events for comparison
-        const formatEvent = (e: any) => ({
-            txHash: e.txHash,
-            eventType: e.eventType,
-            timestamp: e.timestamp,
-            date: new Date(e.timestamp * 1000).toISOString(),
-            transactionAmount: e.transactionAmount.toString(),
-            scaledBalanceAfter: e.scaledBalance.toString(),
-            liquidityIndex: e.liquidityIndex.toString(),
-        });
-
-        return c.json({
-            user: normalizedUser,
-            asset: normalizedAsset,
-            optionA: {
-                name: "Proxy-based tracking",
-                eventCount: optionAEvents.length,
-                events: optionAEvents.map(formatEvent),
-            },
-            optionB: {
-                name: "Transfer-based tracking",
-                eventCount: optionBEvents.length,
-                events: optionBEvents.map(formatEvent),
-            },
-            analysis: {
-                eventCountDiff: optionAEvents.length - optionBEvents.length,
-                note: "Compare event types and transaction amounts to identify discrepancies. Option B may have additional 'transfer_in'/'transfer_out' events that Option A misses.",
-            },
-        });
-
-    } catch (error) {
-        console.error("Error comparing events:", error);
-        return c.json({ error: "Failed to compare events" }, 500);
-    }
-});
-
 // Get kHYPE staking yield for a user over a custom time period
 // kHYPE is Kinetiq's liquid staking token - exchange rate changes on reward/slashing events
 app.get("/user/:address/custom-period-yield-khype", async (c) => {
@@ -1179,39 +891,22 @@ app.get("/user/:address/custom-period-yield-khype", async (c) => {
 
         return c.json({
             user: result.user,
-            fromTimestamp: result.startTimestamp,
-            toTimestamp: result.endTimestamp,
-            fromDate: new Date(result.startTimestamp * 1000).toISOString(),
-            toDate: new Date(result.endTimestamp * 1000).toISOString(),
-            days: Math.round((result.endTimestamp - result.startTimestamp) / (24 * 60 * 60) * 100) / 100,
+            asset: result.asset,
+            fromTimestamp: result.fromTimestamp,
+            toTimestamp: result.toTimestamp,
+            fromDate: new Date(result.fromTimestamp * 1000).toISOString(),
+            toDate: new Date(result.toTimestamp * 1000).toISOString(),
+            days: Math.round((result.toTimestamp - result.fromTimestamp) / (24 * 60 * 60) * 100) / 100,
 
-            // Activity during period
-            activity: {
-                totalMinted: result.totalMinted,
-                totalBurned: result.totalBurned,
-                totalTransferredIn: result.totalTransferredIn,
-                totalTransferredOut: result.totalTransferredOut,
-            },
-
-            // Yield earned (in HYPE and USD)
+            // Yield earned from exchange rate appreciation (staking rewards)
             totalYieldEarned: result.totalYieldEarned,
             totalYieldEarnedUSD: result.totalYieldEarnedUSD,
 
-            // Current state at end of period
-            endingState: {
-                kHYPEBalance: result.endingKHYPEBalance,
-                exchangeRate: result.endingExchangeRate,
-                hypeValue: result.endingHYPEValue,
-                hypeValueUSD: result.endingHYPEValueUSD,
-            },
-
-            // HYPE price at end of period (8 decimals)
-            hypePrice: result.hypePrice,
-
             // Detailed breakdown by segment
-            segments: result.segments,
+            yieldSegments: result.yieldSegments,
 
             calculatedAt: Math.floor(Date.now() / 1000),
+            note: "This endpoint returns ONLY the staking yield from kHYPE exchange rate appreciation. Use /custom-period-yield for deposit/withdraw/borrow/repay activity and borrow costs. Add this yield to the kHYPE asset from that endpoint.",
         });
 
     } catch (error) {
@@ -1274,17 +969,27 @@ app.get("/user/:address/daily-yield-breakdown-khype", async (c) => {
         const { calculateKHYPEDailyYieldBreakdown } = await import("../helpers/kHYPE/yieldCalculations");
         const result = await calculateKHYPEDailyYieldBreakdown(context, userAddress, fromTimestamp, toTimestamp);
 
+        // kHYPE token address for easy mapping to core pool response
+        const KHYPE_TOKEN_ADDRESS = "0xB4E0dB23D8573990bF0A89e4a438B5b8E3f4f5E6".toLowerCase();
+
         return c.json({
             user: result.user,
+            asset: KHYPE_TOKEN_ADDRESS,
             fromTimestamp: result.fromTimestamp,
             toTimestamp: result.toTimestamp,
             fromDate: result.fromDate,
             toDate: result.toDate,
+            days: result.dailyBreakdown.length,
+
+            // Yield earned from exchange rate appreciation (staking rewards)
             totalYieldEarned: result.totalYieldEarned,
             totalYieldEarnedUSD: result.totalYieldEarnedUSD,
-            hypePrice: result.hypePrice,
+
+            // Daily breakdown
             dailyBreakdown: result.dailyBreakdown,
+
             calculatedAt: Math.floor(Date.now() / 1000),
+            note: "This endpoint returns ONLY the daily staking yield from kHYPE exchange rate appreciation. Use /custom-period-yield for deposit/withdraw/borrow/repay activity and borrow costs. Add this yield to the kHYPE asset from that endpoint.",
         });
 
     } catch (error) {
@@ -1347,10 +1052,14 @@ app.get("/user/:address/daily-portfolio-value-khype", async (c) => {
         const { calculateKHYPEDailyPortfolioValue } = await import("../helpers/kHYPE/yieldCalculations");
         const result = await calculateKHYPEDailyPortfolioValue(context, userAddress, fromTimestamp, toTimestamp);
 
+        // kHYPE token address for easy mapping to core pool response
+        const KHYPE_TOKEN_ADDRESS = "0xB4E0dB23D8573990bF0A89e4a438B5b8E3f4f5E6".toLowerCase();
+
         if (result.dailyPortfolioValues.length === 0) {
             const expectedDays = Math.ceil((toTimestamp - fromTimestamp) / (24 * 60 * 60));
             return c.json({
                 user: userAddress,
+                asset: KHYPE_TOKEN_ADDRESS,
                 fromTimestamp,
                 toTimestamp,
                 fromDate: new Date(fromTimestamp * 1000).toISOString(),
@@ -1364,6 +1073,7 @@ app.get("/user/:address/daily-portfolio-value-khype", async (c) => {
 
         return c.json({
             user: result.user,
+            asset: KHYPE_TOKEN_ADDRESS,
             fromTimestamp: result.fromTimestamp,
             toTimestamp: result.toTimestamp,
             fromDate: result.fromDate,
@@ -1440,39 +1150,21 @@ app.get("/user/:address/custom-period-yield-behype", async (c) => {
 
         return c.json({
             user: result.user,
-            fromTimestamp: result.startTimestamp,
-            toTimestamp: result.endTimestamp,
-            fromDate: new Date(result.startTimestamp * 1000).toISOString(),
-            toDate: new Date(result.endTimestamp * 1000).toISOString(),
-            days: Math.round((result.endTimestamp - result.startTimestamp) / (24 * 60 * 60) * 100) / 100,
+            asset: result.asset,
+            fromTimestamp: result.fromTimestamp,
+            toTimestamp: result.toTimestamp,
+            fromDate: new Date(result.fromTimestamp * 1000).toISOString(),
+            toDate: new Date(result.toTimestamp * 1000).toISOString(),
 
-            // Activity during period
-            activity: {
-                totalMinted: result.totalMinted,
-                totalBurned: result.totalBurned,
-                totalTransferredIn: result.totalTransferredIn,
-                totalTransferredOut: result.totalTransferredOut,
-            },
-
-            // Yield earned (in HYPE and USD)
+            // Yield earned from exchange rate appreciation (staking rewards)
             totalYieldEarned: result.totalYieldEarned,
             totalYieldEarnedUSD: result.totalYieldEarnedUSD,
 
-            // Current state at end of period
-            endingState: {
-                beHYPEBalance: result.endingBeHYPEBalance,
-                exchangeRate: result.endingExchangeRate,
-                hypeValue: result.endingHYPEValue,
-                hypeValueUSD: result.endingHYPEValueUSD,
-            },
-
-            // HYPE price at end of period (8 decimals)
-            hypePrice: result.hypePrice,
-
             // Detailed breakdown by segment
-            segments: result.segments,
+            yieldSegments: result.yieldSegments,
 
             calculatedAt: Math.floor(Date.now() / 1000),
+            note: "This endpoint returns ONLY the staking yield from beHYPE exchange rate appreciation. Use /custom-period-yield for deposit/withdraw/borrow/repay activity and borrow costs. Add this yield to the beHYPE asset from that endpoint.",
         });
 
     } catch (error) {
@@ -1535,10 +1227,14 @@ app.get("/user/:address/daily-portfolio-value-behype", async (c) => {
         const { calculateBeHYPEDailyPortfolioValue } = await import("../helpers/beHYPE/yieldCalculations");
         const result = await calculateBeHYPEDailyPortfolioValue(context, userAddress, fromTimestamp, toTimestamp);
 
+        // beHYPE token address for easy mapping to core pool response
+        const BEHYPE_TOKEN_ADDRESS = "0xd8FC8F0b03eBA61F64D08B0bef69d80916E5DdA9".toLowerCase();
+
         if (result.dailyPortfolioValues.length === 0) {
             const expectedDays = Math.ceil((toTimestamp - fromTimestamp) / (24 * 60 * 60));
             return c.json({
                 user: userAddress,
+                asset: BEHYPE_TOKEN_ADDRESS,
                 fromTimestamp,
                 toTimestamp,
                 fromDate: new Date(fromTimestamp * 1000).toISOString(),
@@ -1546,12 +1242,13 @@ app.get("/user/:address/daily-portfolio-value-behype", async (c) => {
                 days: expectedDays,
                 dailyPortfolioValues: [],
                 calculatedAt: Math.floor(Date.now() / 1000),
-                message: "No beHYPE positions found for this user during the specified period"
+                message: "No beHYPE pool positions found for this user during the specified period"
             });
         }
 
         return c.json({
             user: result.user,
+            asset: BEHYPE_TOKEN_ADDRESS,
             fromTimestamp: result.fromTimestamp,
             toTimestamp: result.toTimestamp,
             fromDate: result.fromDate,
@@ -1559,7 +1256,7 @@ app.get("/user/:address/daily-portfolio-value-behype", async (c) => {
             days: result.days,
             dailyPortfolioValues: result.dailyPortfolioValues,
             calculatedAt: Math.floor(Date.now() / 1000),
-            note: "Portfolio values represent beHYPE holdings at the END of each day (23:59:59 UTC). USD values are calculated using HYPE oracle prices. For partial days (current day), values are calculated at the toTimestamp."
+            note: "Portfolio values represent beHYPE pool positions (supplied to HyperLend) at the END of each day (23:59:59 UTC). USD values are calculated using HYPE oracle prices. For partial days (current day), values are calculated at the toTimestamp."
         });
 
     } catch (error) {
@@ -1622,23 +1319,294 @@ app.get("/user/:address/daily-yield-breakdown-behype", async (c) => {
         const { calculateBeHYPEDailyYieldBreakdown } = await import("../helpers/beHYPE/yieldCalculations");
         const result = await calculateBeHYPEDailyYieldBreakdown(context, userAddress, fromTimestamp, toTimestamp);
 
+        // beHYPE token address for easy mapping to core pool response
+        const BEHYPE_TOKEN_ADDRESS = "0xd8FC8F0b03eBA61F64D08B0bef69d80916E5DdA9".toLowerCase();
+
         return c.json({
             user: result.user,
+            asset: BEHYPE_TOKEN_ADDRESS,
             fromTimestamp: result.fromTimestamp,
             toTimestamp: result.toTimestamp,
             fromDate: result.fromDate,
             toDate: result.toDate,
+            days: result.dailyBreakdown.length,
+
+            // Yield earned from exchange rate appreciation (staking rewards)
             totalYieldEarned: result.totalYieldEarned,
             totalYieldEarnedUSD: result.totalYieldEarnedUSD,
-            hypePrice: result.hypePrice,
+
+            // Daily breakdown
             dailyBreakdown: result.dailyBreakdown,
+
             calculatedAt: Math.floor(Date.now() / 1000),
+            note: "This endpoint returns ONLY the daily staking yield from beHYPE exchange rate appreciation. Use /custom-period-yield for deposit/withdraw/borrow/repay activity and borrow costs. Add this yield to the beHYPE asset from that endpoint.",
         });
 
     } catch (error) {
         console.error("Error calculating beHYPE daily yield breakdown:", error);
         return c.json({
             error: "Failed to calculate beHYPE daily yield breakdown",
+            details: error instanceof Error ? error.message : String(error)
+        }, 500);
+    }
+});
+
+// ============================================================================
+// wstHYPE (Wrapped stHYPE) Endpoints
+// wstHYPE is a non-rebasing wrapper for stHYPE - balance stays constant but value
+// increases via assetsPerShare exchange rate on Rebase events.
+// NOTE: Unlike kHYPE/beHYPE which track pool positions, wstHYPE tracks WALLET balances
+// because wstHYPE is held directly in wallets, not supplied to HyperLend pool.
+// ============================================================================
+
+// Get wstHYPE staking yield for a user over a custom time period
+app.get("/user/:address/custom-period-yield-wsthype", async (c) => {
+    const userAddress = c.req.param("address");
+    const fromTimestampParam = c.req.query("fromTimestamp");
+    const toTimestampParam = c.req.query("toTimestamp");
+
+    if (!userAddress || !fromTimestampParam || !toTimestampParam) {
+        return c.json({error: "User address, fromTimestamp, and toTimestamp are required"}, 400);
+    }
+
+    // Validate hex address format
+    if (!/^0x[a-fA-F0-9]{40}$/.test(userAddress)) {
+        return c.json({error: "Invalid user address format"}, 400);
+    }
+
+    const fromTimestamp = parseInt(fromTimestampParam);
+    const toTimestamp = parseInt(toTimestampParam);
+
+    // Validate timestamps
+    if (isNaN(fromTimestamp) || isNaN(toTimestamp)) {
+        return c.json({error: "Invalid timestamp format. Must be Unix timestamps in seconds"}, 400);
+    }
+
+    if (fromTimestamp < 0 || toTimestamp < 0) {
+        return c.json({error: "Timestamps must be positive values"}, 400);
+    }
+
+    if (toTimestamp <= fromTimestamp) {
+        return c.json({error: "toTimestamp must be greater than fromTimestamp"}, 400);
+    }
+
+    // Validate reasonable time range (not more than 2 years)
+    const maxPeriodSeconds = 2 * 365 * 24 * 60 * 60; // 2 years
+    if (toTimestamp - fromTimestamp > maxPeriodSeconds) {
+        return c.json({error: "Time period cannot exceed 2 years"}, 400);
+    }
+
+    // Validate timestamps are not in the future (with 1 hour buffer for clock differences)
+    const currentTimestamp = Math.floor(Date.now() / 1000);
+    const futureBuffer = 3600; // 1 hour
+    if (toTimestamp > currentTimestamp + futureBuffer) {
+        return c.json({error: "toTimestamp cannot be in the future"}, 400);
+    }
+
+    try {
+        const context = {db};
+
+        const { calculateWstHYPECustomPeriodYield } = await import("../helpers/wstHYPE/yieldCalculations");
+        const result = await calculateWstHYPECustomPeriodYield(context, userAddress, fromTimestamp, toTimestamp);
+
+        return c.json({
+            user: result.user,
+            asset: result.asset,
+            fromTimestamp: result.fromTimestamp,
+            toTimestamp: result.toTimestamp,
+            fromDate: new Date(result.fromTimestamp * 1000).toISOString(),
+            toDate: new Date(result.toTimestamp * 1000).toISOString(),
+
+            // Yield earned from exchange rate appreciation (staking rewards)
+            totalYieldEarned: result.totalYieldEarned,
+            totalYieldEarnedUSD: result.totalYieldEarnedUSD,
+
+            // Detailed breakdown by segment
+            yieldSegments: result.yieldSegments,
+
+            calculatedAt: Math.floor(Date.now() / 1000),
+            note: "This endpoint returns the staking yield from wstHYPE exchange rate appreciation. wstHYPE is a non-rebasing wrapper for stHYPE - balance stays constant but value increases via assetsPerShare exchange rate. Unlike kHYPE/beHYPE, this tracks WALLET balances (not pool positions).",
+        });
+
+    } catch (error) {
+        console.error("Error calculating wstHYPE custom period yield:", error);
+        return c.json({
+            error: "Failed to calculate wstHYPE custom period yield data",
+            details: error instanceof Error ? error.message : String(error)
+        }, 500);
+    }
+});
+
+// Get wstHYPE daily yield breakdown for a user over a time period
+// Breaks down yield into complete 24-hour UTC days (midnight to midnight)
+app.get("/user/:address/daily-yield-breakdown-wsthype", async (c) => {
+    const userAddress = c.req.param("address");
+    const fromTimestampParam = c.req.query("fromTimestamp");
+    const toTimestampParam = c.req.query("toTimestamp");
+
+    if (!userAddress || !fromTimestampParam || !toTimestampParam) {
+        return c.json({error: "User address, fromTimestamp, and toTimestamp are required"}, 400);
+    }
+
+    // Validate hex address format
+    if (!/^0x[a-fA-F0-9]{40}$/.test(userAddress)) {
+        return c.json({error: "Invalid user address format"}, 400);
+    }
+
+    const fromTimestamp = parseInt(fromTimestampParam);
+    const toTimestamp = parseInt(toTimestampParam);
+
+    // Validate timestamps
+    if (isNaN(fromTimestamp) || isNaN(toTimestamp)) {
+        return c.json({error: "Invalid timestamp format. Must be Unix timestamps in seconds"}, 400);
+    }
+
+    if (fromTimestamp < 0 || toTimestamp < 0) {
+        return c.json({error: "Timestamps must be positive values"}, 400);
+    }
+
+    if (toTimestamp <= fromTimestamp) {
+        return c.json({error: "toTimestamp must be greater than fromTimestamp"}, 400);
+    }
+
+    // Validate reasonable time range (not more than 2 years)
+    const maxPeriodSeconds = 2 * 365 * 24 * 60 * 60; // 2 years
+    if (toTimestamp - fromTimestamp > maxPeriodSeconds) {
+        return c.json({error: "Time period cannot exceed 2 years"}, 400);
+    }
+
+    // Validate timestamps are not in the future (with 1 hour buffer for clock differences)
+    const currentTimestamp = Math.floor(Date.now() / 1000);
+    const futureBuffer = 3600; // 1 hour
+    if (toTimestamp > currentTimestamp + futureBuffer) {
+        return c.json({error: "toTimestamp cannot be in the future"}, 400);
+    }
+
+    try {
+        const context = {db};
+
+        const { calculateWstHYPEDailyYieldBreakdown } = await import("../helpers/wstHYPE/yieldCalculations");
+        const result = await calculateWstHYPEDailyYieldBreakdown(context, userAddress, fromTimestamp, toTimestamp);
+
+        // wstHYPE token address for easy mapping
+        const WSTHYPE_TOKEN_ADDRESS = "0x94e8396e0869c9F2200760aF63c94A00F2a0dB9D".toLowerCase();
+
+        return c.json({
+            user: result.user,
+            asset: WSTHYPE_TOKEN_ADDRESS,
+            fromTimestamp: result.fromTimestamp,
+            toTimestamp: result.toTimestamp,
+            fromDate: result.fromDate,
+            toDate: result.toDate,
+            days: result.dailyBreakdown.length,
+
+            // Yield earned from exchange rate appreciation (staking rewards)
+            totalYieldEarned: result.totalYieldEarned,
+            totalYieldEarnedUSD: result.totalYieldEarnedUSD,
+
+            // Daily breakdown
+            dailyBreakdown: result.dailyBreakdown,
+
+            calculatedAt: Math.floor(Date.now() / 1000),
+            note: "This endpoint returns the daily staking yield from wstHYPE exchange rate appreciation. wstHYPE is a non-rebasing wrapper for stHYPE - balance stays constant but value increases via assetsPerShare exchange rate. Unlike kHYPE/beHYPE, this tracks WALLET balances (not pool positions).",
+        });
+
+    } catch (error) {
+        console.error("Error calculating wstHYPE daily yield breakdown:", error);
+        return c.json({
+            error: "Failed to calculate wstHYPE daily yield breakdown",
+            details: error instanceof Error ? error.message : String(error)
+        }, 500);
+    }
+});
+
+// Get daily portfolio values for wstHYPE holdings
+// Portfolio Value = wstHYPE balance × exchange rate (in HYPE and USD)
+app.get("/user/:address/daily-portfolio-value-wsthype", async (c) => {
+    const userAddress = c.req.param("address");
+    const fromTimestampParam = c.req.query("fromTimestamp");
+    const toTimestampParam = c.req.query("toTimestamp");
+
+    if (!userAddress || !fromTimestampParam || !toTimestampParam) {
+        return c.json({error: "User address, fromTimestamp, and toTimestamp are required"}, 400);
+    }
+
+    // Validate hex address format
+    if (!/^0x[a-fA-F0-9]{40}$/.test(userAddress)) {
+        return c.json({error: "Invalid user address format"}, 400);
+    }
+
+    const fromTimestamp = parseInt(fromTimestampParam);
+    const toTimestamp = parseInt(toTimestampParam);
+
+    // Validate timestamps
+    if (isNaN(fromTimestamp) || isNaN(toTimestamp)) {
+        return c.json({error: "Invalid timestamp format. Must be Unix timestamps in seconds"}, 400);
+    }
+
+    if (fromTimestamp < 0 || toTimestamp < 0) {
+        return c.json({error: "Timestamps must be positive values"}, 400);
+    }
+
+    if (toTimestamp <= fromTimestamp) {
+        return c.json({error: "toTimestamp must be greater than fromTimestamp"}, 400);
+    }
+
+    // Validate reasonable time range (not more than 1 year for daily breakdown)
+    const maxPeriodSeconds = 365 * 24 * 60 * 60; // 1 year
+    if (toTimestamp - fromTimestamp > maxPeriodSeconds) {
+        return c.json({error: "Time period cannot exceed 1 year for daily breakdown"}, 400);
+    }
+
+    // Validate timestamps are not in the future (with 1 hour buffer for clock differences)
+    const currentTimestamp = Math.floor(Date.now() / 1000);
+    const futureBuffer = 3600; // 1 hour
+    if (toTimestamp > currentTimestamp + futureBuffer) {
+        return c.json({error: "toTimestamp cannot be in the future"}, 400);
+    }
+
+    try {
+        const context = {db};
+
+        const { calculateWstHYPEDailyPortfolioValue } = await import("../helpers/wstHYPE/yieldCalculations");
+        const result = await calculateWstHYPEDailyPortfolioValue(context, userAddress, fromTimestamp, toTimestamp);
+
+        // wstHYPE token address for easy mapping
+        const WSTHYPE_TOKEN_ADDRESS = "0x94e8396e0869c9F2200760aF63c94A00F2a0dB9D".toLowerCase();
+
+        if (result.dailyPortfolioValues.length === 0) {
+            const expectedDays = Math.ceil((toTimestamp - fromTimestamp) / (24 * 60 * 60));
+            return c.json({
+                user: userAddress,
+                asset: WSTHYPE_TOKEN_ADDRESS,
+                fromTimestamp,
+                toTimestamp,
+                fromDate: new Date(fromTimestamp * 1000).toISOString(),
+                toDate: new Date(toTimestamp * 1000).toISOString(),
+                days: expectedDays,
+                dailyPortfolioValues: [],
+                calculatedAt: Math.floor(Date.now() / 1000),
+                message: "No wstHYPE wallet holdings found for this user during the specified period"
+            });
+        }
+
+        return c.json({
+            user: result.user,
+            asset: WSTHYPE_TOKEN_ADDRESS,
+            fromTimestamp: result.fromTimestamp,
+            toTimestamp: result.toTimestamp,
+            fromDate: result.fromDate,
+            toDate: result.toDate,
+            days: result.days,
+            dailyPortfolioValues: result.dailyPortfolioValues,
+            calculatedAt: Math.floor(Date.now() / 1000),
+            note: "Portfolio values represent wstHYPE WALLET holdings at the END of each day (23:59:59 UTC). USD values are calculated using HYPE oracle prices. Unlike kHYPE/beHYPE, this tracks wallet balances (not pool positions)."
+        });
+
+    } catch (error) {
+        console.error("Error calculating wstHYPE daily portfolio values:", error);
+        return c.json({
+            error: "Failed to calculate wstHYPE daily portfolio values",
             details: error instanceof Error ? error.message : String(error)
         }, 500);
     }

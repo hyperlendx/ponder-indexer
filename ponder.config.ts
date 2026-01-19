@@ -10,12 +10,15 @@ import {IsolatedPairRegistry as IsolatedPairRegistryAbi} from "./abis/IsolatedPa
 import {UiDataProviderIsolatedAbi as UiDataProviderIsolatedAbi} from "./abis/UiDataProviderIsolatedAbi";
 
 // kHYPE (Kinetiq Liquid Staking) ABIs
-import {KHYPEAbi} from "./abis/KHYPEAbi";
 import {ValidatorManagerAbi} from "./abis/ValidatorManagerAbi";
+import {StakingAccountantAbi} from "./abis/StakingAccountantAbi";
 
 // beHYPE (Hyperlend Liquid Staking) ABIs
 import {BEHYPEAbi} from "./abis/BEHYPEAbi";
 import {StakingCoreAbi} from "./abis/StakingCoreAbi";
+
+// wstHYPE (Thunderhead Wrapped Staked HYPE) ABIs
+import {WSTHYPEAbi} from "./abis/WSTHYPEAbi";
 
 export default createConfig({
     chains: {
@@ -97,20 +100,12 @@ export default createConfig({
 
         // ============================================================================
         // kHYPE (Kinetiq Liquid Staking) Contracts
-        // Only track Transfer, RewardEventReported, SlashingEventReported
-        // Exchange rate is read directly from the StakingAccountant contract
+        // Track RewardEventReported and SlashingEventReported for exchange rate changes
+        // kHYPE pool positions are tracked via CorePool:Supply/Withdraw events
         // ============================================================================
 
-        // kHYPE Token - Track Transfer events for user balance changes (mint/burn/transfer)
-        KHYPE: {
-            abi: KHYPEAbi,
-            chain: "hyperEvm",
-            address: "0xfD739d4e423301CE9385c1fb8850539D657C296D",
-            startBlock: 7635400,
-        },
-
         // ValidatorManager - Track RewardEventReported and SlashingEventReported events
-        // These are the primary events that change the exchange rate
+        // These are the ONLY events that change the kHYPE exchange rate
         ValidatorManager: {
             abi: ValidatorManagerAbi,
             chain: "hyperEvm",
@@ -138,6 +133,20 @@ export default createConfig({
             chain: "hyperEvm",
             address: "0xCeaD893b162D38e714D82d06a7fe0b0dc3c38E0b",
             startBlock: 12965190,
+        },
+
+        // ============================================================================
+        // wstHYPE (Thunderhead Wrapped Staked HYPE) Contracts
+        // Track Transfer events for user balances and Rebase events for yield
+        // Exchange rate is assetsPerShare (HYPE per wstHYPE)
+        // ============================================================================
+
+        // wstHYPE Token - Track Transfer and Rebase events
+        WSTHYPE: {
+            abi: WSTHYPEAbi,
+            chain: "hyperEvm",
+            address: "0x94e8396e0869c9F2200760aF63c69F46D4F616F5",
+            startBlock: 3467418,
         },
     },
     blocks: {

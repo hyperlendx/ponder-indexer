@@ -11,8 +11,8 @@
  */
 
 export {
-    getKHYPEBalanceAtTimestamp,
-    getKHYPEBalanceEvents,
+    getKHYPEPoolBalanceAtTimestamp,
+    getKHYPEPoolBalanceEvents,
 } from "./balanceQueries";
 
 export {

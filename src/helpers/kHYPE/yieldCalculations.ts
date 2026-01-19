@@ -10,7 +10,7 @@
  * yield for each segment between balance changes.
  */
 
-import { getKHYPEBalanceAtTimestamp, getKHYPEBalanceEvents } from "./balanceQueries";
+import { getKHYPEPoolBalanceAtTimestamp, getKHYPEPoolBalanceEvents } from "./balanceQueries";
 import { getExchangeRateAtTimestamp } from "./exchangeRate";
 import { AssetPriceSnapshot } from "ponder:schema";
 import { eq, lte, desc, and } from "ponder";
@@ -93,36 +93,41 @@ export interface KHYPEYieldSegment {
 }
 
 /**
- * Result of custom period yield calculation
+ * Result of custom period yield calculation for kHYPE
+ *
+ * This is a simplified, yield-focused response that complements the core pool endpoint.
+ * The core pool endpoint (/custom-period-yield) returns kHYPE with correct deposit/withdraw/borrow/repay
+ * data and borrow costs, but yield = 0 (since liquidity index doesn't capture LST staking rewards).
+ *
+ * This endpoint returns ONLY the staking yield from exchange rate appreciation.
+ * Frontend should add this yield to the kHYPE row from the core pool response.
  */
 export interface KHYPECustomPeriodYieldResult {
     user: string;
-    startTimestamp: number;
-    endTimestamp: number;
+    asset: string;                  // kHYPE token address (for easy mapping to core pool response)
+    fromTimestamp: number;
+    toTimestamp: number;
 
-    // Activity during period
-    totalMinted: string;           // kHYPE received from staking HYPE
-    totalBurned: string;           // kHYPE burned from unstaking
-    totalTransferredIn: string;    // kHYPE received from transfers
-    totalTransferredOut: string;   // kHYPE sent via transfers
+    // Yield calculation (from exchange rate appreciation)
+    totalYieldEarned: string;       // Total yield earned during period (in HYPE terms)
+    totalYieldEarnedUSD: string;    // Total yield in USD
 
-    // Yield calculation
-    totalYieldEarned: string;      // Total HYPE yield earned during period
-    totalYieldEarnedUSD: string;   // Total yield in USD
-
-    // Current state (at endTimestamp)
-    endingKHYPEBalance: string;    // kHYPE balance at end of period
-    endingExchangeRate: string;    // Exchange rate at end of period
-    endingHYPEValue: string;       // HYPE value of kHYPE holdings at end
-    endingHYPEValueUSD: string;    // USD value of holdings at end
-    hypePrice: string;             // HYPE price at end of period (8 decimals)
-
-    // Detailed breakdown
-    segments: KHYPEYieldSegment[];
+    // Detailed breakdown by segment
+    yieldSegments: KHYPEYieldSegment[];
 }
 
+// kHYPE token address
+const KHYPE_TOKEN_ADDRESS = "0xB4E0dB23D8573990bF0A89e4a438B5b8E3f4f5E6".toLowerCase();
+
 /**
- * Calculate kHYPE yield for a user over a custom time period
+ * Calculate kHYPE staking yield for a user over a custom time period.
+ *
+ * This calculates ONLY the yield from exchange rate appreciation (staking rewards).
+ * It complements the core pool endpoint which handles deposits/withdrawals/borrows/repays
+ * and borrow costs, but returns yield = 0 for kHYPE.
+ *
+ * The yield is calculated based on the user's kHYPE pool balance (supplied to HyperLend),
+ * NOT their wallet balance.
  */
 export async function calculateKHYPECustomPeriodYield(
     context: any,
@@ -131,62 +136,36 @@ export async function calculateKHYPECustomPeriodYield(
     endTimestamp: number
 ): Promise<KHYPECustomPeriodYieldResult> {
     const normalizedUser = user.toLowerCase();
-    
-    // Get balance at start of period
-    const startBalance = await getKHYPEBalanceAtTimestamp(context, normalizedUser, startTimestamp);
-    
-    // Get all balance events during the period
-    const balanceEvents = await getKHYPEBalanceEvents(context, normalizedUser, startTimestamp, endTimestamp);
-    
-    // Get exchange rates at start and end
-    const endExchangeRate = await getExchangeRateAtTimestamp(context, endTimestamp);
-    
-    // Calculate activity metrics
-    let totalMinted = 0n;
-    let totalBurned = 0n;
-    let totalTransferredIn = 0n;
-    let totalTransferredOut = 0n;
-    
-    for (const event of balanceEvents) {
-        const amount = event.balanceChange > 0n ? event.balanceChange : -event.balanceChange;
-        switch (event.eventType) {
-            case "mint":
-                totalMinted += amount;
-                break;
-            case "burn":
-                totalBurned += amount;
-                break;
-            case "transfer_in":
-                totalTransferredIn += amount;
-                break;
-            case "transfer_out":
-                totalTransferredOut += amount;
-                break;
-        }
-    }
-    
+
+    // Get pool balance at start of period (scaled balance from UserBalanceEvent)
+    const startBalance = await getKHYPEPoolBalanceAtTimestamp(context, normalizedUser, startTimestamp);
+
+    // Get all pool balance events during the period
+    const balanceEvents = await getKHYPEPoolBalanceEvents(context, normalizedUser, startTimestamp, endTimestamp);
+
     // Build segments for yield calculation
     const segments: KHYPEYieldSegment[] = [];
     let totalYieldEarned = 0n;
-    
+    let totalYieldEarnedUSDSum = 0;
+
     // Create time points: start, each balance event, end
     interface TimePoint {
         timestamp: number;
         balance: bigint;
     }
-    
+
     const timePoints: TimePoint[] = [
         { timestamp: startTimestamp, balance: startBalance }
     ];
-    
+
     // Add balance events as time points (balance AFTER the event)
     for (const event of balanceEvents) {
         timePoints.push({
             timestamp: event.timestamp,
-            balance: event.balance,
+            balance: event.scaledBalance,
         });
     }
-    
+
     // Process each segment
     for (let i = 0; i < timePoints.length; i++) {
         const segmentStart = timePoints[i]!;
@@ -204,16 +183,19 @@ export async function calculateKHYPECustomPeriodYield(
         const segStartRate = await getExchangeRateAtTimestamp(context, segmentStart.timestamp);
         const segEndRate = await getExchangeRateAtTimestamp(context, segmentEnd.timestamp);
 
-        // Calculate HYPE values
+        // Calculate HYPE values (kHYPE balance * exchange rate = HYPE value)
         const startHYPEValue = (segmentStart.balance * segStartRate) / DECIMALS_18;
         const endHYPEValue = (segmentStart.balance * segEndRate) / DECIMALS_18;
 
         // Yield = balance × (endRate - startRate) / 1e18
+        // This represents the HYPE earned from exchange rate appreciation
         const segmentYield = (segmentStart.balance * (segEndRate - segStartRate)) / DECIMALS_18;
 
-        // Get HYPE price for this segment (use midpoint)
+        // Get HYPE price for this segment (use midpoint for more accurate USD value)
         const segmentMidpoint = Math.floor((segmentStart.timestamp + segmentEnd.timestamp) / 2);
         const hypePrice = await getHYPEPriceAtTimestamp(context, segmentMidpoint);
+
+        const segmentYieldUSD = calculateHYPEtoUSD(segmentYield, hypePrice);
 
         segments.push({
             startTimestamp: segmentStart.timestamp,
@@ -229,37 +211,22 @@ export async function calculateKHYPECustomPeriodYield(
             hypePrice: hypePrice.toString(),
             startHYPEValueUSD: calculateHYPEtoUSD(startHYPEValue, hypePrice),
             endHYPEValueUSD: calculateHYPEtoUSD(endHYPEValue, hypePrice),
-            yieldEarnedUSD: calculateHYPEtoUSD(segmentYield, hypePrice),
+            yieldEarnedUSD: segmentYieldUSD,
             durationSeconds: segmentEnd.timestamp - segmentStart.timestamp,
         });
 
         totalYieldEarned += segmentYield;
+        totalYieldEarnedUSDSum += parseFloat(segmentYieldUSD);
     }
-
-    // Get ending balance and HYPE price at end
-    const lastEvent = balanceEvents[balanceEvents.length - 1];
-    const endingBalance = lastEvent !== undefined
-        ? lastEvent.balance
-        : startBalance;
-    const endingHYPEValue = (endingBalance * endExchangeRate) / DECIMALS_18;
-    const endHypePrice = await getHYPEPriceAtTimestamp(context, endTimestamp);
 
     return {
         user: normalizedUser,
-        startTimestamp,
-        endTimestamp,
-        totalMinted: totalMinted.toString(),
-        totalBurned: totalBurned.toString(),
-        totalTransferredIn: totalTransferredIn.toString(),
-        totalTransferredOut: totalTransferredOut.toString(),
+        asset: KHYPE_TOKEN_ADDRESS,
+        fromTimestamp: startTimestamp,
+        toTimestamp: endTimestamp,
         totalYieldEarned: totalYieldEarned.toString(),
-        totalYieldEarnedUSD: calculateHYPEtoUSD(totalYieldEarned, endHypePrice),
-        endingKHYPEBalance: endingBalance.toString(),
-        endingExchangeRate: endExchangeRate.toString(),
-        endingHYPEValue: endingHYPEValue.toString(),
-        endingHYPEValueUSD: calculateHYPEtoUSD(endingHYPEValue, endHypePrice),
-        hypePrice: endHypePrice.toString(),
-        segments,
+        totalYieldEarnedUSD: totalYieldEarnedUSDSum.toFixed(4),
+        yieldSegments: segments,
     };
 }
 
@@ -396,15 +363,21 @@ export async function calculateKHYPEDailyYieldBreakdown(
     const effectiveToTimestamp = Math.min(toTimestamp, currentTimestamp);
 
     // Get balance at the start of the period
-    const startBalance = await getKHYPEBalanceAtTimestamp(context, normalizedUser, fromTimestamp);
+    const startBalance = await getKHYPEPoolBalanceAtTimestamp(context, normalizedUser, fromTimestamp);
 
     // Get all balance events during the entire period
-    const balanceEvents = await getKHYPEBalanceEvents(
+    const rawBalanceEvents = await getKHYPEPoolBalanceEvents(
         context,
         normalizedUser,
         fromTimestamp,
         effectiveToTimestamp
     );
+
+    // Map to the format expected by calculateSegmentYield
+    const balanceEvents = rawBalanceEvents.map(e => ({
+        timestamp: e.timestamp,
+        balance: e.scaledBalance,
+    }));
 
     // Build daily breakdown
     const dailyBreakdown: KHYPEDailyYield[] = [];
@@ -631,15 +604,21 @@ export async function calculateKHYPEDailyPortfolioValue(
     const effectiveToTimestamp = Math.min(toTimestamp, currentTimestamp);
 
     // Get balance at the start of the period
-    const startBalance = await getKHYPEBalanceAtTimestamp(context, normalizedUser, fromTimestamp);
+    const startBalance = await getKHYPEPoolBalanceAtTimestamp(context, normalizedUser, fromTimestamp);
 
     // Get all balance events during the entire period
-    const balanceEvents = await getKHYPEBalanceEvents(
+    const rawBalanceEvents = await getKHYPEPoolBalanceEvents(
         context,
         normalizedUser,
         fromTimestamp,
         effectiveToTimestamp
     );
+
+    // Map to simpler format for internal use
+    const balanceEvents = rawBalanceEvents.map(e => ({
+        timestamp: e.timestamp,
+        balance: e.scaledBalance,
+    }));
 
     // Calculate day boundaries
     const fromDate = new Date(fromTimestamp * 1000);

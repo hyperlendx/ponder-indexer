@@ -1,25 +1,34 @@
 /**
- * kHYPE Balance Query Functions
- * 
- * Functions for querying user kHYPE balances at specific timestamps
- * and retrieving balance events for a time period.
+ * kHYPE Pool Position Query Functions
+ *
+ * Functions for querying user kHYPE pool positions (supplies/withdrawals to HyperLend)
+ * at specific timestamps and retrieving balance events for a time period.
+ *
+ * NOTE: This tracks kHYPE supplied to the HyperLend pool, NOT wallet balances.
+ * Yield is calculated based on pool positions and exchange rate changes.
+ *
+ * Uses the existing UserBalanceEvent and UserPosition tables filtered by kHYPE asset address.
  */
 
-import { KHYPEBalanceEvent, UserKHYPEPosition } from "ponder:schema";
+import { UserBalanceEvent, UserPosition } from "ponder:schema";
 import { eq, and, lte, gte, desc, asc } from "ponder";
+import { getExchangeRateAtTimestamp } from "./exchangeRate";
+
+// kHYPE token address
+const KHYPE_TOKEN_ADDRESS = "0xfD739d4e423301CE9385c1fb8850539D657C296D".toLowerCase() as `0x${string}`;
 
 /**
- * Get user's kHYPE balance at a specific timestamp
- * 
- * Finds the most recent KHYPEBalanceEvent at or before the target timestamp
- * and returns the balance from that event.
- * 
+ * Get user's kHYPE pool balance at a specific timestamp
+ *
+ * Finds the most recent UserBalanceEvent for kHYPE at or before the target timestamp
+ * and returns the scaled balance from that event.
+ *
  * @param context - Ponder context with database access
  * @param user - User address
  * @param timestamp - Target timestamp
- * @returns User's kHYPE balance at the timestamp (0 if no events found)
+ * @returns User's kHYPE scaled balance in pool at the timestamp (0 if no events found)
  */
-export async function getKHYPEBalanceAtTimestamp(
+export async function getKHYPEPoolBalanceAtTimestamp(
     context: any,
     user: string,
     timestamp: number
@@ -30,37 +39,38 @@ export async function getKHYPEBalanceAtTimestamp(
     try {
         const events = await dbQuery
             .select()
-            .from(KHYPEBalanceEvent)
+            .from(UserBalanceEvent)
             .where(
                 and(
-                    eq(KHYPEBalanceEvent.user, user.toLowerCase() as `0x${string}`),
-                    lte(KHYPEBalanceEvent.timestamp, timestamp)
+                    eq(UserBalanceEvent.user, user.toLowerCase() as `0x${string}`),
+                    eq(UserBalanceEvent.asset, KHYPE_TOKEN_ADDRESS),
+                    lte(UserBalanceEvent.timestamp, timestamp)
                 )
             )
-            .orderBy(desc(KHYPEBalanceEvent.timestamp), desc(KHYPEBalanceEvent.logIndex))
+            .orderBy(desc(UserBalanceEvent.timestamp))
             .limit(1);
 
         if (events.length === 0) {
             return 0n;
         }
 
-        return BigInt(events[0].balance);
+        return BigInt(events[0].scaledBalance);
     } catch (error) {
-        console.error(`[kHYPE] Error getting balance at timestamp for user ${user}:`, error);
+        console.error(`[kHYPE] Error getting pool balance at timestamp for user ${user}:`, error);
         return 0n;
     }
 }
 
 /**
- * Get all kHYPE balance events for a user within a time period
- * 
+ * Get all kHYPE pool balance events for a user within a time period
+ *
  * @param context - Ponder context with database access
  * @param user - User address
  * @param startTimestamp - Start of period (inclusive)
  * @param endTimestamp - End of period (inclusive)
- * @returns Array of balance events sorted by timestamp ascending
+ * @returns Array of pool balance events sorted by timestamp ascending
  */
-export async function getKHYPEBalanceEvents(
+export async function getKHYPEPoolBalanceEvents(
     context: any,
     user: string,
     startTimestamp: number,
@@ -69,13 +79,12 @@ export async function getKHYPEBalanceEvents(
     id: string;
     txHash: string;
     user: string;
-    balance: bigint;
+    scaledBalance: bigint;
     balanceChange: bigint;
     eventType: string;
-    counterparty: string;
     timestamp: number;
     blockNumber: bigint;
-    logIndex: number;
+    exchangeRate: bigint;
 }>> {
     const { db } = context;
     const dbQuery = db.sql || db;
@@ -83,72 +92,74 @@ export async function getKHYPEBalanceEvents(
     try {
         const events = await dbQuery
             .select()
-            .from(KHYPEBalanceEvent)
+            .from(UserBalanceEvent)
             .where(
                 and(
-                    eq(KHYPEBalanceEvent.user, user.toLowerCase() as `0x${string}`),
-                    gte(KHYPEBalanceEvent.timestamp, startTimestamp),
-                    lte(KHYPEBalanceEvent.timestamp, endTimestamp)
+                    eq(UserBalanceEvent.user, user.toLowerCase() as `0x${string}`),
+                    eq(UserBalanceEvent.asset, KHYPE_TOKEN_ADDRESS),
+                    gte(UserBalanceEvent.timestamp, startTimestamp),
+                    lte(UserBalanceEvent.timestamp, endTimestamp)
                 )
             )
-            .orderBy(asc(KHYPEBalanceEvent.timestamp), asc(KHYPEBalanceEvent.logIndex));
+            .orderBy(asc(UserBalanceEvent.timestamp));
 
-        return events.map((e: any) => ({
-            id: e.id,
-            txHash: e.txHash,
-            user: e.user,
-            balance: BigInt(e.balance),
-            balanceChange: BigInt(e.balanceChange),
-            eventType: e.eventType,
-            counterparty: e.counterparty,
-            timestamp: e.timestamp,
-            blockNumber: BigInt(e.blockNumber),
-            logIndex: e.logIndex,
+        // Map events and fetch exchange rate for each
+        const mappedEvents = await Promise.all(events.map(async (e: any) => {
+            const exchangeRate = await getExchangeRateAtTimestamp(context, e.timestamp);
+            return {
+                id: e.id,
+                txHash: e.txHash,
+                user: e.user,
+                scaledBalance: BigInt(e.scaledBalance),
+                balanceChange: BigInt(e.transactionAmount),
+                eventType: e.eventType,
+                timestamp: e.timestamp,
+                blockNumber: BigInt(e.blockNumber),
+                exchangeRate: exchangeRate,
+            };
         }));
+
+        return mappedEvents;
     } catch (error) {
-        console.error(`[kHYPE] Error getting balance events for user ${user}:`, error);
+        console.error(`[kHYPE] Error getting pool balance events for user ${user}:`, error);
         return [];
     }
 }
 
 /**
- * Get current kHYPE position for a user
- * 
+ * Get current kHYPE pool position for a user
+ *
  * @param context - Ponder context with database access
  * @param user - User address
- * @returns User's current kHYPE position or null if not found
+ * @returns User's current kHYPE pool position or null if not found
  */
-export async function getKHYPEPosition(
+export async function getKHYPEPoolPosition(
     context: any,
     user: string
 ): Promise<{
-    balance: bigint;
-    totalMinted: bigint;
-    totalBurned: bigint;
-    totalTransferredIn: bigint;
-    totalTransferredOut: bigint;
+    scaledBalance: bigint;
+    totalSupplied: bigint;
+    totalWithdrawn: bigint;
     lastUpdated: number;
 } | null> {
     const { db } = context;
+    const positionId = `${user.toLowerCase()}_${KHYPE_TOKEN_ADDRESS}`;
 
     try {
-        const position = await db.find(UserKHYPEPosition, { id: user.toLowerCase() as `0x${string}` });
-        
+        const position = await db.find(UserPosition, { id: positionId });
+
         if (!position) {
             return null;
         }
 
         return {
-            balance: BigInt(position.balance),
-            totalMinted: BigInt(position.totalMinted),
-            totalBurned: BigInt(position.totalBurned),
-            totalTransferredIn: BigInt(position.totalTransferredIn),
-            totalTransferredOut: BigInt(position.totalTransferredOut),
+            scaledBalance: BigInt(position.scaledBalance),
+            totalSupplied: BigInt(position.totalDeposits),
+            totalWithdrawn: BigInt(position.totalWithdrawals),
             lastUpdated: position.lastUpdated,
         };
     } catch (error) {
-        console.error(`[kHYPE] Error getting position for user ${user}:`, error);
+        console.error(`[kHYPE] Error getting pool position for user ${user}:`, error);
         return null;
     }
 }
-

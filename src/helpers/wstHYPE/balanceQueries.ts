@@ -1,34 +1,34 @@
 /**
- * beHYPE Pool Position Query Functions
+ * wstHYPE Pool Position Query Functions
  *
- * Functions for querying user beHYPE pool positions (supplies/withdrawals to HyperLend)
+ * Functions for querying user wstHYPE pool positions (supplies/withdrawals to HyperLend)
  * at specific timestamps and retrieving balance events for a time period.
  *
- * NOTE: This tracks beHYPE supplied to the HyperLend pool, NOT wallet balances.
+ * NOTE: This tracks wstHYPE supplied to the HyperLend pool, NOT wallet balances.
  * Yield is calculated based on pool positions and exchange rate changes.
  *
- * Uses the existing UserBalanceEvent and UserPosition tables filtered by beHYPE asset address.
+ * Uses the existing UserBalanceEvent and UserPosition tables filtered by wstHYPE asset address.
  */
 
 import { UserBalanceEvent, UserPosition } from "ponder:schema";
 import { eq, and, lte, gte, desc, asc } from "ponder";
-import { getBeHYPEExchangeRateAtTimestamp } from "./exchangeRate";
+import { getWstHYPEExchangeRateAtTimestamp } from "./exchangeRate";
 
-// beHYPE token address
-const BEHYPE_TOKEN_ADDRESS = "0xd8FC8F0b03eBA61F64D08B0bef69d80916E5DdA9".toLowerCase() as `0x${string}`;
+// wstHYPE token address
+const WSTHYPE_TOKEN_ADDRESS = "0x94e8396e0869c9F2200760aF63c94A00F2a0dB9D".toLowerCase() as `0x${string}`;
 
 /**
- * Get user's beHYPE pool balance (scaled balance) at a specific timestamp
+ * Get user's wstHYPE pool balance (scaled balance) at a specific timestamp
  *
- * Finds the most recent UserBalanceEvent for beHYPE at or before the target timestamp
+ * Finds the most recent UserBalanceEvent for wstHYPE at or before the target timestamp
  * and returns the scaled balance from that event.
  *
  * @param context - Ponder context with database access
  * @param user - User address
  * @param timestamp - Target timestamp
- * @returns User's beHYPE scaled balance at the timestamp (0 if no events found)
+ * @returns User's wstHYPE scaled balance at the timestamp (0 if no events found)
  */
-export async function getBeHYPEPoolBalanceAtTimestamp(
+export async function getWstHYPEBalanceAtTimestamp(
     context: any,
     user: string,
     timestamp: number
@@ -43,7 +43,7 @@ export async function getBeHYPEPoolBalanceAtTimestamp(
             .where(
                 and(
                     eq(UserBalanceEvent.user, user.toLowerCase() as `0x${string}`),
-                    eq(UserBalanceEvent.asset, BEHYPE_TOKEN_ADDRESS),
+                    eq(UserBalanceEvent.asset, WSTHYPE_TOKEN_ADDRESS),
                     lte(UserBalanceEvent.timestamp, timestamp)
                 )
             )
@@ -56,13 +56,13 @@ export async function getBeHYPEPoolBalanceAtTimestamp(
 
         return BigInt(events[0].scaledBalance);
     } catch (error) {
-        console.error(`[beHYPE] Error getting pool balance at timestamp for user ${user}:`, error);
+        console.error(`[wstHYPE] Error getting pool balance at timestamp for user ${user}:`, error);
         return 0n;
     }
 }
 
 /**
- * Get all beHYPE pool balance events for a user within a time period
+ * Get all wstHYPE pool balance events for a user within a time period
  *
  * @param context - Ponder context with database access
  * @param user - User address
@@ -70,7 +70,7 @@ export async function getBeHYPEPoolBalanceAtTimestamp(
  * @param endTimestamp - End of period (inclusive)
  * @returns Array of pool balance events sorted by timestamp ascending
  */
-export async function getBeHYPEPoolBalanceEvents(
+export async function getWstHYPEBalanceEvents(
     context: any,
     user: string,
     startTimestamp: number,
@@ -96,7 +96,7 @@ export async function getBeHYPEPoolBalanceEvents(
             .where(
                 and(
                     eq(UserBalanceEvent.user, user.toLowerCase() as `0x${string}`),
-                    eq(UserBalanceEvent.asset, BEHYPE_TOKEN_ADDRESS),
+                    eq(UserBalanceEvent.asset, WSTHYPE_TOKEN_ADDRESS),
                     gte(UserBalanceEvent.timestamp, startTimestamp),
                     lte(UserBalanceEvent.timestamp, endTimestamp)
                 )
@@ -105,7 +105,7 @@ export async function getBeHYPEPoolBalanceEvents(
 
         // Map events and fetch exchange rate for each
         const mappedEvents = await Promise.all(events.map(async (e: any) => {
-            const exchangeRate = await getBeHYPEExchangeRateAtTimestamp(context, e.timestamp);
+            const exchangeRate = await getWstHYPEExchangeRateAtTimestamp(context, e.timestamp);
             return {
                 id: e.id,
                 txHash: e.txHash,
@@ -121,19 +121,19 @@ export async function getBeHYPEPoolBalanceEvents(
 
         return mappedEvents;
     } catch (error) {
-        console.error(`[beHYPE] Error getting pool balance events for user ${user}:`, error);
+        console.error(`[wstHYPE] Error getting pool balance events for user ${user}:`, error);
         return [];
     }
 }
 
 /**
- * Get current beHYPE pool position for a user
+ * Get current wstHYPE pool position for a user
  *
  * @param context - Ponder context with database access
  * @param user - User address
- * @returns User's current beHYPE pool position or null if not found
+ * @returns User's current wstHYPE pool position or null if not found
  */
-export async function getBeHYPEPoolPosition(
+export async function getWstHYPEPosition(
     context: any,
     user: string
 ): Promise<{
@@ -143,7 +143,7 @@ export async function getBeHYPEPoolPosition(
     const { db } = context;
 
     try {
-        const positionId = `${user.toLowerCase()}-${BEHYPE_TOKEN_ADDRESS}`;
+        const positionId = `${user.toLowerCase()}-${WSTHYPE_TOKEN_ADDRESS}`;
         const position = await db.find(UserPosition, { id: positionId });
 
         if (!position) {
@@ -155,7 +155,7 @@ export async function getBeHYPEPoolPosition(
             lastUpdated: position.lastUpdated,
         };
     } catch (error) {
-        console.error(`[beHYPE] Error getting pool position for user ${user}:`, error);
+        console.error(`[wstHYPE] Error getting pool position for user ${user}:`, error);
         return null;
     }
 }

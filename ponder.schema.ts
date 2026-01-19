@@ -1,26 +1,5 @@
 import { onchainTable, index } from "ponder";
 
-// export const UserCore = onchainTable("user", (t) => ({
-//     id: t.text().primaryKey(), // User address
-//     totalDeposits: t.bigint().default(0n), // Cumulative deposits across all reserves
-//     totalBorrows: t.bigint().default(0n), // Cumulative borrows across all reserves
-//     totalRepayments: t.bigint().default(0n), // Cumulative repayments across all reserves
-//     totalWithdrawals: t.bigint().default(0n), // Cumulative withdrawals across all reserves
-//     liquidationCount: t.integer().default(0), // Number of liquidations
-// }));
-
-// export const UserReserveCore = onchainTable("user_reserve", (t) => ({
-//     id: t.text().primaryKey(), // Unique ID combining user and reserve (e.g., `${user}_${reserve}`)
-//     user: t.hex(), // User address
-//     reserve: t.hex(), // Reserve address
-//     currentATokenBalance: t.bigint().default(0n), // Current balance of aTokens for the user in this reserve
-//     currentDebt: t.bigint().default(0n), // Current debt of the user in this reserve
-//     totalDeposits: t.bigint().default(0n), // Cumulative deposits in this reserve
-//     totalBorrows: t.bigint().default(0n), // Cumulative borrows in this reserve
-//     totalRepayments: t.bigint().default(0n), // Cumulative repayments in this reserve
-//     totalWithdrawals: t.bigint().default(0n), // Cumulative withdrawals in this reserve
-// }));
-
 // User entities for tracking current deposit balances
 export const User = onchainTable("user", (t) => ({
     id: t.hex().primaryKey(), // User address
@@ -672,32 +651,6 @@ export const UserPosition = onchainTable(
     })
 );
 
-// Store pre-calculated monthly interest earnings
-export const UserMonthlyInterest = onchainTable(
-    "user_monthly_interest",
-    (t) => ({
-        id: t.text().primaryKey(), // ${user}_${asset}_${year}_${month}
-        user: t.hex(),
-        asset: t.hex(),
-        year: t.integer(),
-        month: t.integer(), // 1-12
-        interestEarned: t.bigint(), // Interest earned in underlying asset
-        startScaledBalance: t.bigint(),
-        endScaledBalance: t.bigint(),
-        startLiquidityIndex: t.bigint(),
-        endLiquidityIndex: t.bigint(),
-        netDeposits: t.bigint(), // Net deposits during the month
-        calculatedAt: t.integer(), // Timestamp when calculation was performed
-    }),
-    (table) => ({
-        userIdx: index().on(table.user),
-        assetIdx: index().on(table.asset),
-        userAssetIdx: index().on(table.user, table.asset),
-        yearMonthIdx: index().on(table.year, table.month),
-        userYearMonthIdx: index().on(table.user, table.year, table.month),
-    })
-);
-
 // Store periodic oracle price snapshots for all assets
 export const AssetPriceSnapshot = onchainTable(
     "asset_price_snapshot",
@@ -758,106 +711,15 @@ export const IsolatedPairPriceSnapshot = onchainTable(
 );
 
 // ============================================================================
-// OPTION B: Transfer-based position tracking (experimental)
-// These tables track positions based on hToken transfers instead of proxy address attribution
-// This is more robust as it handles ALL proxy contracts and direct user-to-user transfers
-// ============================================================================
-
-// Store user balance events for Option B (transfer-based tracking)
-export const UserBalanceEventTransferBased = onchainTable(
-    "user_balance_event_transfer_based",
-    (t) => ({
-        id: t.text().primaryKey(),
-        txHash: t.hex(),
-        user: t.hex(),
-        asset: t.hex(),
-        scaledBalance: t.bigint(), // Total balance after transaction
-        transactionAmount: t.bigint(), // Actual transaction amount (scaled)
-        eventType: t.text(), // 'deposit', 'withdraw', 'transfer_in', 'transfer_out'
-        timestamp: t.integer(),
-        blockNumber: t.bigint(),
-        liquidityIndex: t.bigint(),
-        assetPrice: t.bigint(), // Oracle price of the asset at the time of the event (8 decimals precision)
-    }),
-    (table) => ({
-        userIdx: index().on(table.user),
-        assetIdx: index().on(table.asset),
-        userAssetIdx: index().on(table.user, table.asset),
-        timestampIdx: index().on(table.timestamp),
-        eventTypeIdx: index().on(table.eventType),
-        userAssetTimestampIdx: index().on(table.user, table.asset, table.timestamp),
-    })
-);
-
-// Store current user positions for Option B (transfer-based tracking)
-export const UserPositionTransferBased = onchainTable(
-    "user_position_transfer_based",
-    (t) => ({
-        id: t.text().primaryKey(), // ${user}_${asset}
-        user: t.hex(),
-        asset: t.hex(),
-        scaledBalance: t.bigint(),
-        actualBalance: t.bigint(),
-        totalDeposits: t.bigint(), // Cumulative deposits in underlying asset
-        totalWithdrawals: t.bigint(), // Cumulative withdrawals in underlying asset
-        lastUpdated: t.integer(),
-        lastLiquidityIndex: t.bigint(),
-    }),
-    (table) => ({
-        userIdx: index().on(table.user),
-        assetIdx: index().on(table.asset),
-        userAssetIdx: index().on(table.user, table.asset),
-        lastUpdatedIdx: index().on(table.lastUpdated),
-    })
-);
-
-// ============================================================================
 // kHYPE STAKING YIELD TRACKING
-// Track kHYPE (Kinetiq Liquid Staking Token) balances and exchange rates
+// Track kHYPE (Kinetiq Liquid Staking Token) exchange rate changes
 // Exchange Rate = (totalStaked + totalRewards - totalClaimed - totalSlashing) / totalKHYPESupply
+//
+// NOTE: kHYPE pool positions (supply/withdraw) are tracked via the existing
+// UserPosition and UserBalanceEvent tables filtered by asset = kHYPE address.
+// Only exchange rate snapshots need separate tracking since they come from
+// ValidatorManager events, not CorePool events.
 // ============================================================================
-
-// Store kHYPE balance events (transfers, mints, burns)
-export const KHYPEBalanceEvent = onchainTable(
-    "khype_balance_event",
-    (t) => ({
-        id: t.text().primaryKey(),
-        txHash: t.hex(),
-        user: t.hex(),
-        balance: t.bigint(),              // User's kHYPE balance after this event (18 decimals)
-        balanceChange: t.bigint(),        // Amount changed (positive for receives, negative for sends)
-        eventType: t.text(),              // 'mint', 'burn', 'transfer_in', 'transfer_out'
-        counterparty: t.hex(),            // The other address in the transfer (from or to)
-        timestamp: t.integer(),
-        blockNumber: t.bigint(),
-        logIndex: t.integer(),            // For ordering events within same block
-    }),
-    (table) => ({
-        userIdx: index().on(table.user),
-        timestampIdx: index().on(table.timestamp),
-        userTimestampIdx: index().on(table.user, table.timestamp),
-        eventTypeIdx: index().on(table.eventType),
-        blockNumberIdx: index().on(table.blockNumber),
-    })
-);
-
-// Store current kHYPE user positions
-export const UserKHYPEPosition = onchainTable(
-    "user_khype_position",
-    (t) => ({
-        id: t.hex().primaryKey(),         // user address
-        balance: t.bigint(),              // Current kHYPE balance (18 decimals)
-        totalMinted: t.bigint(),          // Cumulative kHYPE received from minting (staking HYPE)
-        totalBurned: t.bigint(),          // Cumulative kHYPE burned (unstaking)
-        totalTransferredIn: t.bigint(),   // Cumulative kHYPE received from transfers
-        totalTransferredOut: t.bigint(),  // Cumulative kHYPE sent via transfers
-        lastUpdated: t.integer(),         // Timestamp of last update
-    }),
-    (table) => ({
-        balanceIdx: index().on(table.balance),
-        lastUpdatedIdx: index().on(table.lastUpdated),
-    })
-);
 
 // Store exchange rate snapshots when rate-changing events occur
 // Exchange rate is read directly from StakingAccountant.kHYPEToHYPE(1e18)
@@ -972,6 +834,74 @@ export const BeHYPEExchangeRateSnapshot = onchainTable(
         oldExchangeRate: t.bigint(),      // Previous exchange rate (18 decimals)
         newExchangeRate: t.bigint(),      // New exchange rate (18 decimals) - HYPE per beHYPE
         yearlyRateInBps: t.integer(),     // Annualized rate change in basis points
+        timestamp: t.integer(),
+        blockNumber: t.bigint(),
+        logIndex: t.integer(),
+        txHash: t.hex(),
+    }),
+    (table) => ({
+        timestampIdx: index().on(table.timestamp),
+        blockNumberIdx: index().on(table.blockNumber),
+    })
+);
+
+// ============================================================================
+// wstHYPE (Thunderhead Wrapped Staked HYPE) Schema Tables
+// Non-rebasing wrapper for stHYPE - balance stays constant, value increases via exchange rate
+// Exchange rate changes on Rebase events (assetsPerShare increases)
+// ============================================================================
+
+// Store wstHYPE balance events (transfers, mints, burns)
+export const WstHYPEBalanceEvent = onchainTable(
+    "wsthype_balance_event",
+    (t) => ({
+        id: t.text().primaryKey(),
+        txHash: t.hex(),
+        user: t.hex(),
+        balance: t.bigint(),              // User's wstHYPE balance after this event (18 decimals)
+        balanceChange: t.bigint(),        // Amount changed (positive for receives, negative for sends)
+        eventType: t.text(),              // 'mint', 'burn', 'transfer_in', 'transfer_out'
+        counterparty: t.hex(),            // The other address in the transfer (from or to)
+        timestamp: t.integer(),
+        blockNumber: t.bigint(),
+        logIndex: t.integer(),
+    }),
+    (table) => ({
+        userIdx: index().on(table.user),
+        timestampIdx: index().on(table.timestamp),
+        userTimestampIdx: index().on(table.user, table.timestamp),
+        eventTypeIdx: index().on(table.eventType),
+    })
+);
+
+// Store current wstHYPE user positions
+export const UserWstHYPEPosition = onchainTable(
+    "user_wsthype_position",
+    (t) => ({
+        id: t.hex().primaryKey(),         // user address
+        balance: t.bigint(),              // Current wstHYPE balance (18 decimals)
+        totalMinted: t.bigint(),          // Cumulative wstHYPE received from minting (wrapping stHYPE)
+        totalBurned: t.bigint(),          // Cumulative wstHYPE burned (unwrapping)
+        totalTransferredIn: t.bigint(),   // Cumulative wstHYPE received from transfers
+        totalTransferredOut: t.bigint(),  // Cumulative wstHYPE sent via transfers
+        lastUpdated: t.integer(),         // Timestamp of last update
+    }),
+    (table) => ({
+        balanceIdx: index().on(table.balance),
+        lastUpdatedIdx: index().on(table.lastUpdated),
+    })
+);
+
+// Store exchange rate snapshots when Rebase events occur
+// assetsPerShare = HYPE value per wstHYPE share (increases over time as staking rewards accrue)
+export const WstHYPEExchangeRateSnapshot = onchainTable(
+    "wsthype_exchange_rate_snapshot",
+    (t) => ({
+        id: t.text().primaryKey(),        // blockNumber-logIndex
+        currentSupply: t.bigint(),        // Total stHYPE supply before rebase
+        newSupply: t.bigint(),            // Total stHYPE supply after rebase
+        rebaseInterval: t.bigint(),       // Time interval for the rebase
+        assetsPerShare: t.bigint(),       // Exchange rate: HYPE per wstHYPE (18 decimals)
         timestamp: t.integer(),
         blockNumber: t.bigint(),
         logIndex: t.integer(),

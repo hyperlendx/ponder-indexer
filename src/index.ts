@@ -1,5 +1,5 @@
-import { ponder } from "ponder:registry";
-import { and, eq } from "ponder";
+import {ponder} from "ponder:registry";
+import {and, eq} from "ponder";
 import {
     Borrow,
     Repay,
@@ -34,35 +34,46 @@ import {
     AssetPriceSnapshot,
     IsolatedPairRegistry,
     IsolatedPairPriceSnapshot,
-    // kHYPE (Kinetiq Liquid Staking) schema tables
-    KHYPEBalanceEvent,
-    UserKHYPEPosition,
-    KHYPEExchangeRateSnapshot,
-    KHYPERewardEvent,
-    KHYPESlashingEvent,
     // beHYPE (Hyperlend Liquid Staking) schema tables
     BeHYPEBalanceEvent,
     UserBeHYPEPosition,
     BeHYPEExchangeRateSnapshot,
+    // kHYPE (Kinetiq Liquid Staking) schema tables - Exchange rate tracking only
+    // Pool positions are tracked via UserPosition/UserBalanceEvent filtered by kHYPE asset
+    KHYPEExchangeRateSnapshot,
+    KHYPERewardEvent,
+    KHYPESlashingEvent,
+    // wstHYPE (Thunderhead Wrapped Staked HYPE) schema tables
+    WstHYPEBalanceEvent,
+    UserWstHYPEPosition,
+    WstHYPEExchangeRateSnapshot,
 } from "ponder:schema";
 
-import { CorePoolAbi } from "../abis/CorePoolAbi";
-import { OracleAbi } from "../abis/OracleAbi";
-import { IsolatedPairRegistry as IsolatedPairRegistryAbi } from "../abis/IsolatedPairRegistry";
-import { UiDataProviderIsolatedAbi } from "../abis/UiDataProviderIsolatedAbi";
-import { ChainlinkAggregatorAbi } from "../abis/ChainlinkAggregatorAbi";
-import { IsolatedAbi } from "../abis/IsolatedAbi";
-import { ERC20Abi } from "../abis/ERC20Abi";
-import { HTokenAbi } from "../abis/HTokenAbi";
+import {CorePoolAbi} from "../abis/CorePoolAbi";
+import {OracleAbi} from "../abis/OracleAbi";
+import {IsolatedPairRegistry as IsolatedPairRegistryAbi} from "../abis/IsolatedPairRegistry";
+import {UiDataProviderIsolatedAbi} from "../abis/UiDataProviderIsolatedAbi";
+import {ChainlinkAggregatorAbi} from "../abis/ChainlinkAggregatorAbi";
+import {IsolatedAbi} from "../abis/IsolatedAbi";
+import {ERC20Abi} from "../abis/ERC20Abi";
+import {HTokenAbi} from "../abis/HTokenAbi";
 import config from "../ponder.config";
 
 // kHYPE (Kinetiq Liquid Staking) ABIs
-import { StakingAccountantAbi } from "../abis/StakingAccountantAbi";
+import {StakingAccountantAbi} from "../abis/StakingAccountantAbi";
 
-import { getOraclePrice, getIsolatedOraclePrice, getIsolatedOraclePrices, getIsolatedPairAssetInfo } from "./helpers/getPrice";
-import { updateUserPosition, updateUserPositionTransferBased } from "./helpers/userPositionManager";
-import { calculateScaledBalance, calculateLiquidityIndexAtTimestamp } from "./helpers/aave";
-import { updateUserIsolatedPairTracking } from "./helpers/userIsolatedPairTracker";
+// wstHYPE (Thunderhead Wrapped Staked HYPE) ABIs
+import {WSTHYPEAbi} from "../abis/WSTHYPEAbi";
+
+import {
+    getOraclePrice,
+    getIsolatedOraclePrice,
+    getIsolatedOraclePrices,
+    getIsolatedPairAssetInfo
+} from "./helpers/getPrice";
+import {updateUserPosition} from "./helpers/userPositionManager";
+import {calculateScaledBalance, calculateLiquidityIndexAtTimestamp} from "./helpers/aave";
+import {updateUserIsolatedPairTracking} from "./helpers/userIsolatedPairTracker";
 import {
     calculateExchangeRateFromVaultState,
     getVaultStateAtTimestamp,
@@ -74,15 +85,12 @@ import {
     updateVaultStateAfterRepay,
     updateVaultStateAfterWithdrawFees,
 } from "./helpers/yield/isolatedPair/vaultState";
-import { getAddress } from 'viem'
+import {getAddress} from 'viem'
 
 const wrappedTokenGatewayAddress = getAddress("0x49558c794ea2aC8974C9F27886DDfAa951E99171");
 const collateralSwapperAddress = getAddress("0x7469AA4124cc6ee078f98B581198eB39d2487E79");
 const liquidSwapRepayAdapter = getAddress("0x6C674165E3AFaD857fab8CB0E91BCC057b813F03");
 
-// Option B runs in parallel with Option A, writing to separate tables for comparison
-// Option A (Primary): Uses proxy address attribution (UserPosition, UserBalanceEvent tables)
-// Option B (Secondary): Uses hToken transfer tracking (UserPositionTransferBased, UserBalanceEventTransferBased tables)
 
 // Cache for token decimals to avoid repeated contract calls
 const tokenDecimalsCache: Map<string, number> = new Map();
@@ -90,12 +98,6 @@ const tokenDecimalsCache: Map<string, number> = new Map();
 // Cache for hToken to underlying asset mapping (Option B)
 const hTokenToUnderlyingCache: Map<string, `0x${string}`> = new Map();
 
-/**
- * Get the underlying asset address for an hToken with caching
- * @param context - Ponder context with client
- * @param hTokenAddress - hToken address
- * @returns Underlying asset address
- */
 async function getUnderlyingAsset(context: any, hTokenAddress: `0x${string}`): Promise<`0x${string}`> {
     const normalizedAddress = hTokenAddress.toLowerCase();
 
@@ -121,12 +123,6 @@ async function getUnderlyingAsset(context: any, hTokenAddress: `0x${string}`): P
     }
 }
 
-/**
- * Get token decimals with caching
- * @param context - Ponder context with client
- * @param tokenAddress - Token address
- * @returns Token decimals
- */
 async function getTokenDecimals(context: any, tokenAddress: `0x${string}`): Promise<number> {
     const normalizedAddress = tokenAddress.toLowerCase();
 
@@ -155,7 +151,7 @@ async function getTokenDecimals(context: any, tokenAddress: `0x${string}`): Prom
 }
 
 // HToken Transfer Event Handler - Enhanced for Interest Tracking
-ponder.on("HTokens:BalanceTransfer", async ({ event, context }) => {
+ponder.on("HTokens:BalanceTransfer", async ({event, context}) => {
     const hTokenAddress = event.log.address;
     const zeroAddress = "0x0000000000000000000000000000000000000000";
 
@@ -188,92 +184,11 @@ ponder.on("HTokens:BalanceTransfer", async ({ event, context }) => {
         value: event.args.value,
         index: event.args.index
     });
-
-    // Option B (Secondary): Track hToken transfers as position changes
-    // This writes to separate tables (UserPositionTransferBased, UserBalanceEventTransferBased)
-    // for comparison testing with Option A
-    //
-    // Option B tracks ALL balance changes via BalanceTransfer events:
-    // - Mints (from=0x0): User receives hTokens from supply
-    // - Burns (to=0x0): User loses hTokens from withdraw
-    // - Transfers: User sends/receives hTokens to/from another address
-    const timestamp = Number(event.block.timestamp);
-    const blockNumber = event.block.number;
-
-    const isFromZero = event.args.from.toLowerCase() === zeroAddress;
-    const isToZero = event.args.to.toLowerCase() === zeroAddress;
-
-    // The value in BalanceTransfer is already the scaled balance (not actual)
-    const scaledBalance = event.args.value;
-
-    // Get oracle price for the asset
-    let reservePrice: bigint | null = null;
-    try {
-        reservePrice = await getOraclePrice(context, underlyingAsset);
-    } catch (e: any) {
-        console.error(`[BalanceTransfer] Error fetching reserve price: ${e.message}`);
-    }
-
-    if (isFromZero) {
-        // Mint: User receives hTokens (supply)
-        // Only update the receiver (to address)
-        await updateUserPositionTransferBased(
-            context,
-            event.args.to,
-            underlyingAsset,
-            scaledBalance, // Positive for incoming
-            'deposit', // Treat mint as deposit
-            timestamp,
-            event.transaction.hash,
-            blockNumber,
-            reservePrice ?? 0n
-        );
-    } else if (isToZero) {
-        // Burn: User loses hTokens (withdraw)
-        // Only update the sender (from address)
-        await updateUserPositionTransferBased(
-            context,
-            event.args.from,
-            underlyingAsset,
-            -scaledBalance, // Negative for outgoing
-            'withdraw', // Treat burn as withdraw
-            timestamp,
-            event.transaction.hash,
-            blockNumber,
-            reservePrice ?? 0n
-        );
-    } else {
-        // Transfer between two non-zero addresses
-        // Update both sender and receiver
-        await updateUserPositionTransferBased(
-            context,
-            event.args.from,
-            underlyingAsset,
-            -scaledBalance, // Negative for outgoing transfer
-            'transfer_out',
-            timestamp,
-            event.transaction.hash,
-            blockNumber,
-            reservePrice ?? 0n
-        );
-
-        await updateUserPositionTransferBased(
-            context,
-            event.args.to,
-            underlyingAsset,
-            scaledBalance, // Positive for incoming transfer
-            'transfer_in',
-            timestamp,
-            event.transaction.hash,
-            blockNumber,
-            reservePrice ?? 0n
-        );
-    }
 });
 
 // Borrow Event Handler
-ponder.on("CorePool:Borrow", async ({ event, context }) => {
-    const { db, chain, client, contracts } = context;
+ponder.on("CorePool:Borrow", async ({event, context}) => {
+    const {db, chain, client, contracts} = context;
 
     let reservePrice = null;
     try {
@@ -299,7 +214,7 @@ ponder.on("CorePool:Borrow", async ({ event, context }) => {
 });
 
 // Repay Event Handler
-ponder.on("CorePool:Repay", async ({ event, context }) => {
+ponder.on("CorePool:Repay", async ({event, context}) => {
     const reservePrice = await getOraclePrice(context, event.args.reserve);
     const timestamp = Number(event.block.timestamp);
     const blockNumber = event.block.number;
@@ -347,7 +262,7 @@ ponder.on("CorePool:Repay", async ({ event, context }) => {
 });
 
 // Supply Event Handler - Enhanced for Interest Tracking
-ponder.on("CorePool:Supply", async ({ event, context }) => {
+ponder.on("CorePool:Supply", async ({event, context}) => {
     const reservePrice = await getOraclePrice(context, event.args.reserve);
     const timestamp = Number(event.block.timestamp);
     const blockNumber = event.block.number;
@@ -393,7 +308,7 @@ ponder.on("CorePool:Supply", async ({ event, context }) => {
 });
 
 // Withdraw Event Handler
-ponder.on("CorePool:Withdraw", async ({ event, context }) => {
+ponder.on("CorePool:Withdraw", async ({event, context}) => {
     const reservePrice = await getOraclePrice(context, event.args.reserve);
     const timestamp = Number(event.block.timestamp);
     const blockNumber = event.block.number;
@@ -448,7 +363,7 @@ ponder.on("CorePool:Withdraw", async ({ event, context }) => {
 });
 
 // LiquidationCall Event Handler
-ponder.on("CorePool:LiquidationCall", async ({ event, context }) => {
+ponder.on("CorePool:LiquidationCall", async ({event, context}) => {
     const reservePriceCollateral = await getOraclePrice(context, event.args.collateralAsset);
     const reservePriceDebt = await getOraclePrice(context, event.args.debtAsset);
 
@@ -470,7 +385,7 @@ ponder.on("CorePool:LiquidationCall", async ({ event, context }) => {
 });
 
 // FlashLoan Event Handler
-ponder.on("CorePool:FlashLoan", async ({ event, context }) => {
+ponder.on("CorePool:FlashLoan", async ({event, context}) => {
     const reservePrice = await getOraclePrice(context, event.args.asset);
 
     await context.db.insert(FlashLoan).values({
@@ -490,7 +405,7 @@ ponder.on("CorePool:FlashLoan", async ({ event, context }) => {
 });
 
 // ReserveDataUpdated Event Handler - Enhanced for Interest Tracking
-ponder.on("CorePool:ReserveDataUpdated", async ({ event, context }) => {
+ponder.on("CorePool:ReserveDataUpdated", async ({event, context}) => {
     const reservePrice = await getOraclePrice(context, event.args.reserve);
     const timestamp = Number(event.block.timestamp);
     const blockNumber = event.block.number;
@@ -541,7 +456,7 @@ ponder.on("CorePool:ReserveDataUpdated", async ({ event, context }) => {
 });
 
 // ReserveUsedAsCollateralEnabled Event Handler
-ponder.on("CorePool:ReserveUsedAsCollateralEnabled", async ({ event, context }) => {
+ponder.on("CorePool:ReserveUsedAsCollateralEnabled", async ({event, context}) => {
     await context.db.insert(ReserveUsedAsCollateralEnabled).values({
         id: event.id,
         txHash: event.transaction.hash,
@@ -553,7 +468,7 @@ ponder.on("CorePool:ReserveUsedAsCollateralEnabled", async ({ event, context }) 
 });
 
 // ReserveUsedAsCollateralDisabled Event Handler
-ponder.on("CorePool:ReserveUsedAsCollateralDisabled", async ({ event, context }) => {
+ponder.on("CorePool:ReserveUsedAsCollateralDisabled", async ({event, context}) => {
     await context.db.insert(ReserveUsedAsCollateralDisabled).values({
         id: event.id,
         txHash: event.transaction.hash,
@@ -565,7 +480,7 @@ ponder.on("CorePool:ReserveUsedAsCollateralDisabled", async ({ event, context })
 });
 
 // SwapBorrowRateMode Event Handler
-ponder.on("CorePool:SwapBorrowRateMode", async ({ event, context }) => {
+ponder.on("CorePool:SwapBorrowRateMode", async ({event, context}) => {
     await context.db.insert(SwapBorrowRateMode).values({
         id: event.id,
         txHash: event.transaction.hash,
@@ -578,7 +493,7 @@ ponder.on("CorePool:SwapBorrowRateMode", async ({ event, context }) => {
 });
 
 // UserEModeSet Event Handler
-ponder.on("CorePool:UserEModeSet", async ({ event, context }) => {
+ponder.on("CorePool:UserEModeSet", async ({event, context}) => {
     await context.db.insert(UserEModeSet).values({
         id: event.id,
         txHash: event.transaction.hash,
@@ -590,7 +505,7 @@ ponder.on("CorePool:UserEModeSet", async ({ event, context }) => {
 });
 
 // MintedToTreasury Event Handler
-ponder.on("CorePool:MintedToTreasury", async ({ event, context }) => {
+ponder.on("CorePool:MintedToTreasury", async ({event, context}) => {
     const reservePrice = await getOraclePrice(context, event.args.reserve);
 
     await context.db.insert(MintedToTreasury).values({
@@ -605,7 +520,7 @@ ponder.on("CorePool:MintedToTreasury", async ({ event, context }) => {
 });
 
 // MintUnbacked Event Handler
-ponder.on("CorePool:MintUnbacked", async ({ event, context }) => {
+ponder.on("CorePool:MintUnbacked", async ({event, context}) => {
     const reservePrice = await getOraclePrice(context, event.args.reserve);
 
     await context.db.insert(MintUnbacked).values({
@@ -623,7 +538,7 @@ ponder.on("CorePool:MintUnbacked", async ({ event, context }) => {
 });
 
 // BackUnbacked Event Handler
-ponder.on("CorePool:BackUnbacked", async ({ event, context }) => {
+ponder.on("CorePool:BackUnbacked", async ({event, context}) => {
     const reservePrice = await getOraclePrice(context, event.args.reserve);
 
     await context.db.insert(BackUnbacked).values({
@@ -640,7 +555,7 @@ ponder.on("CorePool:BackUnbacked", async ({ event, context }) => {
 });
 
 // RebalanceStableBorrowRate Event Handler
-ponder.on("CorePool:RebalanceStableBorrowRate", async ({ event, context }) => {
+ponder.on("CorePool:RebalanceStableBorrowRate", async ({event, context}) => {
     await context.db.insert(RebalanceStableBorrowRate).values({
         id: event.id,
         txHash: event.transaction.hash,
@@ -652,7 +567,7 @@ ponder.on("CorePool:RebalanceStableBorrowRate", async ({ event, context }) => {
 });
 
 // IsolationModeTotalDebtUpdated Event Handler
-ponder.on("CorePool:IsolationModeTotalDebtUpdated", async ({ event, context }) => {
+ponder.on("CorePool:IsolationModeTotalDebtUpdated", async ({event, context}) => {
     await context.db.insert(IsolationModeTotalDebtUpdated).values({
         id: event.id,
         txHash: event.transaction.hash,
@@ -665,7 +580,7 @@ ponder.on("CorePool:IsolationModeTotalDebtUpdated", async ({ event, context }) =
 
 /// ISOLATED PAIRS
 
-ponder.on("IsolatedPair:BorrowAsset", async ({ event, context }) => {
+ponder.on("IsolatedPair:BorrowAsset", async ({event, context}) => {
     const pair = event.log.address;
     if (!pair) {
         throw new Error("log.address is null");
@@ -720,7 +635,7 @@ ponder.on("IsolatedPair:BorrowAsset", async ({ event, context }) => {
     );
 });
 
-ponder.on("IsolatedPair:RepayAsset", async ({ event, context }) => {
+ponder.on("IsolatedPair:RepayAsset", async ({event, context}) => {
     const pair = event.log.address;
     if (!pair) {
         throw new Error("log.address is null");
@@ -775,7 +690,7 @@ ponder.on("IsolatedPair:RepayAsset", async ({ event, context }) => {
     );
 });
 
-ponder.on("IsolatedPair:RepayAssetWithCollateral", async ({ event, context }) => {
+ponder.on("IsolatedPair:RepayAssetWithCollateral", async ({event, context}) => {
     const pair = event.log.address;
     if (!pair) {
         throw new Error("log.address is null");
@@ -832,7 +747,7 @@ ponder.on("IsolatedPair:RepayAssetWithCollateral", async ({ event, context }) =>
     );
 });
 
-ponder.on("IsolatedPair:AddCollateral", async ({ event, context }) => {
+ponder.on("IsolatedPair:AddCollateral", async ({event, context}) => {
     const pair = event.log.address;
     if (!pair) {
         throw new Error("log.address is null");
@@ -865,7 +780,7 @@ ponder.on("IsolatedPair:AddCollateral", async ({ event, context }) => {
     );
 });
 
-ponder.on("IsolatedPair:RemoveCollateral", async ({ event, context }) => {
+ponder.on("IsolatedPair:RemoveCollateral", async ({event, context}) => {
     const pair = event.log.address;
     if (!pair) {
         throw new Error("log.address is null");
@@ -899,7 +814,7 @@ ponder.on("IsolatedPair:RemoveCollateral", async ({ event, context }) => {
     );
 });
 
-ponder.on("IsolatedPair:Liquidate", async ({ event, context }) => {
+ponder.on("IsolatedPair:Liquidate", async ({event, context}) => {
     const pair = event.log.address;
     if (!pair) {
         throw new Error("log.address is null");
@@ -972,7 +887,7 @@ ponder.on("IsolatedPair:Liquidate", async ({ event, context }) => {
     );
 });
 
-ponder.on("IsolatedPair:Deposit", async ({ event, context }) => {
+ponder.on("IsolatedPair:Deposit", async ({event, context}) => {
     const pair = event.log.address;
     if (!pair) {
         throw new Error("log.address is null");
@@ -1027,7 +942,7 @@ ponder.on("IsolatedPair:Deposit", async ({ event, context }) => {
     );
 });
 
-ponder.on("IsolatedPair:Withdraw", async ({ event, context }) => {
+ponder.on("IsolatedPair:Withdraw", async ({event, context}) => {
     const pair = event.log.address;
     if (!pair) {
         throw new Error("log.address is null");
@@ -1097,7 +1012,7 @@ ponder.on("IsolatedPair:Withdraw", async ({ event, context }) => {
 
 // Isolated Pair Rate Events - Enable accurate exchange rate calculations
 
-ponder.on("IsolatedPair:UpdateRate", async ({ event, context }) => {
+ponder.on("IsolatedPair:UpdateRate", async ({event, context}) => {
     const pair = event.log.address;
     if (!pair) {
         throw new Error("log.address is null");
@@ -1114,7 +1029,7 @@ ponder.on("IsolatedPair:UpdateRate", async ({ event, context }) => {
     });
 });
 
-ponder.on("IsolatedPair:AddInterest", async ({ event, context }) => {
+ponder.on("IsolatedPair:AddInterest", async ({event, context}) => {
     const pair = event.log.address;
     if (!pair) {
         throw new Error("log.address is null");
@@ -1144,7 +1059,7 @@ ponder.on("IsolatedPair:AddInterest", async ({ event, context }) => {
     });
 });
 
-ponder.on("IsolatedPair:WithdrawFees", async ({ event, context }) => {
+ponder.on("IsolatedPair:WithdrawFees", async ({event, context}) => {
     const pair = event.log.address;
     if (!pair) {
         throw new Error("log.address is null");
@@ -1177,7 +1092,7 @@ ponder.on("IsolatedPair:WithdrawFees", async ({ event, context }) => {
 // Note: UpdateExchangeRate event is for collateral/asset oracle prices, NOT vault exchange rate
 // We don't need to index it for vault accounting
 
-ponder.on("LoopingStrategyManagerFactory:StrategyDeployed", async ({ event, context }) => {
+ponder.on("LoopingStrategyManagerFactory:StrategyDeployed", async ({event, context}) => {
     await context.db.insert(StrategyDeployed).values({
         id: event.id,
         txHash: event.transaction.hash,
@@ -1196,7 +1111,7 @@ let lastReservesRefreshBlock: bigint = 0n;
 const RESERVES_REFRESH_INTERVAL = 3600n; // Refresh reserves list every 3600 blocks
 
 // Handler for AddPair events - track new isolated pairs
-ponder.on("IsolatedPairRegistryContract:AddPair", async ({ event, context }) => {
+ponder.on("IsolatedPairRegistryContract:AddPair", async ({event, context}) => {
     const pairAddress = event.args.pairAddress;
     const blockNumber = event.block.number;
     const timestamp = Number(event.block.timestamp);
@@ -1262,7 +1177,7 @@ ponder.on("IsolatedPairRegistryContract:AddPair", async ({ event, context }) => 
 });
 
 // Oracle Price Updates for Core Pool Assets every 300 blocks
-ponder.on("ChainlinkOracleUpdate:block", async ({ event, context }) => {
+ponder.on("ChainlinkOracleUpdate:block", async ({event, context}) => {
     const blockNumber = event.block.number;
     const timestamp = Number(event.block.timestamp);
 
@@ -1330,11 +1245,12 @@ interface PairMetadata {
     assetDecimals: number;
     collateralDecimals: number;
 }
+
 const pairMetadataCache: Map<string, PairMetadata> = new Map();
 
 // Oracle Price Updates for Isolated Pairs every 300 blocks
 // Also snapshots USD prices for asset and collateral tokens from Chainlink oracles
-ponder.on("ChainlinkOracleIsolatedUpdate:block", async ({ event, context }) => {
+ponder.on("ChainlinkOracleIsolatedUpdate:block", async ({event, context}) => {
     const blockNumber = event.block.number;
     const timestamp = Number(event.block.timestamp);
     const uiDataProviderAddress = config.contracts.UiDataProviderIsolated.address as `0x${string}`;
@@ -1409,7 +1325,11 @@ ponder.on("ChainlinkOracleIsolatedUpdate:block", async ({ event, context }) => {
             }
 
             // Collect unique Chainlink oracles to query
-            const oraclesToQuery: Map<string, { oracle: `0x${string}`; asset: `0x${string}`; decimals: number }> = new Map();
+            const oraclesToQuery: Map<string, {
+                oracle: `0x${string}`;
+                asset: `0x${string}`;
+                decimals: number
+            }> = new Map();
             for (const pair of cachedIsolatedPairsList) {
                 const metadata = pairMetadataCache.get(pair);
                 if (metadata) {
@@ -1443,10 +1363,10 @@ ponder.on("ChainlinkOracleIsolatedUpdate:block", async ({ event, context }) => {
                         functionName: "latestRoundData",
                         args: []
                     });
-                    return { asset: info.asset, price: priceData?.[1] ?? 0n, decimals: info.decimals };
+                    return {asset: info.asset, price: priceData?.[1] ?? 0n, decimals: info.decimals};
                 } catch (e) {
                     console.error(`[ChainlinkOracleIsolatedUpdate] Error fetching Chainlink price for ${info.asset}:`, e);
-                    return { asset: info.asset, price: 0n, decimals: info.decimals };
+                    return {asset: info.asset, price: 0n, decimals: info.decimals};
                 }
             });
             const chainlinkPrices = await Promise.all(chainlinkPricePromises);
@@ -1467,7 +1387,7 @@ ponder.on("ChainlinkOracleIsolatedUpdate:block", async ({ event, context }) => {
                 }
             }
 
-            for (const { asset, price, decimals } of chainlinkPrices) {
+            for (const {asset, price, decimals} of chainlinkPrices) {
                 if (price > 0n) {
                     await context.db.insert(AssetPriceSnapshot).values({
                         id: `${asset}-${blockNumber}`,
@@ -1490,13 +1410,10 @@ ponder.on("ChainlinkOracleIsolatedUpdate:block", async ({ event, context }) => {
 
 // ============================================================================
 // kHYPE (Kinetiq Liquid Staking) Event Handlers
-// reads exchange rate directly from contract
-// Only tracks: Transfer (user balances), RewardEventReported, SlashingEventReported
+// Tracks exchange rate changes via ValidatorManager events
+// Pool positions are tracked via CorePool:Supply/Withdraw events (when reserve = kHYPE)
 // ============================================================================
 
-const KHYPE_ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as `0x${string}`;
-
-// Contract addresses for kHYPE
 const KHYPE_STAKING_ACCOUNTANT = "0x9209648Ec9D448EF57116B73A2f081835643dc7A" as `0x${string}`;
 
 /**
@@ -1518,132 +1435,13 @@ async function readKHYPEExchangeRate(context: any): Promise<bigint> {
     }
 }
 
-
 // ============================================================================
-// 1. kHYPE Transfer Event Handler
-// Tracks user kHYPE balances (mint, burn, transfer)
-// Snapshots exchange rate on mint/burn events (supply changes)
-// ============================================================================
-ponder.on("KHYPE:Transfer", async ({ event, context }) => {
-    const { from, to, value } = event.args;
-    const timestamp = Number(event.block.timestamp);
-    const blockNumber = event.block.number;
-    const logIndex = event.log.logIndex;
-    const txHash = event.transaction.hash;
-
-    // Determine event type
-    const isMint = from === KHYPE_ZERO_ADDRESS;
-    const isBurn = to === KHYPE_ZERO_ADDRESS;
-
-    // Process sender (from) - decrease balance
-    if (from !== KHYPE_ZERO_ADDRESS) {
-        const existingPosition = await context.db.find(UserKHYPEPosition, { id: from });
-        const currentBalance = existingPosition?.balance ?? 0n;
-        const newBalance = currentBalance - value;
-
-        // Create balance event
-        await context.db.insert(KHYPEBalanceEvent).values({
-            id: `${txHash}-${logIndex}-from`,
-            txHash: txHash,
-            user: from,
-            balance: newBalance,
-            balanceChange: -value,
-            eventType: isBurn ? "burn" : "transfer_out",
-            counterparty: to,
-            timestamp: timestamp,
-            blockNumber: blockNumber,
-            logIndex: logIndex,
-        });
-
-        // Update or create position
-        if (existingPosition) {
-            await context.db.update(UserKHYPEPosition, { id: from }).set({
-                balance: newBalance,
-                totalBurned: isBurn ? (existingPosition.totalBurned ?? 0n) + value : (existingPosition.totalBurned ?? 0n),
-                totalTransferredOut: !isBurn ? (existingPosition.totalTransferredOut ?? 0n) + value : (existingPosition.totalTransferredOut ?? 0n),
-                lastUpdated: timestamp,
-            });
-        } else {
-            await context.db.insert(UserKHYPEPosition).values({
-                id: from,
-                balance: newBalance,
-                totalMinted: 0n,
-                totalBurned: isBurn ? value : 0n,
-                totalTransferredIn: 0n,
-                totalTransferredOut: !isBurn ? value : 0n,
-                lastUpdated: timestamp,
-            });
-        }
-    }
-
-    // Process receiver (to) - increase balance
-    if (to !== KHYPE_ZERO_ADDRESS) {
-        const existingPosition = await context.db.find(UserKHYPEPosition, { id: to });
-        const currentBalance = existingPosition?.balance ?? 0n;
-        const newBalance = currentBalance + value;
-
-        // Create balance event
-        await context.db.insert(KHYPEBalanceEvent).values({
-            id: `${txHash}-${logIndex}-to`,
-            txHash: txHash,
-            user: to,
-            balance: newBalance,
-            balanceChange: value,
-            eventType: isMint ? "mint" : "transfer_in",
-            counterparty: from,
-            timestamp: timestamp,
-            blockNumber: blockNumber,
-            logIndex: logIndex,
-        });
-
-        // Update or create position
-        if (existingPosition) {
-            await context.db.update(UserKHYPEPosition, { id: to }).set({
-                balance: newBalance,
-                totalMinted: isMint ? (existingPosition.totalMinted ?? 0n) + value : (existingPosition.totalMinted ?? 0n),
-                totalTransferredIn: !isMint ? (existingPosition.totalTransferredIn ?? 0n) + value : (existingPosition.totalTransferredIn ?? 0n),
-                lastUpdated: timestamp,
-            });
-        } else {
-            await context.db.insert(UserKHYPEPosition).values({
-                id: to,
-                balance: newBalance,
-                totalMinted: isMint ? value : 0n,
-                totalBurned: 0n,
-                totalTransferredIn: !isMint ? value : 0n,
-                totalTransferredOut: 0n,
-                lastUpdated: timestamp,
-            });
-        }
-    }
-
-    // Save exchange rate snapshot on mint/burn (supply changes affect rate)
-    // Read exchange rate directly from contract - guaranteed accurate
-    if (isMint || isBurn) {
-        const exchangeRate = await readKHYPEExchangeRate(context);
-        await context.db.insert(KHYPEExchangeRateSnapshot).values({
-            id: `${blockNumber}-${logIndex}`,
-            exchangeRate: exchangeRate,
-            eventType: isMint ? "mint" : "burn",
-            eventAmount: value,
-            timestamp: timestamp,
-            blockNumber: blockNumber,
-            logIndex: logIndex,
-            txHash: txHash,
-        });
-    }
-
-    console.log(`[kHYPE:Transfer] ${isMint ? "Mint" : isBurn ? "Burn" : "Transfer"}: ${value} from ${from} to ${to} at block ${blockNumber}`);
-});
-
-
-// ============================================================================
-// 2. ValidatorManager RewardEventReported Handler
+// 1. ValidatorManager RewardEventReported Handler
 // Primary event for exchange rate increases (staking rewards)
 // This is when the exchange rate actually changes - rewards are distributed
 // ============================================================================
-ponder.on("ValidatorManager:RewardEventReported", async ({ event, context }) => {
-    const { validator, amount } = event.args;
+ponder.on("ValidatorManager:RewardEventReported", async ({event, context}) => {
+    const {validator, amount} = event.args;
     const timestamp = Number(event.block.timestamp);
     const blockNumber = event.block.number;
     const logIndex = event.log.logIndex;
@@ -1677,11 +1475,11 @@ ponder.on("ValidatorManager:RewardEventReported", async ({ event, context }) => 
 });
 
 // ============================================================================
-// 3. ValidatorManager SlashingEventReported Handler
+// 2. ValidatorManager SlashingEventReported Handler
 // Primary event for exchange rate decreases (slashing penalties)
 // ============================================================================
-ponder.on("ValidatorManager:SlashingEventReported", async ({ event, context }) => {
-    const { validator, amount } = event.args;
+ponder.on("ValidatorManager:SlashingEventReported", async ({event, context}) => {
+    const {validator, amount} = event.args;
     const timestamp = Number(event.block.timestamp);
     const blockNumber = event.block.number;
     const logIndex = event.log.logIndex;
@@ -1720,108 +1518,6 @@ ponder.on("ValidatorManager:SlashingEventReported", async ({ event, context }) =
 // Exchange rate is stored in StakingCore.exchangeRatio and updated ~2x/day
 // ============================================================================
 
-const BEHYPE_ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as `0x${string}`;
-
-// ============================================================================
-// 1. beHYPE Transfer Event Handler
-// Tracks user beHYPE balances (mint, burn, transfer)
-// ============================================================================
-ponder.on("BEHYPE:Transfer", async ({ event, context }) => {
-    const { from, to, value } = event.args;
-    const timestamp = Number(event.block.timestamp);
-    const blockNumber = event.block.number;
-    const logIndex = event.log.logIndex;
-    const txHash = event.transaction.hash;
-
-    // Determine event type
-    const isMint = from === BEHYPE_ZERO_ADDRESS;
-    const isBurn = to === BEHYPE_ZERO_ADDRESS;
-
-    // Process sender (from) - decrease balance
-    if (from !== BEHYPE_ZERO_ADDRESS) {
-        const existingPosition = await context.db.find(UserBeHYPEPosition, { id: from });
-        const currentBalance = existingPosition?.balance ?? 0n;
-        const newBalance = currentBalance - value;
-
-        // Create balance event
-        await context.db.insert(BeHYPEBalanceEvent).values({
-            id: `${txHash}-${logIndex}-from`,
-            txHash: txHash,
-            user: from,
-            balance: newBalance,
-            balanceChange: -value,
-            eventType: isBurn ? "burn" : "transfer_out",
-            counterparty: to,
-            timestamp: timestamp,
-            blockNumber: blockNumber,
-            logIndex: logIndex,
-        });
-
-        // Update or create position
-        if (existingPosition) {
-            await context.db.update(UserBeHYPEPosition, { id: from }).set({
-                balance: newBalance,
-                totalBurned: isBurn ? (existingPosition.totalBurned ?? 0n) + value : (existingPosition.totalBurned ?? 0n),
-                totalTransferredOut: !isBurn ? (existingPosition.totalTransferredOut ?? 0n) + value : (existingPosition.totalTransferredOut ?? 0n),
-                lastUpdated: timestamp,
-            });
-        } else {
-            await context.db.insert(UserBeHYPEPosition).values({
-                id: from,
-                balance: newBalance,
-                totalMinted: 0n,
-                totalBurned: isBurn ? value : 0n,
-                totalTransferredIn: 0n,
-                totalTransferredOut: !isBurn ? value : 0n,
-                lastUpdated: timestamp,
-            });
-        }
-    }
-
-    // Process receiver (to) - increase balance
-    if (to !== BEHYPE_ZERO_ADDRESS) {
-        const existingPosition = await context.db.find(UserBeHYPEPosition, { id: to });
-        const currentBalance = existingPosition?.balance ?? 0n;
-        const newBalance = currentBalance + value;
-
-        // Create balance event
-        await context.db.insert(BeHYPEBalanceEvent).values({
-            id: `${txHash}-${logIndex}-to`,
-            txHash: txHash,
-            user: to,
-            balance: newBalance,
-            balanceChange: value,
-            eventType: isMint ? "mint" : "transfer_in",
-            counterparty: from,
-            timestamp: timestamp,
-            blockNumber: blockNumber,
-            logIndex: logIndex,
-        });
-
-        // Update or create position
-        if (existingPosition) {
-            await context.db.update(UserBeHYPEPosition, { id: to }).set({
-                balance: newBalance,
-                totalMinted: isMint ? (existingPosition.totalMinted ?? 0n) + value : (existingPosition.totalMinted ?? 0n),
-                totalTransferredIn: !isMint ? (existingPosition.totalTransferredIn ?? 0n) + value : (existingPosition.totalTransferredIn ?? 0n),
-                lastUpdated: timestamp,
-            });
-        } else {
-            await context.db.insert(UserBeHYPEPosition).values({
-                id: to,
-                balance: newBalance,
-                totalMinted: isMint ? value : 0n,
-                totalBurned: 0n,
-                totalTransferredIn: !isMint ? value : 0n,
-                totalTransferredOut: 0n,
-                lastUpdated: timestamp,
-            });
-        }
-    }
-
-    console.log(`[beHYPE:Transfer] ${isMint ? "Mint" : isBurn ? "Burn" : "Transfer"}: ${value} from ${from} to ${to} at block ${blockNumber}`);
-});
-
 // ============================================================================
 // 2. BeHYPEStakingCore ExchangeRatioUpdated Event Handler
 // Primary event for exchange rate changes (~2x/day via keeper)
@@ -1847,4 +1543,63 @@ ponder.on("BeHYPEStakingCore:ExchangeRatioUpdated", async ({ event, context }) =
     });
 
     console.log(`[beHYPE:ExchangeRatioUpdated] Rate changed from ${oldRatio} to ${newRatio} (${yearlyRateInBps} bps APY) at block ${blockNumber}`);
+});
+
+
+// ============================================================================
+// wstHYPE (Thunderhead Wrapped Staked HYPE) Event Handlers
+// Non-rebasing wrapper for stHYPE - balance stays constant, value increases via exchange rate
+// Track Transfer events for user balances and Rebase events for yield calculation
+// ============================================================================
+
+const WSTHYPE_ADDRESS = "0x94e8396e0869c9F2200760aF63c69F46D4F616F5" as `0x${string}`;
+
+/**
+ * Read current assetsPerShare (exchange rate) from wstHYPE contract
+ * Returns HYPE value per wstHYPE share with 18 decimals
+ */
+async function readWstHYPEAssetsPerShare(context: any): Promise<bigint> {
+    try {
+        const assetsPerShare = await context.client.readContract({
+            abi: WSTHYPEAbi,
+            address: WSTHYPE_ADDRESS,
+            functionName: "assetsPerShare",
+            args: [],
+        });
+        return assetsPerShare as bigint;
+    } catch (error) {
+        console.error("[wstHYPE] Error reading assetsPerShare:", error);
+        return BigInt(1e18); // Default 1:1 rate
+    }
+}
+
+// ============================================================================
+// 2. wstHYPE Rebase Event Handler
+// Primary event for exchange rate changes (staking rewards distribution)
+// This is when the exchange rate (assetsPerShare) actually changes
+// ============================================================================
+ponder.on("WSTHYPE:Rebase", async ({event, context}) => {
+    const {currentSupply, newSupply, rebaseInterval} = event.args;
+    const timestamp = Number(event.block.timestamp);
+    const blockNumber = event.block.number;
+    const logIndex = event.log.logIndex;
+    const txHash = event.transaction.hash;
+
+    // Read the current assetsPerShare from contract - this is the new rate after rebase
+    const assetsPerShare = await readWstHYPEAssetsPerShare(context);
+
+    // Store exchange rate snapshot
+    await context.db.insert(WstHYPEExchangeRateSnapshot).values({
+        id: `${blockNumber}-${logIndex}`,
+        currentSupply: currentSupply,
+        newSupply: newSupply,
+        rebaseInterval: rebaseInterval,
+        assetsPerShare: assetsPerShare,
+        timestamp: timestamp,
+        blockNumber: blockNumber,
+        logIndex: logIndex,
+        txHash: txHash,
+    });
+
+    console.log(`[wstHYPE:Rebase] Supply changed from ${currentSupply} to ${newSupply}, assetsPerShare: ${assetsPerShare} at block ${blockNumber}`);
 });
