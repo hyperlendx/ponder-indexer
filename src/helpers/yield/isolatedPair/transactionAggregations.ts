@@ -132,9 +132,10 @@ export async function calculateTotalBorrowed(
     let totalBorrowed = 0n;
     
     for (const borrow of borrows) {
-        // Convert shares to asset amount using the exchange rate at time of borrow
-        const assetAmount = convertSharesToAssets(borrow.sharesAdded, borrow.exchangeRate);
-        totalBorrowed += assetAmount;
+        // Use borrowAmount directly from the event (actual tokens borrowed from contract)
+        // instead of reconverting from shares, because event.exchangeRate stores the asset
+        // exchange rate, not the borrow exchange rate
+        totalBorrowed += borrow.borrowAmount;
     }
     
     return totalBorrowed;
@@ -184,9 +185,10 @@ export async function calculateTotalRepaid(
     let totalRepaid = 0n;
 
     for (const repay of repays) {
-        // Convert shares to asset amount using the exchange rate at time of repay
-        const assetAmount = convertSharesToAssets(repay.shares, repay.exchangeRate);
-        totalRepaid += assetAmount;
+        // Use amountToRepay directly from the event (actual tokens repaid from contract)
+        // instead of reconverting from shares, because event.exchangeRate stores the asset
+        // exchange rate, not the borrow exchange rate
+        totalRepaid += repay.amountToRepay;
     }
 
     // Add liquidated borrow amounts (forced repayment)

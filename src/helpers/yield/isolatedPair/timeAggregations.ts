@@ -10,7 +10,7 @@
 
 import { calculateSegmentedIsolatedPairYield, calculateSegmentedIsolatedPairBorrowCost } from "./yieldCalculations";
 import { getUserIsolatedPairs } from "./pairTracking";
-import { ExchangeRateCache } from "./exchangeRateCache";
+import { ExchangeRateCache, BorrowExchangeRateCache } from "./exchangeRateCache";
 import { IsolatedPairBalanceCache } from "./balanceCache";
 import { calculateUSDValueNumber } from "../../usdCalculations";
 import { IsolatedPairRegistry, AssetPriceSnapshot } from "ponder:schema";
@@ -145,6 +145,7 @@ export async function calculateDailyIsolatedPairYields(
 
     // Create caches for this request
     const exchangeRateCache = new ExchangeRateCache();
+    const borrowExchangeRateCache = new BorrowExchangeRateCache();
     const balanceCache = new IsolatedPairBalanceCache();
 
     // Build list of all timestamps we'll need (day boundaries for complete days only)
@@ -164,6 +165,8 @@ export async function calculateDailyIsolatedPairYields(
         timestamps.map(timestamp => ({ pair, timestamp }))
     );
     await exchangeRateCache.prefetch(context, exchangeRatePrefetchList);
+    // Also prefetch borrow exchange rates at all timestamps
+    await borrowExchangeRateCache.prefetch(context, exchangeRatePrefetchList);
 
     // Prefetch all balances for all pairs at start and end (parallel queries)
     const prefetchTimestamps = [startTimestamp, endTimestampForDays];
@@ -247,7 +250,7 @@ export async function calculateDailyIsolatedPairYields(
                 context, user, pair, startTimestamp, endTimestampForDays, decimals, exchangeRateCache, assetAddress
             );
             const segmentedBorrowResult = await calculateSegmentedIsolatedPairBorrowCost(
-                context, user, pair, startTimestamp, endTimestampForDays, decimals, exchangeRateCache, assetAddress
+                context, user, pair, startTimestamp, endTimestampForDays, decimals, borrowExchangeRateCache, assetAddress
             );
 
             // Process each day and calculate yield using exchange rates at day boundaries
@@ -303,9 +306,9 @@ export async function calculateDailyIsolatedPairYields(
                     const overlapEnd = Math.min(segment.endTime, dayEndTimestamp + 1);
 
                     if (overlapEnd > overlapStart && segment.borrowShares > 0n) {
-                        // Get exchange rates at overlap boundaries
-                        const startRate = await exchangeRateCache.get(context, pair, overlapStart);
-                        const endRate = await exchangeRateCache.get(context, pair, overlapEnd);
+                        // Get BORROW exchange rates at overlap boundaries (not asset rates!)
+                        const startRate = await borrowExchangeRateCache.get(context, pair, overlapStart);
+                        const endRate = await borrowExchangeRateCache.get(context, pair, overlapEnd);
 
                         // Calculate borrow cost: shares * (endRate - startRate) / EXCHANGE_PRECISION
                         const EXCHANGE_PRECISION = 10n ** 18n;

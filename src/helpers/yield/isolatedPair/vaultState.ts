@@ -359,29 +359,27 @@ export async function updateVaultStateAfterRepay(
 
 /**
  * Update vault state after liquidation
- * Liquidation adjusts both asset and borrow state based on contract logic:
  *
- * When there's bad debt (borrower has no leftover collateral):
- * - _sharesToAdjust = borrower's remaining shares after liquidation
- * - _amountToAdjust = amount corresponding to those shares (bad debt)
- * - totalBorrow.amount -= _amountToAdjust (before _repayAsset is called)
+ * IMPORTANT: The contract's liquidate() function internally calls _repayAsset(),
+ * which emits a separate RepayAsset event. That RepayAsset event already handles
+ * the borrow reduction from the liquidator's repayment (_amountLiquidatorToRepay,
+ * _sharesToLiquidate + _sharesToAdjust). So this function should ONLY handle
+ * the bad debt adjustment, NOT the repayment.
+ *
+ * Bad debt adjustment (when borrower has no leftover collateral):
+ * - _amountToAdjust = bad debt amount to write off
+ * - totalBorrow.amount -= _amountToAdjust
  * - totalAsset.amount -= _amountToAdjust (bad debt is socialized to lenders)
  * - totalAsset.shares is NOT modified
- * - _repayAsset reduces totalBorrow by (_amountLiquidatorToRepay, _sharesToLiquidate + _sharesToAdjust)
  *
- * So the total effect is:
- * - totalAsset.amount -= _amountToAdjust (bad debt writeoff)
- * - totalAsset.shares unchanged
- * - totalBorrow.amount -= (_amountLiquidatorToRepay + _amountToAdjust)
+ * The RepayAsset handler (called separately for the same tx) handles:
+ * - totalBorrow.amount -= _amountLiquidatorToRepay
  * - totalBorrow.shares -= (_sharesToLiquidate + _sharesToAdjust)
  */
 export async function updateVaultStateAfterLiquidation(
     db: any,
     pair: string,
-    assetSharesToAdjust: bigint,
-    assetAmountToAdjust: bigint,
-    borrowAmountRepaid: bigint,
-    borrowSharesRepaid: bigint,
+    amountToAdjust: bigint,
     timestamp: number,
     blockNumber: number,
     txHash: string,
@@ -394,14 +392,14 @@ export async function updateVaultStateAfterLiquidation(
         return null;
     }
 
-    // Bad debt (assetAmountToAdjust) is subtracted from totalAsset.amount (socialized to lenders)
-    // totalAsset.shares is NOT modified during liquidation
-    // Borrow state is reduced by both the liquidator's repayment AND the bad debt adjustment
+    // Only handle bad debt adjustment here.
+    // The repayment portion is already handled by the RepayAsset event
+    // that the contract emits from its internal _repayAsset() call.
     const newState: VaultState = {
-        totalAssetAmount: currentState.totalAssetAmount - assetAmountToAdjust,
+        totalAssetAmount: currentState.totalAssetAmount - amountToAdjust,
         totalAssetShares: currentState.totalAssetShares, // No change to asset shares
-        totalBorrowAmount: currentState.totalBorrowAmount - borrowAmountRepaid - assetAmountToAdjust,
-        totalBorrowShares: currentState.totalBorrowShares - borrowSharesRepaid - assetSharesToAdjust,
+        totalBorrowAmount: currentState.totalBorrowAmount - amountToAdjust,
+        totalBorrowShares: currentState.totalBorrowShares, // Shares already adjusted by RepayAsset event
     };
 
     await db.insert(IsolatedPairVaultState).values({

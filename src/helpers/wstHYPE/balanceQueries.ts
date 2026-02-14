@@ -14,8 +14,7 @@ import { UserBalanceEvent, UserPosition } from "ponder:schema";
 import { eq, and, lte, gte, desc, asc } from "ponder";
 import { getWstHYPEExchangeRateAtTimestamp } from "./exchangeRate";
 
-// wstHYPE token address
-const WSTHYPE_TOKEN_ADDRESS = "0x94e8396e0869c9F2200760aF63c94A00F2a0dB9D".toLowerCase() as `0x${string}`;
+const WSTHYPE_TOKEN_ADDRESS = "0x94e8396e0869c9F2200760aF0621aFd240E1CF38".toLowerCase() as `0x${string}`;
 
 /**
  * Get user's wstHYPE pool balance (scaled balance) at a specific timestamp

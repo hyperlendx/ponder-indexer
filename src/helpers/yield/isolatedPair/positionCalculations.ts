@@ -38,7 +38,7 @@ import {
 } from "ponder:schema";
 import { eq, and, gte, lte } from "ponder";
 import { calculateSegmentedIsolatedPairYield, calculateSegmentedIsolatedPairBorrowCost } from "./yieldCalculations";
-import { ExchangeRateCache } from "./exchangeRateCache";
+import { ExchangeRateCache, BorrowExchangeRateCache } from "./exchangeRateCache";
 import { calculateUSDValueNumber } from "../../usdCalculations";
 
 /**
@@ -284,9 +284,12 @@ export async function calculateCustomPeriodIsolatedPairPositions(
     const positions = await Promise.all(
         pairs.map(async (pair) => {
             // Get exchange rates at start and end of period
-            const [startExchangeRate, endExchangeRate] = await Promise.all([
+            // Need BOTH asset exchange rate (for deposits) and borrow exchange rate (for borrows)
+            const [startExchangeRate, endExchangeRate, startBorrowExchangeRate, endBorrowExchangeRate] = await Promise.all([
                 getIsolatedPairExchangeRate(context, pair, startTimestamp),
-                getIsolatedPairExchangeRate(context, pair, endTimestamp)
+                getIsolatedPairExchangeRate(context, pair, endTimestamp),
+                getIsolatedPairBorrowExchangeRate(context, pair, startTimestamp),
+                getIsolatedPairBorrowExchangeRate(context, pair, endTimestamp)
             ]);
 
             // Calculate all metrics in parallel for maximum performance
@@ -322,10 +325,11 @@ export async function calculateCustomPeriodIsolatedPairPositions(
             ]);
 
             // Convert shares to asset amounts using exchange rates
+            // Asset shares use asset exchange rate, borrow shares use borrow exchange rate
             const startAssetAmount = convertSharesToAssets(startAssetShares, startExchangeRate);
             const endAssetAmount = convertSharesToAssets(endAssetShares, endExchangeRate);
-            const startBorrowAmount = convertSharesToAssets(startBorrowShares, startExchangeRate);
-            const endBorrowAmount = convertSharesToAssets(endBorrowShares, endExchangeRate);
+            const startBorrowAmount = convertSharesToAssets(startBorrowShares, startBorrowExchangeRate);
+            const endBorrowAmount = convertSharesToAssets(endBorrowShares, endBorrowExchangeRate);
 
             // Calculate yield earned during the period
             // Formula: (endAmount - startAmount) + totalWithdrawn - totalDeposited
@@ -488,6 +492,13 @@ export interface SimplifiedIsolatedPairYieldPosition {
         rawDeposits: bigint;     // Raw deposit amounts at period start
         rawBorrows: bigint;      // Raw borrow amounts at period start
     };
+    ending_balances: {
+        collateral: bigint;      // Collateral balance at end of period
+        deposits: bigint;        // Deposit balance at end of period (shares × endExchangeRate)
+        borrows: bigint;         // Borrow balance at end of period (shares × endBorrowExchangeRate)
+        scaledDeposits: bigint;  // Asset shares at period end
+        scaledBorrows: bigint;   // Borrow shares at period end
+    };
     yieldSegments: IsolatedPairYieldSegmentDetail[];
     borrowCostSegments: IsolatedPairBorrowCostSegmentDetail[];
 }
@@ -542,8 +553,9 @@ export async function calculateUserIsolatedYieldPositions(
         return [];
     }
 
-    // Create cache for performance optimization
+    // Create caches for performance optimization
     const exchangeRateCache = new ExchangeRateCache();
+    const borrowExchangeRateCache = new BorrowExchangeRateCache();
 
     // Calculate yield positions for each pair in parallel
     const positions = await Promise.all(
@@ -577,8 +589,15 @@ export async function calculateUserIsolatedYieldPositions(
                 startAssetResult,
                 startBorrowResult,
                 startCollateralResult,
-                // Exchange rate at start
+                // Exchange rates at start
                 startExchangeRate,
+                startBorrowExchangeRate,
+                // End-of-period balances and exchange rates
+                endAssetShares,
+                endBorrowShares,
+                endCollateralBalance,
+                endExchangeRate,
+                endBorrowExchangeRate,
                 // Segmented yield and borrow cost calculations
                 yieldResult,
                 borrowCostResult
@@ -586,7 +605,7 @@ export async function calculateUserIsolatedYieldPositions(
                 // Fetch all deposit events during the period
                 dbQuery.select().from(DepositIsolated).where(
                     and(
-                        eq(DepositIsolated.caller, user as `0x${string}`),
+                        eq(DepositIsolated.owner, user as `0x${string}`),
                         eq(DepositIsolated.pair, pair as `0x${string}`),
                         gte(DepositIsolated.timestamp, startTimestamp),
                         lte(DepositIsolated.timestamp, endTimestamp)
@@ -595,7 +614,7 @@ export async function calculateUserIsolatedYieldPositions(
                 // Fetch all withdraw events during the period
                 dbQuery.select().from(WithdrawIsolated).where(
                     and(
-                        eq(WithdrawIsolated.caller, user as `0x${string}`),
+                        eq(WithdrawIsolated.owner, user as `0x${string}`),
                         eq(WithdrawIsolated.pair, pair as `0x${string}`),
                         gte(WithdrawIsolated.timestamp, startTimestamp),
                         lte(WithdrawIsolated.timestamp, endTimestamp)
@@ -649,7 +668,7 @@ export async function calculateUserIsolatedYieldPositions(
                 // Fetch raw DepositIsolated events BEFORE start timestamp for starting raw balance
                 dbQuery.select().from(DepositIsolated).where(
                     and(
-                        eq(DepositIsolated.caller, user as `0x${string}`),
+                        eq(DepositIsolated.owner, user as `0x${string}`),
                         eq(DepositIsolated.pair, pair as `0x${string}`),
                         lte(DepositIsolated.timestamp, startTimestamp)
                     )
@@ -657,7 +676,7 @@ export async function calculateUserIsolatedYieldPositions(
                 // Fetch raw WithdrawIsolated events BEFORE start timestamp for starting raw balance
                 dbQuery.select().from(WithdrawIsolated).where(
                     and(
-                        eq(WithdrawIsolated.caller, user as `0x${string}`),
+                        eq(WithdrawIsolated.owner, user as `0x${string}`),
                         eq(WithdrawIsolated.pair, pair as `0x${string}`),
                         lte(WithdrawIsolated.timestamp, startTimestamp)
                     )
@@ -682,11 +701,19 @@ export async function calculateUserIsolatedYieldPositions(
                 getIsolatedPairAssetSharesWithEvents(context, user, pair, startTimestamp),
                 getIsolatedPairBorrowSharesWithEvents(context, user, pair, startTimestamp),
                 getIsolatedPairCollateralBalanceWithEvents(context, user, pair, startTimestamp),
-                // Get exchange rate at start of period
+                // Get exchange rates at start of period (asset rate for deposits, borrow rate for borrows)
                 getIsolatedPairExchangeRate(context, pair, startTimestamp),
+                getIsolatedPairBorrowExchangeRate(context, pair, startTimestamp),
+                // Get end-of-period balances (shares at endTimestamp)
+                getIsolatedPairAssetShares(context, user, pair, endTimestamp),
+                getIsolatedPairBorrowShares(context, user, pair, endTimestamp),
+                getIsolatedPairCollateralBalance(context, user, pair, endTimestamp),
+                // Get exchange rates at end of period
+                getIsolatedPairExchangeRate(context, pair, endTimestamp),
+                getIsolatedPairBorrowExchangeRate(context, pair, endTimestamp),
                 // Calculate segmented yield and borrow cost (with caching for performance)
                 calculateSegmentedIsolatedPairYield(context, user, pair, startTimestamp, endTimestamp, decimals, exchangeRateCache, assetAddress),
-                calculateSegmentedIsolatedPairBorrowCost(context, user, pair, startTimestamp, endTimestamp, decimals, exchangeRateCache, assetAddress)
+                calculateSegmentedIsolatedPairBorrowCost(context, user, pair, startTimestamp, endTimestamp, decimals, borrowExchangeRateCache, assetAddress)
             ]);
 
             // Extract balances and events from enhanced results
@@ -695,8 +722,14 @@ export async function calculateUserIsolatedYieldPositions(
             const startCollateralBalance = startCollateralResult.balance;
 
             // Calculate starting balances (capital that was already active at period start)
+            // Use asset exchange rate for deposits, borrow exchange rate for borrows
             const startAssetAmount = convertSharesToAssets(startAssetShares, startExchangeRate);
-            const startBorrowAmount = convertSharesToAssets(startBorrowShares, startExchangeRate);
+            const startBorrowAmount = convertSharesToAssets(startBorrowShares, startBorrowExchangeRate);
+
+            // Calculate ending balances (current balances at end of period)
+            // Use end exchange rates for accurate current value
+            const endAssetAmount = convertSharesToAssets(endAssetShares, endExchangeRate);
+            const endBorrowAmount = convertSharesToAssets(endBorrowShares, endBorrowExchangeRate);
 
             // Collect all events that contributed to starting balances
             const events_before_period: IsolatedPairEventDetail[] = [
@@ -839,7 +872,10 @@ export async function calculateUserIsolatedYieldPositions(
 
             // Process borrow events during the period
             for (const event of borrowEvents) {
-                const borrowAmount = convertSharesToAssets(event.sharesAdded, event.exchangeRate);
+                // Use borrowAmount directly from the event (actual tokens borrowed from contract)
+                // instead of reconverting from shares, because event.exchangeRate stores the asset
+                // exchange rate, not the borrow exchange rate
+                const borrowAmount = event.borrowAmount;
                 totalBorrowed += borrowAmount;
                 totalScaledBorrowed += event.sharesAdded;  // Track scaled amount (shares)
 
@@ -861,7 +897,10 @@ export async function calculateUserIsolatedYieldPositions(
 
             // Process repay events during the period
             for (const event of repayEvents) {
-                const repayAmount = convertSharesToAssets(event.shares, event.exchangeRate);
+                // Use amountToRepay directly from the event (actual tokens repaid from contract)
+                // instead of reconverting from shares, because event.exchangeRate stores the asset
+                // exchange rate, not the borrow exchange rate
+                const repayAmount = event.amountToRepay;
                 totalRepaid += repayAmount;
                 // Note: Do NOT subtract from totalScaledBorrowed - we want total borrowed, not net
 
@@ -1078,6 +1117,13 @@ export async function calculateUserIsolatedYieldPositions(
                     scaledBorrows: startBorrowShares,
                     rawDeposits: startRawDeposits,
                     rawBorrows: startRawBorrows
+                },
+                ending_balances: {
+                    collateral: endCollateralBalance,
+                    deposits: endAssetAmount,
+                    borrows: endBorrowAmount,
+                    scaledDeposits: endAssetShares,
+                    scaledBorrows: endBorrowShares
                 },
                 yieldSegments,
                 borrowCostSegments

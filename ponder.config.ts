@@ -145,8 +145,8 @@ export default createConfig({
         WSTHYPE: {
             abi: WSTHYPEAbi,
             chain: "hyperEvm",
-            address: "0x94e8396e0869c9F2200760aF63c69F46D4F616F5",
-            startBlock: 3467418,
+            address: "0x94e8396e0869c9F2200760aF0621aFd240E1CF38",
+            startBlock: 25412,
         },
     },
     blocks: {

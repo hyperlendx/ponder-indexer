@@ -13,7 +13,7 @@ import {
 import { getUserPairEvents } from "./eventQueries";
 import { getUserIsolatedPairs } from "./pairTracking";
 import { EXCHANGE_PRECISION } from "./constants";
-import { ExchangeRateCache } from "./exchangeRateCache";
+import { ExchangeRateCache, BorrowExchangeRateCache } from "./exchangeRateCache";
 import { IsolatedPairBalanceCache } from "./balanceCache";
 import { DepositIsolated, WithdrawIsolated, BorrowAssetIsolated, RepayAssetIsolated, LiquidateIsolated, IsolatedPairRegistry, AssetPriceSnapshot } from "ponder:schema";
 import { eq, and, gte, lte, desc } from "ponder";
@@ -33,6 +33,8 @@ export interface IsolatedPairYield {
     endBorrowShares: bigint;
     startExchangeRate: bigint;
     endExchangeRate: bigint;
+    startBorrowExchangeRate: bigint;
+    endBorrowExchangeRate: bigint;
     startCollateralBalance: bigint;
     endCollateralBalance: bigint;
     startAssetValue: bigint;
@@ -98,77 +100,85 @@ export async function calculateIsolatedPairYield(
     startTimestamp: number,
     endTimestamp: number,
     exchangeRateCache?: ExchangeRateCache,
-    balanceCache?: IsolatedPairBalanceCache
+    balanceCache?: IsolatedPairBalanceCache,
+    borrowExchangeRateCache?: BorrowExchangeRateCache
 ): Promise<IsolatedPairYield> {
     // Create default caches if not provided (backward compatible)
     const rateCache = exchangeRateCache || new ExchangeRateCache();
+    const borrowRateCache = borrowExchangeRateCache || new BorrowExchangeRateCache();
     const balCache = balanceCache || new IsolatedPairBalanceCache();
 
-    // Get initial shares, collateral, and exchange rate at start of period
+    // Get initial shares, collateral, and exchange rates at start of period
     // Use caches to avoid redundant queries
-    const [startAssetShares, startBorrowShares, startCollateralBalance, startExchangeRate] = await Promise.all([
+    // Asset exchange rate for deposits, borrow exchange rate for borrows
+    const [startAssetShares, startBorrowShares, startCollateralBalance, startExchangeRate, startBorrowExchangeRate] = await Promise.all([
         balCache.getAssetShares(context, user, pair, startTimestamp),
         balCache.getBorrowShares(context, user, pair, startTimestamp),
         balCache.getCollateral(context, user, pair, startTimestamp),
-        rateCache.get(context, pair, startTimestamp)
+        rateCache.get(context, pair, startTimestamp),
+        borrowRateCache.get(context, pair, startTimestamp)
     ]);
 
     // Get all events during the period
     const events = await getUserPairEvents(context, user, pair, startTimestamp, endTimestamp);
 
-    // Initialize tracking variables
+    // Initialize tracking variables - separate exchange rates for asset and borrow
     let currentAssetShares = startAssetShares;
     let currentBorrowShares = startBorrowShares;
-    let currentExchangeRate = startExchangeRate;
-    let currentTimestamp = startTimestamp;
+    let currentAssetExchangeRate = startExchangeRate;
+    let currentBorrowExchangeRate = startBorrowExchangeRate;
 
     let totalAssetYield = 0n;
     let totalBorrowYield = 0n;
 
     // Process each event and calculate yield for the segment before it
     for (const event of events) {
-        // Calculate exchange rate change since last event
-        const exchangeRateChange = event.exchangeRate - currentExchangeRate;
+        // For asset yield: get asset exchange rate at event timestamp
+        // For borrow cost: get borrow exchange rate at event timestamp
+        // We need both rates at each event timestamp since events only store one rate
+        const [eventAssetRate, eventBorrowRate] = await Promise.all([
+            rateCache.get(context, pair, event.timestamp),
+            borrowRateCache.get(context, pair, event.timestamp)
+        ]);
 
-        if (exchangeRateChange !== 0n) {
-            // Calculate yield for this segment (from last event to this event)
-            // Asset yield (positive - earning interest)
-            if (currentAssetShares > 0n) {
-                const segmentAssetYield = (currentAssetShares * exchangeRateChange + EXCHANGE_PRECISION / 2n) / EXCHANGE_PRECISION;
-                totalAssetYield += segmentAssetYield;
-            }
+        // Calculate asset yield for this segment
+        const assetRateChange = eventAssetRate - currentAssetExchangeRate;
+        if (assetRateChange !== 0n && currentAssetShares > 0n) {
+            const segmentAssetYield = (currentAssetShares * assetRateChange + EXCHANGE_PRECISION / 2n) / EXCHANGE_PRECISION;
+            totalAssetYield += segmentAssetYield;
+        }
 
-            // Borrow yield (cost - positive value represents interest owed)
-            if (currentBorrowShares > 0n) {
-                const segmentBorrowYield = (currentBorrowShares * exchangeRateChange + EXCHANGE_PRECISION / 2n) / EXCHANGE_PRECISION;
-                totalBorrowYield += segmentBorrowYield;
-            }
+        // Calculate borrow cost for this segment (using borrow exchange rate)
+        const borrowRateChange = eventBorrowRate - currentBorrowExchangeRate;
+        if (borrowRateChange !== 0n && currentBorrowShares > 0n) {
+            const segmentBorrowYield = (currentBorrowShares * borrowRateChange + EXCHANGE_PRECISION / 2n) / EXCHANGE_PRECISION;
+            totalBorrowYield += segmentBorrowYield;
         }
 
         // Update shares based on this event
         currentAssetShares += event.assetSharesDelta;
         currentBorrowShares += event.borrowSharesDelta;
-        currentExchangeRate = event.exchangeRate;
-        currentTimestamp = event.timestamp;
+        currentAssetExchangeRate = eventAssetRate;
+        currentBorrowExchangeRate = eventBorrowRate;
     }
 
     // Calculate yield for the final segment (from last event to end of period)
-    // Use cache to get accurate rate even if no event at exact timestamp
-    const endExchangeRate = await rateCache.get(context, pair, endTimestamp);
-    const finalExchangeRateChange = endExchangeRate - currentExchangeRate;
+    // Use caches to get accurate rates even if no event at exact timestamp
+    const [endExchangeRate, endBorrowExchangeRate] = await Promise.all([
+        rateCache.get(context, pair, endTimestamp),
+        borrowRateCache.get(context, pair, endTimestamp)
+    ]);
 
-    if (finalExchangeRateChange !== 0n) {
-        // Asset yield for final segment
-        if (currentAssetShares > 0n) {
-            const finalAssetYield = (currentAssetShares * finalExchangeRateChange + EXCHANGE_PRECISION / 2n) / EXCHANGE_PRECISION;
-            totalAssetYield += finalAssetYield;
-        }
+    const finalAssetRateChange = endExchangeRate - currentAssetExchangeRate;
+    if (finalAssetRateChange !== 0n && currentAssetShares > 0n) {
+        const finalAssetYield = (currentAssetShares * finalAssetRateChange + EXCHANGE_PRECISION / 2n) / EXCHANGE_PRECISION;
+        totalAssetYield += finalAssetYield;
+    }
 
-        // Borrow yield for final segment (cost - positive value represents interest owed)
-        if (currentBorrowShares > 0n) {
-            const finalBorrowYield = (currentBorrowShares * finalExchangeRateChange + EXCHANGE_PRECISION / 2n) / EXCHANGE_PRECISION;
-            totalBorrowYield += finalBorrowYield;
-        }
+    const finalBorrowRateChange = endBorrowExchangeRate - currentBorrowExchangeRate;
+    if (finalBorrowRateChange !== 0n && currentBorrowShares > 0n) {
+        const finalBorrowYield = (currentBorrowShares * finalBorrowRateChange + EXCHANGE_PRECISION / 2n) / EXCHANGE_PRECISION;
+        totalBorrowYield += finalBorrowYield;
     }
 
     // Get final shares and collateral for return value
@@ -177,10 +187,11 @@ export async function calculateIsolatedPairYield(
     const endCollateralBalance = await balCache.getCollateral(context, user, pair, endTimestamp);
 
     // Calculate asset and borrow values at start and end
+    // Use asset exchange rate for deposits, borrow exchange rate for borrows
     const startAssetValue = convertSharesToAssets(startAssetShares, startExchangeRate);
     const endAssetValue = convertSharesToAssets(endAssetShares, endExchangeRate);
-    const startBorrowValue = convertSharesToAssets(startBorrowShares, startExchangeRate);
-    const endBorrowValue = convertSharesToAssets(endBorrowShares, endExchangeRate);
+    const startBorrowValue = convertSharesToAssets(startBorrowShares, startBorrowExchangeRate);
+    const endBorrowValue = convertSharesToAssets(endBorrowShares, endBorrowExchangeRate);
 
     // Net yield = asset yield - borrow cost
     // totalAssetYield is positive (earnings from deposits)
@@ -199,6 +210,8 @@ export async function calculateIsolatedPairYield(
         endBorrowShares,
         startExchangeRate,
         endExchangeRate,
+        startBorrowExchangeRate,
+        endBorrowExchangeRate,
         startCollateralBalance,
         endCollateralBalance,
         startAssetValue,
@@ -250,7 +263,8 @@ export async function calculateAllIsolatedPairYields(
     startTimestamp: number,
     endTimestamp: number,
     exchangeRateCache?: ExchangeRateCache,
-    balanceCache?: IsolatedPairBalanceCache
+    balanceCache?: IsolatedPairBalanceCache,
+    borrowExchangeRateCache?: BorrowExchangeRateCache
 ): Promise<IsolatedPairYield[]> {
     // Get all pairs user has interacted with during this period
     const pairs = await getUserIsolatedPairs(context, user, startTimestamp, endTimestamp);
@@ -261,6 +275,7 @@ export async function calculateAllIsolatedPairYields(
 
     // Create caches if not provided
     const rateCache = exchangeRateCache || new ExchangeRateCache();
+    const borrowRateCache = borrowExchangeRateCache || new BorrowExchangeRateCache();
     const balCache = balanceCache || new IsolatedPairBalanceCache();
 
     // Prefetch exchange rates for all pairs at start and end timestamps
@@ -270,6 +285,7 @@ export async function calculateAllIsolatedPairYields(
         { pair, timestamp: endTimestamp }
     ]);
     await rateCache.prefetch(context, prefetchList);
+    await borrowRateCache.prefetch(context, prefetchList);
 
     // Prefetch balances for all pairs at start and end timestamps
     await balCache.prefetchAll(context, user, pairs, [startTimestamp, endTimestamp]);
@@ -278,7 +294,7 @@ export async function calculateAllIsolatedPairYields(
     const yields = await Promise.all(
         pairs.map(pair => calculateIsolatedPairYield(
             context, user, pair, startTimestamp, endTimestamp,
-            rateCache, balCache
+            rateCache, balCache, borrowRateCache
         ))
     );
 
@@ -548,7 +564,7 @@ export async function calculateSegmentedIsolatedPairBorrowCost(
     startTimestamp: number,
     endTimestamp: number,
     decimals: number,
-    exchangeRateCache?: ExchangeRateCache,
+    borrowExchangeRateCache?: BorrowExchangeRateCache,
     assetAddress?: `0x${string}` | null
 ): Promise<{
     totalBorrowCost: bigint;
@@ -674,10 +690,10 @@ export async function calculateSegmentedIsolatedPairBorrowCost(
         }
     }
 
-    // Create cache if not provided
-    const rateCache = exchangeRateCache || new ExchangeRateCache();
+    // Create borrow rate cache if not provided
+    const rateCache = borrowExchangeRateCache || new BorrowExchangeRateCache();
 
-    // Prefetch all exchange rates for segments
+    // Prefetch all borrow exchange rates for segments
     const prefetchList = segments.flatMap(seg => [
         { pair, timestamp: seg.startTime },
         { pair, timestamp: seg.endTime }

@@ -76,6 +76,7 @@ import {calculateScaledBalance, calculateLiquidityIndexAtTimestamp} from "./help
 import {updateUserIsolatedPairTracking} from "./helpers/userIsolatedPairTracker";
 import {
     calculateExchangeRateFromVaultState,
+    calculateBorrowExchangeRateFromVaultState,
     getVaultStateAtTimestamp,
     updateVaultStateAfterDeposit,
     updateVaultStateAfterWithdraw,
@@ -604,9 +605,10 @@ ponder.on("IsolatedPair:BorrowAsset", async ({event, context}) => {
         event.id
     );
 
-    // Calculate exchange rate from the returned vault state
+    // Calculate BORROW exchange rate from the returned vault state
+    // (not asset exchange rate - borrow rate uses totalBorrow, not totalAsset)
     const exchangeRate = newVaultState
-        ? calculateExchangeRateFromVaultState(newVaultState.totalAssetAmount, newVaultState.totalAssetShares)
+        ? calculateBorrowExchangeRateFromVaultState(newVaultState.totalBorrowAmount, newVaultState.totalBorrowShares)
         : 1000000000000000000n; // Default 1:1 if no state
 
     await context.db.insert(BorrowAssetIsolated).values({
@@ -659,9 +661,10 @@ ponder.on("IsolatedPair:RepayAsset", async ({event, context}) => {
         event.id
     );
 
-    // Calculate exchange rate from the returned vault state
+    // Calculate BORROW exchange rate from the returned vault state
+    // (not asset exchange rate - borrow rate uses totalBorrow, not totalAsset)
     const exchangeRate = newVaultState
-        ? calculateExchangeRateFromVaultState(newVaultState.totalAssetAmount, newVaultState.totalAssetShares)
+        ? calculateBorrowExchangeRateFromVaultState(newVaultState.totalBorrowAmount, newVaultState.totalBorrowShares)
         : 1000000000000000000n; // Default 1:1 if no state
 
     await context.db.insert(RepayAssetIsolated).values({
@@ -714,9 +717,10 @@ ponder.on("IsolatedPair:RepayAssetWithCollateral", async ({event, context}) => {
         event.id
     );
 
-    // Calculate exchange rate from the returned vault state
+    // Calculate BORROW exchange rate from the returned vault state
+    // (not asset exchange rate - borrow rate uses totalBorrow, not totalAsset)
     const exchangeRate = newVaultState
-        ? calculateExchangeRateFromVaultState(newVaultState.totalAssetAmount, newVaultState.totalAssetShares)
+        ? calculateBorrowExchangeRateFromVaultState(newVaultState.totalBorrowAmount, newVaultState.totalBorrowShares)
         : 1000000000000000000n; // Default 1:1 if no state
 
     await context.db.insert(RepayAssetWithCollateralIsolated).values({
@@ -823,30 +827,26 @@ ponder.on("IsolatedPair:Liquidate", async ({event, context}) => {
     // Get asset and collateral addresses and their USD prices from Chainlink oracles
     const assetInfo = await getIsolatedPairAssetInfo(context, event, pair);
 
-    // Asset state adjustments
-    const assetSharesToAdjust = event.args._sharesToAdjust;
-    const assetAmountToAdjust = event.args._amountToAdjust;
-    // Borrow state adjustments (liquidation repays debt)
-    const borrowSharesRepaid = event.args._sharesToLiquidate;
-    const borrowAmountRepaid = event.args._amountLiquidatorToRepay;
+    // Bad debt adjustment amount (only this needs to be handled here;
+    // the repayment portion is already handled by the RepayAsset event
+    // that the contract emits from its internal _repayAsset() call)
+    const amountToAdjust = event.args._amountToAdjust;
 
-    // Update vault state and get the new state back
+    // Update vault state - only handles bad debt adjustment
     const newVaultState = await updateVaultStateAfterLiquidation(
         context.db,
         pair,
-        assetSharesToAdjust,
-        assetAmountToAdjust,
-        borrowAmountRepaid,
-        borrowSharesRepaid,
+        amountToAdjust,
         Number(event.block.timestamp),
         Number(event.block.number),
         event.transaction.hash,
         event.id
     );
 
-    // Calculate exchange rate from the returned vault state
+    // Calculate BORROW exchange rate from the returned vault state
+    // Liquidations involve borrow shares, so use borrow exchange rate (not asset rate)
     const exchangeRate = newVaultState
-        ? calculateExchangeRateFromVaultState(newVaultState.totalAssetAmount, newVaultState.totalAssetShares)
+        ? calculateBorrowExchangeRateFromVaultState(newVaultState.totalBorrowAmount, newVaultState.totalBorrowShares)
         : 1000000000000000000n; // Default 1:1 if no state
 
     await context.db.insert(LiquidateIsolated).values({
@@ -1552,7 +1552,7 @@ ponder.on("BeHYPEStakingCore:ExchangeRatioUpdated", async ({ event, context }) =
 // Track Transfer events for user balances and Rebase events for yield calculation
 // ============================================================================
 
-const WSTHYPE_ADDRESS = "0x94e8396e0869c9F2200760aF63c69F46D4F616F5" as `0x${string}`;
+const WSTHYPE_ADDRESS = "0x94e8396e0869c9F2200760aF0621aFd240E1CF38" as `0x${string}`;
 
 /**
  * Read current assetsPerShare (exchange rate) from wstHYPE contract

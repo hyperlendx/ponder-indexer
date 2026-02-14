@@ -302,6 +302,13 @@ app.get("/user/:address/custom-period-yield-isolated", async (c) => {
                 rawDeposits: pos.starting_balances?.rawDeposits?.toString() ?? '0',
                 rawBorrows: pos.starting_balances?.rawBorrows?.toString() ?? '0'
             },
+            ending_balances: {
+                collateral: pos.ending_balances?.collateral?.toString() ?? '0',
+                deposits: pos.ending_balances?.deposits?.toString() ?? '0',
+                borrows: pos.ending_balances?.borrows?.toString() ?? '0',
+                scaledDeposits: pos.ending_balances?.scaledDeposits?.toString() ?? '0',
+                scaledBorrows: pos.ending_balances?.scaledBorrows?.toString() ?? '0'
+            },
             yieldSegments: (pos.yieldSegments ?? []).map((seg) => {
                 if (!seg) {
                     console.error(`yieldSegment is null/undefined!`);
@@ -1488,8 +1495,8 @@ app.get("/user/:address/daily-yield-breakdown-wsthype", async (c) => {
         const { calculateWstHYPEDailyYieldBreakdown } = await import("../helpers/wstHYPE/yieldCalculations");
         const result = await calculateWstHYPEDailyYieldBreakdown(context, userAddress, fromTimestamp, toTimestamp);
 
-        // wstHYPE token address for easy mapping
-        const WSTHYPE_TOKEN_ADDRESS = "0x94e8396e0869c9F2200760aF63c94A00F2a0dB9D".toLowerCase();
+        // wstHYPE token address for easy mapping (the underlying asset in the HyperLend pool)
+        const WSTHYPE_TOKEN_ADDRESS = "0x94e8396e0869c9f2200760af0621afd240e1cf38".toLowerCase();
 
         return c.json({
             user: result.user,
@@ -1571,8 +1578,8 @@ app.get("/user/:address/daily-portfolio-value-wsthype", async (c) => {
         const { calculateWstHYPEDailyPortfolioValue } = await import("../helpers/wstHYPE/yieldCalculations");
         const result = await calculateWstHYPEDailyPortfolioValue(context, userAddress, fromTimestamp, toTimestamp);
 
-        // wstHYPE token address for easy mapping
-        const WSTHYPE_TOKEN_ADDRESS = "0x94e8396e0869c9F2200760aF63c94A00F2a0dB9D".toLowerCase();
+        // wstHYPE token address for easy mapping (the underlying asset in the HyperLend pool)
+        const WSTHYPE_TOKEN_ADDRESS = "0x94e8396e0869c9f2200760af0621afd240e1cf38".toLowerCase();
 
         if (result.dailyPortfolioValues.length === 0) {
             const expectedDays = Math.ceil((toTimestamp - fromTimestamp) / (24 * 60 * 60));
