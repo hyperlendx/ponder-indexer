@@ -996,6 +996,49 @@ export const OverseerAbi = [
     },
     {
         "type": "event",
+        "name": "Rebase",
+        "inputs": [
+            {
+                "name": "currentSupply",
+                "type": "uint256",
+                "indexed": false,
+                "internalType": "uint256"
+            },
+            {
+                "name": "newSupply",
+                "type": "uint256",
+                "indexed": false,
+                "internalType": "uint256"
+            },
+            {
+                "name": "rebaseInterval",
+                "type": "uint256",
+                "indexed": false,
+                "internalType": "uint256"
+            },
+            {
+                "name": "apr",
+                "type": "int256",
+                "indexed": true,
+                "internalType": "int256"
+            },
+            {
+                "name": "currentShareRate",
+                "type": "uint256",
+                "indexed": true,
+                "internalType": "uint256"
+            },
+            {
+                "name": "timeElapsed",
+                "type": "uint256",
+                "indexed": true,
+                "internalType": "uint256"
+            }
+        ],
+        "anonymous": false
+    },
+    {
+        "type": "event",
         "name": "RoleAdminChanged",
         "inputs": [
             {

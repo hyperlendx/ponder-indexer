@@ -40,37 +40,38 @@ export async function getInterestRateAtTimestamp(
     const dbQuery = db.sql || db;
 
     try {
-        // First, try to get the rate from UpdateRate events
-        const updateRateEvents = await dbQuery
-            .select()
-            .from(UpdateRateIsolated)
-            .where(
-                and(
-                    eq(UpdateRateIsolated.pair, pair as `0x${string}`),
-                    lte(UpdateRateIsolated.timestamp, targetTimestamp)
+        // Run both queries in parallel instead of sequential fallback
+        const [updateRateEvents, addInterestEvents] = await Promise.all([
+            dbQuery
+                .select()
+                .from(UpdateRateIsolated)
+                .where(
+                    and(
+                        eq(UpdateRateIsolated.pair, pair as `0x${string}`),
+                        lte(UpdateRateIsolated.timestamp, targetTimestamp)
+                    )
                 )
-            )
-            .orderBy(desc(UpdateRateIsolated.timestamp))
-            .limit(1);
+                .orderBy(desc(UpdateRateIsolated.timestamp))
+                .limit(1),
+            dbQuery
+                .select()
+                .from(AddInterestIsolated)
+                .where(
+                    and(
+                        eq(AddInterestIsolated.pair, pair as `0x${string}`),
+                        lte(AddInterestIsolated.timestamp, targetTimestamp)
+                    )
+                )
+                .orderBy(desc(AddInterestIsolated.timestamp))
+                .limit(1)
+        ]);
 
+        // Prefer UpdateRate events (primary source)
         if (updateRateEvents && updateRateEvents.length > 0) {
             return BigInt(updateRateEvents[0].newRatePerSec);
         }
 
-        // Fallback: try to get the rate from AddInterest events
-        // AddInterest events contain the 'rate' field which is the ratePerSec
-        const addInterestEvents = await dbQuery
-            .select()
-            .from(AddInterestIsolated)
-            .where(
-                and(
-                    eq(AddInterestIsolated.pair, pair as `0x${string}`),
-                    lte(AddInterestIsolated.timestamp, targetTimestamp)
-                )
-            )
-            .orderBy(desc(AddInterestIsolated.timestamp))
-            .limit(1);
-
+        // Fallback: use AddInterest events
         if (addInterestEvents && addInterestEvents.length > 0) {
             return BigInt(addInterestEvents[0].rate);
         }

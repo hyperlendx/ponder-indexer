@@ -62,8 +62,7 @@ import config from "../ponder.config";
 // kHYPE (Kinetiq Liquid Staking) ABIs
 import {StakingAccountantAbi} from "../abis/StakingAccountantAbi";
 
-// wstHYPE (Thunderhead Wrapped Staked HYPE) ABIs
-import {WSTHYPEAbi} from "../abis/WSTHYPEAbi";
+
 
 import {
     getOraclePrice,
@@ -1552,41 +1551,20 @@ ponder.on("BeHYPEStakingCore:ExchangeRatioUpdated", async ({ event, context }) =
 // Track Transfer events for user balances and Rebase events for yield calculation
 // ============================================================================
 
-const WSTHYPE_ADDRESS = "0x94e8396e0869c9F2200760aF0621aFd240E1CF38" as `0x${string}`;
-
-/**
- * Read current assetsPerShare (exchange rate) from wstHYPE contract
- * Returns HYPE value per wstHYPE share with 18 decimals
- */
-async function readWstHYPEAssetsPerShare(context: any): Promise<bigint> {
-    try {
-        const assetsPerShare = await context.client.readContract({
-            abi: WSTHYPEAbi,
-            address: WSTHYPE_ADDRESS,
-            functionName: "assetsPerShare",
-            args: [],
-        });
-        return assetsPerShare as bigint;
-    } catch (error) {
-        console.error("[wstHYPE] Error reading assetsPerShare:", error);
-        return BigInt(1e18); // Default 1:1 rate
-    }
-}
-
 // ============================================================================
-// 2. wstHYPE Rebase Event Handler
-// Primary event for exchange rate changes (staking rewards distribution)
-// This is when the exchange rate (assetsPerShare) actually changes
+// 2. wstHYPE Rebase Event Handler (via Overseer contract)
+// The Overseer contract emits Rebase events when staking rewards are distributed
+// The currentShareRate indexed topic contains the exchange rate (stHYPE.balancePerShare())
 // ============================================================================
-ponder.on("WSTHYPE:Rebase", async ({event, context}) => {
-    const {currentSupply, newSupply, rebaseInterval} = event.args;
+ponder.on("WstHYPEOverseer:Rebase", async ({event, context}) => {
+    const {currentSupply, newSupply, rebaseInterval, currentShareRate} = event.args;
     const timestamp = Number(event.block.timestamp);
     const blockNumber = event.block.number;
     const logIndex = event.log.logIndex;
     const txHash = event.transaction.hash;
 
-    // Read the current assetsPerShare from contract - this is the new rate after rebase
-    const assetsPerShare = await readWstHYPEAssetsPerShare(context);
+    // currentShareRate is the exchange rate directly from the event (stHYPE.balancePerShare())
+    const assetsPerShare = currentShareRate;
 
     // Store exchange rate snapshot
     await context.db.insert(WstHYPEExchangeRateSnapshot).values({

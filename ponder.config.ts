@@ -19,6 +19,7 @@ import {StakingCoreAbi} from "./abis/StakingCoreAbi";
 
 // wstHYPE (Thunderhead Wrapped Staked HYPE) ABIs
 import {WSTHYPEAbi} from "./abis/WSTHYPEAbi";
+import {OverseerAbi} from "./abis/OverseerAbi";
 
 export default createConfig({
     chains: {
@@ -141,11 +142,20 @@ export default createConfig({
         // Exchange rate is assetsPerShare (HYPE per wstHYPE)
         // ============================================================================
 
-        // wstHYPE Token - Track Transfer and Rebase events
+        // wstHYPE Token - Track Transfer events for user balances
         WSTHYPE: {
             abi: WSTHYPEAbi,
             chain: "hyperEvm",
             address: "0x94e8396e0869c9F2200760aF0621aFd240E1CF38",
+            startBlock: 25412,
+        },
+
+        // Overseer (Thunderhead) - Track Rebase events for wstHYPE exchange rate changes
+        // Rebase events are emitted by the Overseer contract, NOT by wstHYPE itself
+        WstHYPEOverseer: {
+            abi: OverseerAbi,
+            chain: "hyperEvm",
+            address: "0xB96f07367e69e86d6e9C3F29215885104813eeAE",
             startBlock: 25412,
         },
     },

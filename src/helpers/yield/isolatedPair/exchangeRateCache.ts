@@ -1,4 +1,4 @@
-import { calculateIsolatedPairExchangeRate, calculateIsolatedPairBorrowExchangeRate } from "./vaultExchangeRate";
+import { calculateIsolatedPairExchangeRate, calculateIsolatedPairBorrowExchangeRate, calculateBothExchangeRates } from "./vaultExchangeRate";
 
 /**
  * In-memory cache for isolated pair exchange rates to avoid redundant database queries
@@ -212,6 +212,14 @@ export class ExchangeRateCache {
     }
 
     /**
+     * Directly set a cached value (used by prefetchBoth to populate without re-querying)
+     */
+    set(pair: string, timestamp: number, rate: bigint): void {
+        const key = this.getCacheKey(pair, timestamp);
+        this.cache.set(key, rate);
+    }
+
+    /**
      * Estimate memory usage of the cache
      * Each entry is approximately 40 bytes (key + bigint value)
      *
@@ -297,6 +305,14 @@ export class BorrowExchangeRateCache {
         await Promise.all(promises);
     }
 
+    /**
+     * Directly set a cached value (used by prefetchBoth to populate without re-querying)
+     */
+    set(pair: string, timestamp: number, rate: bigint): void {
+        const key = this.getCacheKey(pair, timestamp);
+        this.cache.set(key, rate);
+    }
+
     clear(): void {
         this.cache.clear();
     }
@@ -309,4 +325,60 @@ export class BorrowExchangeRateCache {
         const key = this.getCacheKey(pair, timestamp);
         return this.cache.has(key);
     }
+}
+
+/**
+ * Helper to run async tasks with bounded concurrency.
+ * Processes items in batches of `limit` to avoid overwhelming the database.
+ *
+ * @param items - Array of items to process
+ * @param limit - Maximum number of concurrent tasks
+ * @param fn - Async function to apply to each item
+ */
+async function runWithConcurrency<T>(
+    items: T[],
+    limit: number,
+    fn: (item: T) => Promise<void>
+): Promise<void> {
+    for (let i = 0; i < items.length; i += limit) {
+        const batch = items.slice(i, i + limit);
+        await Promise.all(batch.map(fn));
+    }
+}
+
+/**
+ * Prefetch BOTH asset and borrow exchange rates together, sharing the vault state query.
+ *
+ * This is the most efficient way to populate both caches when you need both rates
+ * for the same pair+timestamp combinations. Each pair+timestamp does:
+ * - 1 vault state query (instead of 2)
+ * - 1 interest rate query (instead of 2)
+ *
+ * Also applies concurrency limiting to avoid overwhelming the database connection pool.
+ *
+ * @param context - Ponder context
+ * @param pairTimestamps - Array of {pair, timestamp} to prefetch
+ * @param assetCache - ExchangeRateCache to populate
+ * @param borrowCache - BorrowExchangeRateCache to populate
+ * @param concurrencyLimit - Max concurrent DB operations (default: 20)
+ */
+export async function prefetchBothExchangeRates(
+    context: any,
+    pairTimestamps: Array<{ pair: string; timestamp: number }>,
+    assetCache: ExchangeRateCache,
+    borrowCache: BorrowExchangeRateCache,
+    concurrencyLimit: number = 20
+): Promise<void> {
+    // Filter to only uncached entries (uncached in EITHER cache)
+    const uncached = pairTimestamps.filter(({ pair, timestamp }) =>
+        !assetCache.has(pair, timestamp) || !borrowCache.has(pair, timestamp)
+    );
+
+    if (uncached.length === 0) return;
+
+    await runWithConcurrency(uncached, concurrencyLimit, async ({ pair, timestamp }) => {
+        const { assetRate, borrowRate } = await calculateBothExchangeRates(context, pair, timestamp);
+        assetCache.set(pair, timestamp, assetRate);
+        borrowCache.set(pair, timestamp, borrowRate);
+    });
 }

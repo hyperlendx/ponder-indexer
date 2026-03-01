@@ -241,3 +241,97 @@ export async function calculateIsolatedPairBorrowExchangeRate(
         return EXCHANGE_PRECISION;
     }
 }
+
+/**
+ * Calculate BOTH asset and borrow exchange rates in a single call, sharing the vault state query.
+ *
+ * This is an optimization for batch operations (cache prefetching) where both rates are needed
+ * for the same pair+timestamp. Instead of 2 separate vault state queries + 2 interest rate queries,
+ * this function does 1 vault state query + 1 interest rate query.
+ *
+ * The calculations are IDENTICAL to calculateIsolatedPairExchangeRate and
+ * calculateIsolatedPairBorrowExchangeRate — only the data fetching is shared.
+ *
+ * @param context - Ponder context with database access
+ * @param pair - Isolated pair address
+ * @param targetTimestamp - Target timestamp to calculate exchange rates for
+ * @param feeToProtocolRate - Optional fee rate (defaults to 2% = 20000)
+ * @returns Object with both assetRate and borrowRate (1e18 precision)
+ */
+export async function calculateBothExchangeRates(
+    context: any,
+    pair: string,
+    targetTimestamp: number,
+    feeToProtocolRate: bigint = DEFAULT_FEE_TO_PROTOCOL_RATE
+): Promise<{ assetRate: bigint; borrowRate: bigint }> {
+    const { db } = context;
+
+    try {
+        // Single vault state query (shared between both calculations)
+        const vaultStateWithTime = await getVaultStateWithTimestamp(db, pair, targetTimestamp);
+
+        if (!vaultStateWithTime) {
+            return { assetRate: EXCHANGE_PRECISION, borrowRate: EXCHANGE_PRECISION };
+        }
+
+        // Calculate base rates from vault state
+        const baseAssetRate = calculateExchangeRateFromVaultState(
+            vaultStateWithTime.totalAssetAmount,
+            vaultStateWithTime.totalAssetShares
+        );
+        const baseBorrowRate = calculateBorrowExchangeRateFromVaultState(
+            vaultStateWithTime.totalBorrowAmount,
+            vaultStateWithTime.totalBorrowShares
+        );
+
+        // If vault state is at or after target, no extrapolation needed
+        if (vaultStateWithTime.timestamp >= targetTimestamp) {
+            return { assetRate: baseAssetRate, borrowRate: baseBorrowRate };
+        }
+
+        // If no borrows, no interest accrues — both rates stay at base
+        if (vaultStateWithTime.totalBorrowAmount === 0n) {
+            return { assetRate: baseAssetRate, borrowRate: baseBorrowRate };
+        }
+
+        const timeElapsed = BigInt(targetTimestamp - vaultStateWithTime.timestamp);
+
+        // Single interest rate query (shared between both calculations)
+        const ratePerSec = await getInterestRateAtTimestamp(db, pair, vaultStateWithTime.timestamp);
+
+        if (ratePerSec === 0n) {
+            return { assetRate: baseAssetRate, borrowRate: baseBorrowRate };
+        }
+
+        // Calculate interest earned (shared)
+        const interestEarned = (vaultStateWithTime.totalBorrowAmount * ratePerSec * timeElapsed) / EXCHANGE_PRECISION;
+
+        // === Asset exchange rate (same logic as calculateIsolatedPairExchangeRate) ===
+        const newTotalAssetAmount = vaultStateWithTime.totalAssetAmount + interestEarned;
+        let newTotalAssetShares = vaultStateWithTime.totalAssetShares;
+        if (feeToProtocolRate > 0n && interestEarned > 0n) {
+            const feesAmount = (interestEarned * feeToProtocolRate) / FEE_PRECISION;
+            const denominator = newTotalAssetAmount - feesAmount;
+            if (denominator > 0n) {
+                const feesShare = (feesAmount * vaultStateWithTime.totalAssetShares) / denominator;
+                newTotalAssetShares = vaultStateWithTime.totalAssetShares + feesShare;
+            }
+        }
+        const assetRate = calculateExchangeRateFromVaultState(newTotalAssetAmount, newTotalAssetShares);
+
+        // === Borrow exchange rate (same logic as calculateIsolatedPairBorrowExchangeRate) ===
+        let borrowRate: bigint;
+        if (vaultStateWithTime.totalBorrowShares === 0n) {
+            borrowRate = baseBorrowRate;
+        } else {
+            const newTotalBorrowAmount = vaultStateWithTime.totalBorrowAmount + interestEarned;
+            borrowRate = calculateBorrowExchangeRateFromVaultState(newTotalBorrowAmount, vaultStateWithTime.totalBorrowShares);
+        }
+
+        return { assetRate, borrowRate };
+
+    } catch (error: any) {
+        console.error(`Error calculating both exchange rates for pair ${pair} at timestamp ${targetTimestamp}:`, error);
+        return { assetRate: EXCHANGE_PRECISION, borrowRate: EXCHANGE_PRECISION };
+    }
+}
