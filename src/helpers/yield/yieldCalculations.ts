@@ -1,11 +1,10 @@
-import { UserBalanceEvent, Borrow, Repay, LiquidationCall } from "ponder:schema";
+import { UserBalanceEvent, Borrow, Repay, LiquidationCall, AssetPriceSnapshot } from "ponder:schema";
 import { eq, and, gte, lte, desc } from "ponder";
 import { calculateLiquidityIndexAtTimestamp, calculateActualBalance } from "../aave";
 import { getScaledBalanceAtTimestamp, getScaledBorrowBalanceAtTimestamp } from "./balanceQueries";
 import { LiquidityIndexCache } from "./liquidityIndexCache";
 import { calculateVariableBorrowIndexAtTimestamp } from "../aave/borrowIndex";
 import { calculateUSDValueNumber } from "../usdCalculations";
-import { getAssetPriceForSegment } from "../getPrice";
 
 /**
  * Calculate interest earned in a specific time segment
@@ -223,6 +222,18 @@ export async function calculateSegmentedCustomPeriodYield(
     // Use the most recent price, or 0 if no events found
     const currentPrice = recentEvent.length > 0 ? recentEvent[0].assetPrice : 0n;
 
+    // Batch-fetch all price snapshots for this asset once (avoids one DB query per segment)
+    const allPriceSnapshots = await dbQuery
+        .select()
+        .from(AssetPriceSnapshot)
+        .where(
+            and(
+                eq(AssetPriceSnapshot.asset, asset as `0x${string}`),
+                lte(AssetPriceSnapshot.timestamp, endTimestamp)
+            )
+        )
+        .orderBy(desc(AssetPriceSnapshot.timestamp));
+
     // Calculate interest for each segment and collect detailed information
     let totalInterest = 0n;
     let totalInterestUSD = 0;
@@ -254,14 +265,15 @@ export async function calculateSegmentedCustomPeriodYield(
         const actualBalance = calculateActualBalance(segment.scaledBalance, startLiquidityIndex);
         const durationDays = (Number(segment.endTime) - Number(segment.startTime)) / (24 * 60 * 60);
 
-        // Get segment-specific asset price
-        const segmentPrice = await getAssetPriceForSegment(
-            context,
-            asset,
-            segment.startTime,
-            segment.endTime,
-            false // not isolated pair
-        );
+        // Get segment-specific asset price from pre-fetched snapshots (no DB query)
+        const segmentMidpoint = Math.floor((segment.startTime + segment.endTime) / 2);
+        let segmentPrice = 0n;
+        for (const snap of allPriceSnapshots) {
+            if (Number(snap.timestamp) <= segmentMidpoint && snap.price) {
+                segmentPrice = snap.price;
+                break;
+            }
+        }
         const priceToUse = segmentPrice > 0n ? segmentPrice : currentPrice;
 
         // Calculate USD value for this segment's yield using segment-specific price
@@ -566,6 +578,18 @@ export async function calculateSegmentedCustomPeriodBorrowCost(
         }
     }
 
+    // Batch-fetch all price snapshots for this asset once (avoids one DB query per segment)
+    const allPriceSnapshots = await dbQuery
+        .select()
+        .from(AssetPriceSnapshot)
+        .where(
+            and(
+                eq(AssetPriceSnapshot.asset, asset as `0x${string}`),
+                lte(AssetPriceSnapshot.timestamp, endTimestamp)
+            )
+        )
+        .orderBy(desc(AssetPriceSnapshot.timestamp));
+
     // Calculate borrow cost for each segment and collect detailed information
     let totalBorrowCost = 0n;
     let totalBorrowCostUSD = 0;
@@ -594,14 +618,15 @@ export async function calculateSegmentedCustomPeriodBorrowCost(
         const actualBorrowBalance = calculateActualBalance(segment.scaledBorrowBalance, startBorrowIndex);
         const durationDays = (Number(segment.endTime) - Number(segment.startTime)) / (24 * 60 * 60);
 
-        // Get segment-specific asset price (fallback to current price if not found)
-        const segmentPrice = await getAssetPriceForSegment(
-            context,
-            asset,
-            segment.startTime,
-            segment.endTime,
-            false // not isolated pair
-        );
+        // Get segment-specific asset price from pre-fetched snapshots (no DB query)
+        const segmentMidpoint = Math.floor((segment.startTime + segment.endTime) / 2);
+        let segmentPrice = 0n;
+        for (const snap of allPriceSnapshots) {
+            if (Number(snap.timestamp) <= segmentMidpoint && snap.price) {
+                segmentPrice = snap.price;
+                break;
+            }
+        }
         const priceToUse = segmentPrice > 0n ? segmentPrice : currentPrice;
 
         // Calculate USD value for this segment's borrow cost using segment-specific price

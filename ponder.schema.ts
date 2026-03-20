@@ -65,47 +65,69 @@ export const Repay = onchainTable(
     })
 );
 
-export const Supply = onchainTable("supply", (t) => ({
-    id: t.text().primaryKey(),
-    txHash: t.hex(),
-    pool: t.hex(),
-    reserve: t.hex(),
-    user: t.hex(),
-    onBehalfOf: t.hex(),
-    amount: t.bigint(),
-    referralCode: t.integer(),
-    timestamp: t.integer(),
-    price: t.bigint(),
-}));
+export const Supply = onchainTable(
+    "supply",
+    (t) => ({
+        id: t.text().primaryKey(),
+        txHash: t.hex(),
+        pool: t.hex(),
+        reserve: t.hex(),
+        user: t.hex(),
+        onBehalfOf: t.hex(),
+        amount: t.bigint(),
+        referralCode: t.integer(),
+        timestamp: t.integer(),
+        price: t.bigint(),
+    }),
+    (table) => ({
+        onBehalfOfReserveTimestampIdx: index().on(table.onBehalfOf, table.reserve, table.timestamp),
+        reserveTimestampIdx: index().on(table.reserve, table.timestamp),
+    })
+);
 
-export const Withdraw = onchainTable("withdraw", (t) => ({
-    id: t.text().primaryKey(),
-    txHash: t.hex(),
-    pool: t.hex(),
-    reserve: t.hex(),
-    user: t.hex(),
-    onBehalfOf: t.hex(),
-    to: t.hex(),
-    amount: t.bigint(),
-    timestamp: t.integer(),
-    price: t.bigint(),
-}));
+export const Withdraw = onchainTable(
+    "withdraw",
+    (t) => ({
+        id: t.text().primaryKey(),
+        txHash: t.hex(),
+        pool: t.hex(),
+        reserve: t.hex(),
+        user: t.hex(),
+        onBehalfOf: t.hex(),
+        to: t.hex(),
+        amount: t.bigint(),
+        timestamp: t.integer(),
+        price: t.bigint(),
+    }),
+    (table) => ({
+        onBehalfOfReserveTimestampIdx: index().on(table.onBehalfOf, table.reserve, table.timestamp),
+        reserveTimestampIdx: index().on(table.reserve, table.timestamp),
+    })
+);
 
-export const LiquidationCall = onchainTable("liquidation_call", (t) => ({
-    id: t.text().primaryKey(),
-    txHash: t.hex(),
-    pool: t.hex(),
-    collateralAsset: t.hex(),
-    debtAsset: t.hex(),
-    user: t.hex(),
-    debtToCover: t.bigint(),
-    liquidatedCollateralAmount: t.bigint(),
-    liquidator: t.hex(),
-    receiveAToken: t.boolean(),
-    timestamp: t.integer(),
-    priceCollateral: t.bigint(),
-    priceDebt: t.bigint(),
-}));
+export const LiquidationCall = onchainTable(
+    "liquidation_call",
+    (t) => ({
+        id: t.text().primaryKey(),
+        txHash: t.hex(),
+        pool: t.hex(),
+        collateralAsset: t.hex(),
+        debtAsset: t.hex(),
+        user: t.hex(),
+        debtToCover: t.bigint(),
+        liquidatedCollateralAmount: t.bigint(),
+        liquidator: t.hex(),
+        receiveAToken: t.boolean(),
+        timestamp: t.integer(),
+        priceCollateral: t.bigint(),
+        priceDebt: t.bigint(),
+    }),
+    (table) => ({
+        userIdx: index().on(table.user),
+        userCollateralTimestampIdx: index().on(table.user, table.collateralAsset, table.timestamp),
+        userDebtTimestampIdx: index().on(table.user, table.debtAsset, table.timestamp),
+    })
+);
 
 export const FlashLoan = onchainTable("flash_loan", (t) => ({
     id: t.text().primaryKey(),

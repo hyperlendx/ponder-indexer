@@ -71,26 +71,19 @@ export async function getScaledBalanceAtTimestamp(
                 )
             );
 
-        // Subtract liquidated collateral amounts
-        // Note: liquidatedCollateralAmount is in actual token amounts, not scaled
-        // We need to convert it to scaled balance by dividing by the liquidity index at liquidation time
-        for (const liquidation of liquidations) {
-            // Import the function to calculate liquidity index
+        // Subtract liquidated collateral amounts in parallel
+        if (liquidations.length > 0) {
             const { calculateLiquidityIndexAtTimestamp } = await import("../aave/liquidityIndex");
-
-            // Get liquidity index at the time of liquidation
-            const liquidityIndexAtLiquidation = await calculateLiquidityIndexAtTimestamp(
-                context,
-                asset,
-                Number(liquidation.timestamp)
-            );
-
-            // Convert actual liquidated amount to scaled amount
-            // scaledAmount = actualAmount * RAY / liquidityIndex
             const RAY = 1000000000000000000000000000n; // 1e27
-            const scaledLiquidatedAmount = (liquidation.liquidatedCollateralAmount * RAY) / liquidityIndexAtLiquidation;
-
-            scaledBalance -= scaledLiquidatedAmount;
+            const scaledAmounts = await Promise.all(
+                liquidations.map(async (liquidation) => {
+                    const idx = await calculateLiquidityIndexAtTimestamp(context, asset, Number(liquidation.timestamp));
+                    return (liquidation.liquidatedCollateralAmount * RAY) / idx;
+                })
+            );
+            for (const amount of scaledAmounts) {
+                scaledBalance -= amount;
+            }
         }
 
         return scaledBalance > 0n ? scaledBalance : 0n;
@@ -391,26 +384,19 @@ export async function getScaledBorrowBalanceAtTimestamp(
             scaledBorrowBalance -= event.amount;
         }
 
-        // Subtract liquidated debt amounts
-        // Note: debtToCover is in actual token amounts, not scaled
-        // We need to convert it to scaled balance by dividing by the borrow index at liquidation time
-        for (const liquidation of liquidations) {
-            // Import the function to calculate borrow index
+        // Subtract liquidated debt amounts in parallel
+        if (liquidations.length > 0) {
             const { calculateVariableBorrowIndexAtTimestamp } = await import("../aave/borrowIndex");
-
-            // Get borrow index at the time of liquidation
-            const borrowIndexAtLiquidation = await calculateVariableBorrowIndexAtTimestamp(
-                context,
-                asset,
-                Number(liquidation.timestamp)
-            );
-
-            // Convert actual debt amount to scaled amount
-            // scaledAmount = actualAmount * RAY / borrowIndex
             const RAY = 1000000000000000000000000000n; // 1e27
-            const scaledDebtAmount = (liquidation.debtToCover * RAY) / borrowIndexAtLiquidation;
-
-            scaledBorrowBalance -= scaledDebtAmount;
+            const scaledAmounts = await Promise.all(
+                liquidations.map(async (liquidation) => {
+                    const idx = await calculateVariableBorrowIndexAtTimestamp(context, asset, Number(liquidation.timestamp));
+                    return (liquidation.debtToCover * RAY) / idx;
+                })
+            );
+            for (const amount of scaledAmounts) {
+                scaledBorrowBalance -= amount;
+            }
         }
 
         return scaledBorrowBalance > 0n ? scaledBorrowBalance : 0n;

@@ -259,27 +259,39 @@ export async function calculateUserDailyYieldBreakdown(
         // Process each asset
         for (const asset of assets) {
             try {
-                // Get decimals from AssetPriceSnapshot (use endTimestamp to get most recent)
-                const decimals = await getDecimalsFromSnapshot(dbQuery, asset, endTimestamp);
+                // Batch-fetch all price snapshots for this asset once (replaces N×M per-day queries)
+                const assetPriceSnapshots = await dbQuery
+                    .select()
+                    .from(AssetPriceSnapshot)
+                    .where(
+                        and(
+                            eq(AssetPriceSnapshot.asset, asset as `0x${string}`),
+                            lte(AssetPriceSnapshot.timestamp, endTimestamp)
+                        )
+                    )
+                    .orderBy(desc(AssetPriceSnapshot.timestamp));
 
-                // Initialize this asset in all days with zero yield and fetch price for each day
+                // Get decimals from most recent snapshot (sorted desc by timestamp)
+                const decimals = assetPriceSnapshots.length > 0 && assetPriceSnapshots[0].decimals != null
+                    ? assetPriceSnapshots[0].decimals
+                    : 18;
+
+                // In-memory price lookup — snapshots are sorted desc by timestamp
+                const getPriceAtTs = (ts: number): { price: bigint, priceTimestamp: number } => {
+                    for (const snap of assetPriceSnapshots) {
+                        if (Number(snap.timestamp) <= ts) {
+                            return { price: snap.price ?? 0n, priceTimestamp: Number(snap.timestamp) };
+                        }
+                    }
+                    return { price: 0n, priceTimestamp: 0 };
+                };
+
+                // Initialize this asset in all days with zero yield (price from pre-fetched cache)
                 for (const [dateStr, dayData] of dailyResults) {
                     if (!dayData.assets.has(asset)) {
-                        // Get asset price for this day's timestamp
-                        const priceSnapshots = await dbQuery
-                            .select()
-                            .from(AssetPriceSnapshot)
-                            .where(
-                                and(
-                                    eq(AssetPriceSnapshot.asset, asset as `0x${string}`),
-                                    lte(AssetPriceSnapshot.timestamp, dayData.timestamp)
-                                )
-                            )
-                            .orderBy(desc(AssetPriceSnapshot.timestamp))
-                            .limit(1);
-
-                        const assetPrice = priceSnapshots.length > 0 ? priceSnapshots[0].price : undefined;
-                        const assetPriceTimestamp = priceSnapshots.length > 0 ? Number(priceSnapshots[0].timestamp) : undefined;
+                        const priceInfo = getPriceAtTs(dayData.timestamp);
+                        const assetPrice = priceInfo.priceTimestamp !== 0 ? priceInfo.price : undefined;
+                        const assetPriceTimestamp = priceInfo.priceTimestamp !== 0 ? priceInfo.priceTimestamp : undefined;
 
                         dayData.assets.set(asset, {
                             asset,
@@ -352,8 +364,8 @@ export async function calculateUserDailyYieldBreakdown(
                             const assetData = dayData.assets.get(asset)!;
                             assetData.assetYield += segment.segmentYield;
 
-                            // Get price at segment end for USD calculation
-                            const priceData = await getAssetPriceAtTimestamp(dbQuery, asset, segment.endTime);
+                            // Get price at segment end from pre-fetched cache (no DB query)
+                            const priceData = getPriceAtTs(segment.endTime);
                             const segmentYieldUSD = calculateUSDValueNumber(segment.segmentYield, priceData.price, decimals);
                             assetData.assetYieldUSD += segmentYieldUSD;
                             dayData.assetYieldUSD += segmentYieldUSD;
@@ -441,8 +453,8 @@ export async function calculateUserDailyYieldBreakdown(
                             const assetData = dayData.assets.get(asset)!;
                             assetData.assetYield += actualYield;
 
-                            // Calculate USD value using actual yield and price at end of overlap
-                            const priceData = await getAssetPriceAtTimestamp(dbQuery, asset, overlapEnd);
+                            // Calculate USD value using actual yield and price at end of overlap (pre-fetched)
+                            const priceData = getPriceAtTs(overlapEnd);
                             const yieldUSD = calculateUSDValueNumber(actualYield, priceData.price, decimals);
                             assetData.assetYieldUSD += yieldUSD;
                             dayData.assetYieldUSD += yieldUSD;
@@ -496,8 +508,8 @@ export async function calculateUserDailyYieldBreakdown(
                             const assetData = dayData.assets.get(asset)!;
                             assetData.borrowCost += segment.segmentBorrowCost;
 
-                            // Calculate USD value using actual borrow cost and price at segment end
-                            const priceData = await getAssetPriceAtTimestamp(dbQuery, asset, segment.endTime);
+                            // Calculate USD value using actual borrow cost and price at segment end (pre-fetched)
+                            const priceData = getPriceAtTs(segment.endTime);
                             const borrowCostUSD = calculateUSDValueNumber(segment.segmentBorrowCost, priceData.price, decimals);
                             assetData.borrowCostUSD += borrowCostUSD;
                             dayData.borrowCostUSD += borrowCostUSD;
@@ -584,8 +596,8 @@ export async function calculateUserDailyYieldBreakdown(
                             const assetData = dayData.assets.get(asset)!;
                             assetData.borrowCost += actualBorrowCost;
 
-                            // Calculate USD value using actual borrow cost and price at end of overlap
-                            const priceData = await getAssetPriceAtTimestamp(dbQuery, asset, overlapEnd);
+                            // Calculate USD value using actual borrow cost and price at end of overlap (pre-fetched)
+                            const priceData = getPriceAtTs(overlapEnd);
                             const borrowCostUSD = calculateUSDValueNumber(actualBorrowCost, priceData.price, decimals);
                             assetData.borrowCostUSD += borrowCostUSD;
                             dayData.borrowCostUSD += borrowCostUSD;
@@ -999,6 +1011,22 @@ export async function calculateUserDailyPortfolioValue(
             borrowIndexCache.prefetch(context, [...indexPrefetchList, ...eventTimestampPrefetchList])
         ]);
 
+        // Batch-fetch price snapshots for all assets in parallel (one query per asset)
+        const priceSnapshotsByAsset = new Map<string, any[]>();
+        await Promise.all(allAssets.map(async (asset) => {
+            const snapshots = await dbQuery
+                .select()
+                .from(AssetPriceSnapshot)
+                .where(
+                    and(
+                        eq(AssetPriceSnapshot.asset, asset as `0x${string}`),
+                        lte(AssetPriceSnapshot.timestamp, endTimestamp)
+                    )
+                )
+                .orderBy(desc(AssetPriceSnapshot.timestamp));
+            priceSnapshotsByAsset.set(asset, snapshots);
+        }));
+
         // Process each asset using pre-fetched data (NO database queries in loop)
         for (const asset of allAssets) {
             const balanceEvents = balanceEventsByAsset.get(asset) || [];
@@ -1037,23 +1065,19 @@ export async function calculateUserDailyPortfolioValue(
                     borrowIndexAtEventTime
                 );
 
-                // Get historical price and decimals at day end from AssetPriceSnapshot
-                // Query the most recent snapshot at or before dayEndTimestamp
-                const priceSnapshots = await dbQuery
-                    .select()
-                    .from(AssetPriceSnapshot)
-                    .where(
-                        and(
-                            eq(AssetPriceSnapshot.asset, asset as `0x${string}`),
-                            lte(AssetPriceSnapshot.timestamp, dayEndTimestamp)
-                        )
-                    )
-                    .orderBy(desc(AssetPriceSnapshot.timestamp))
-                    .limit(1);
-
-                const assetPrice = priceSnapshots.length > 0 ? priceSnapshots[0].price : undefined;
-                const assetPriceTimestamp = priceSnapshots.length > 0 ? priceSnapshots[0].timestamp : undefined;
-                const decimals = priceSnapshots.length > 0 && priceSnapshots[0].decimals != null ? priceSnapshots[0].decimals : 18;
+                // Look up price from pre-fetched snapshots (no DB query)
+                const assetSnapshots = priceSnapshotsByAsset.get(asset) || [];
+                let assetPrice: bigint | undefined;
+                let assetPriceTimestamp: number | undefined;
+                let decimals = 18;
+                for (const snap of assetSnapshots) {
+                    if (Number(snap.timestamp) <= dayEndTimestamp) {
+                        assetPrice = snap.price ?? undefined;
+                        assetPriceTimestamp = Number(snap.timestamp);
+                        decimals = snap.decimals ?? 18;
+                        break;
+                    }
+                }
 
                 // Only add to assets map if there's a non-zero position
                 if (suppliedBalance > 0n || borrowedBalance > 0n) {
