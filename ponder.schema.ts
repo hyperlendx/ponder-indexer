@@ -264,11 +264,34 @@ export const ReserveDataEvent = onchainTable(
         variableBorrowRate: t.bigint(),
         timestamp: t.integer(),
         blockNumber: t.bigint(),
+        logIndex: t.integer(), // Orders several updates of the same reserve within one block
     }),
     (table) => ({
         reserveIdx: index().on(table.reserve),
         timestampIdx: index().on(table.timestamp),
         reserveTimestampIdx: index().on(table.reserve, table.timestamp),
+    })
+);
+
+// Snapshot of the reserve state (the last ReserveDataEvent) as of each UTC midnight.
+// Written at index time so the API can resolve the liquidity/borrow index at any
+// day boundary (and at any timestamp in a day without reserve activity) without
+// scanning ReserveDataEvent. One row per reserve per day.
+export const DailyReserveIndex = onchainTable(
+    "daily_reserve_index",
+    (t) => ({
+        id: t.text().primaryKey(), // `${reserve}-${day}`
+        reserve: t.hex(),
+        day: t.integer(), // UTC midnight this snapshot is valid for (unix seconds)
+        eventTimestamp: t.integer(), // Timestamp of the last ReserveDataEvent at or before `day`
+        blockNumber: t.bigint(), // Block of that ReserveDataEvent
+        liquidityIndex: t.bigint(),
+        liquidityRate: t.bigint(),
+        variableBorrowIndex: t.bigint(),
+        variableBorrowRate: t.bigint(),
+    }),
+    (table) => ({
+        reserveDayIdx: index().on(table.reserve, table.day),
     })
 );
 
@@ -285,6 +308,7 @@ export const UserBalanceEvent = onchainTable(
         eventType: t.text(), // 'deposit', 'withdraw', 'transfer_in', 'transfer_out'
         timestamp: t.integer(),
         blockNumber: t.bigint(),
+        logIndex: t.integer(), // Log index of the triggering event, for deterministic ordering within a block
         liquidityIndex: t.bigint(),
         assetPrice: t.bigint(), // Oracle price of the asset at the time of the event (8 decimals precision)
     }),

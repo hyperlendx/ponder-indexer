@@ -75,6 +75,42 @@ export function validateLiquidityIndex(index: bigint): boolean {
 }
 
 /**
+ * A point in the reserve's interest history: the state emitted by a
+ * ReserveDataUpdated event (or a snapshot of it). Indices grow linearly from
+ * `timestamp` at the given rates until the next ReserveDataUpdated.
+ */
+export interface ReserveIndexPoint {
+    timestamp: number;
+    liquidityIndex: bigint;
+    liquidityRate: bigint;
+    variableBorrowIndex: bigint;
+    variableBorrowRate: bigint;
+}
+
+/**
+ * Liquidity index at `targetTimestamp`, given the last reserve update at or
+ * before it. Pure function; this is the exact math AAVE uses on-chain
+ * (getReserveNormalizedIncome) and the semantics the DB-backed
+ * calculateLiquidityIndexAtTimestamp has always had.
+ */
+export function liquidityIndexFromPoint(base: ReserveIndexPoint, targetTimestamp: number): bigint {
+    const baseLiquidityIndex = base.liquidityIndex;
+    if (!validateLiquidityIndex(baseLiquidityIndex)) {
+        return RAY;
+    }
+    if (base.timestamp === targetTimestamp) {
+        return baseLiquidityIndex;
+    }
+    const timeElapsed = BigInt(targetTimestamp - base.timestamp);
+    const newLiquidityIndex = calculateLiquidityIndex(baseLiquidityIndex, base.liquidityRate, timeElapsed);
+    if (!validateLiquidityIndex(newLiquidityIndex)) {
+        console.warn(`Calculated liquidity index is invalid: ${newLiquidityIndex.toString()}, using base index`);
+        return baseLiquidityIndex;
+    }
+    return newLiquidityIndex;
+}
+
+/**
  * Calculate liquidity index for any timestamp using AAVE's methodology
  *
  * This function reconstructs the liquidity index at any point in time by:
@@ -150,36 +186,13 @@ export async function calculateLiquidityIndexAtTimestamp(
         }
 
         const closestEvent = events[0];
-        // Validate the base liquidity index
-        const baseLiquidityIndex = BigInt(closestEvent.liquidityIndex);
-        if (!validateLiquidityIndex(baseLiquidityIndex)) {
-            return RAY;
-        }
-
-        // If the event timestamp exactly matches the target, return the index directly
-        if (closestEvent.timestamp === targetTimestamp) {
-            return baseLiquidityIndex;
-        }
-
-        // Calculate the time elapsed since the closest event
-        const timeElapsed = BigInt(targetTimestamp - closestEvent.timestamp);
-
-        // Get the liquidity rate from the event (in ray precision)
-        const liquidityRate = BigInt(closestEvent.liquidityRate);
-
-        // Use AAVE's liquidity index calculation to get the new index
-        const newLiquidityIndex = calculateLiquidityIndex(
-            baseLiquidityIndex,
-            liquidityRate,
-            timeElapsed
-        );
-        // Validate the calculated index
-        if (!validateLiquidityIndex(newLiquidityIndex)) {
-            console.warn(`Calculated liquidity index is invalid: ${newLiquidityIndex.toString()}, using base index`);
-            return baseLiquidityIndex;
-        }
-
-        return newLiquidityIndex;
+        return liquidityIndexFromPoint({
+            timestamp: Number(closestEvent.timestamp),
+            liquidityIndex: BigInt(closestEvent.liquidityIndex),
+            liquidityRate: BigInt(closestEvent.liquidityRate),
+            variableBorrowIndex: BigInt(closestEvent.variableBorrowIndex),
+            variableBorrowRate: BigInt(closestEvent.variableBorrowRate),
+        }, targetTimestamp);
 
     } catch (error) {
         console.error(`Error calculating liquidity index for reserve ${reserve} at timestamp ${targetTimestamp}:`, error);

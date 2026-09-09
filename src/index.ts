@@ -25,7 +25,8 @@ import config from "../ponder.config";
 
 import {getOraclePrice} from "./helpers/getPrice";
 import {updateUserPosition} from "./helpers/userPositionManager";
-import {calculateScaledBalance, calculateLiquidityIndexAtTimestamp} from "./helpers/aave";
+import {calculateScaledBalance} from "./helpers/aave";
+import {recordReserveDataUpdate, finalizeDailyAnchors, getLiquidityIndexForEvent} from "./helpers/reserveState";
 import {USDC_ADDRESS, USDC_DECIMALS, isUSDC} from "./helpers/usdc";
 import {getAddress} from 'viem'
 
@@ -105,8 +106,9 @@ ponder.on("CorePool:Repay", async ({event, context}) => {
     // When useATokens=true, the user is using their aTokens (supplied balance) to repay debt
     // This means we need to reduce their supply position by the repay amount
     if (event.args.useATokens) {
-        // Get current liquidity index to calculate scaled balance
-        const currentLiquidityIndex = await calculateLiquidityIndexAtTimestamp(
+        // Liquidity index from the in-memory reserve state (updated by the ReserveDataUpdated
+        // event emitted earlier in this same transaction)
+        const currentLiquidityIndex = await getLiquidityIndexForEvent(
             context,
             event.args.reserve,
             timestamp,
@@ -126,7 +128,9 @@ ponder.on("CorePool:Repay", async ({event, context}) => {
             timestamp,
             event.transaction.hash,
             blockNumber,
-            reservePrice
+            event.log.logIndex,
+            reservePrice,
+            currentLiquidityIndex
         );
     }
 });
@@ -153,9 +157,9 @@ ponder.on("CorePool:Supply", async ({event, context}) => {
         price: reservePrice,
     });
 
-    // Get current liquidity index to calculate scaled balance
-    // Pass the transaction hash to check for ReserveDataUpdated events in the same transaction
-    const currentLiquidityIndex = await calculateLiquidityIndexAtTimestamp(
+    // Liquidity index from the in-memory reserve state (updated by the ReserveDataUpdated
+    // event emitted earlier in this same transaction)
+    const currentLiquidityIndex = await getLiquidityIndexForEvent(
         context,
         event.args.reserve,
         timestamp,
@@ -175,7 +179,9 @@ ponder.on("CorePool:Supply", async ({event, context}) => {
         timestamp,
         event.transaction.hash,
         blockNumber,
-        reservePrice // Pass the oracle price
+        event.log.logIndex,
+        reservePrice, // Pass the oracle price
+        currentLiquidityIndex
     );
 });
 
@@ -210,9 +216,9 @@ ponder.on("CorePool:Withdraw", async ({event, context}) => {
         price: reservePrice,
     });
 
-    // Get current liquidity index to calculate scaled balance
-    // Pass the transaction hash to check for ReserveDataUpdated events in the same transaction
-    const currentLiquidityIndex = await calculateLiquidityIndexAtTimestamp(
+    // Liquidity index from the in-memory reserve state (updated by the ReserveDataUpdated
+    // event emitted earlier in this same transaction)
+    const currentLiquidityIndex = await getLiquidityIndexForEvent(
         context,
         event.args.reserve,
         timestamp,
@@ -232,7 +238,9 @@ ponder.on("CorePool:Withdraw", async ({event, context}) => {
         timestamp,
         event.transaction.hash,
         blockNumber,
-        reservePrice // Pass the oracle price
+        event.log.logIndex,
+        reservePrice, // Pass the oracle price
+        currentLiquidityIndex
     );
 });
 
@@ -316,13 +324,24 @@ ponder.on("CorePool:ReserveDataUpdated", async ({event, context}) => {
         variableBorrowRate: event.args.variableBorrowRate,
         timestamp: timestamp,
         blockNumber: blockNumber,
+        logIndex: event.log.logIndex,
     });
 
-    console.log(`📊 Reserve data updated for ${event.args.reserve}:`, {
-        liquidityIndex: event.args.liquidityIndex.toString(),
-        liquidityRate: event.args.liquidityRate.toString(),
-        timestamp: timestamp
-    });
+    // Update the in-memory reserve state used by the balance handlers of this same
+    // transaction, and write DailyReserveIndex rows for any UTC midnight crossed since
+    // the previous update.
+    await recordReserveDataUpdate(
+        context.db,
+        event.args.reserve,
+        {
+            timestamp,
+            liquidityIndex: event.args.liquidityIndex,
+            liquidityRate: event.args.liquidityRate,
+            variableBorrowIndex: event.args.variableBorrowIndex,
+            variableBorrowRate: event.args.variableBorrowRate,
+        },
+        blockNumber
+    );
 });
 
 // ReserveUsedAsCollateralEnabled Event Handler
@@ -488,12 +507,15 @@ async function isUsdcReserveListed(context: any, blockNumber: bigint): Promise<b
     return usdcReserveListed;
 }
 
-// USDC oracle price snapshot every 300 blocks
+// USDC oracle price snapshot every 300 blocks, and DailyReserveIndex rows for
+// midnights that passed without any USDC reserve activity
 ponder.on("ChainlinkOracleUpdate:block", async ({event, context}) => {
     const blockNumber = event.block.number;
     const timestamp = Number(event.block.timestamp);
 
     try {
+        await finalizeDailyAnchors(context.db, USDC_ADDRESS, timestamp);
+
         if (!(await isUsdcReserveListed(context, blockNumber))) {
             return;
         }

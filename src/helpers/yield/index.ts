@@ -1,22 +1,17 @@
 /**
  * Yield Calculation Module
- * 
- * This module provides comprehensive yield tracking and reporting for AAVE/Hyperlend protocol:
- * - Balance queries (historical and current)
+ *
+ * Yield tracking and reporting for the HyperLend core pool:
+ * - Per-asset activity loading and in-memory balance evaluation
+ * - Reserve index and price series (batched lookups)
  * - Segmented yield calculations
- * - daily, and custom period reports
- * - Portfolio value tracking
+ * - Custom period positions
+ *
+ * Daily reports live in ./yieldReports (imported directly to avoid circular dependencies).
  */
 
-// Re-export balance query functions
-export * from "./balanceQueries";
-
-// Re-export yield calculation functions
+export * from "./userAssetActivity";
+export * from "./reserveIndexSeries";
+export * from "./priceSeries";
 export * from "./yieldCalculations";
-
-// Re-export position calculation functions
 export * from "./positionCalculations";
-
-// Note: yieldReports.ts exports are handled separately to avoid circular dependencies
-// Import from "./yieldReports" directly when needed
-

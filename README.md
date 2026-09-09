@@ -6,6 +6,10 @@ Indexes the HyperLend core pool on HyperEVM for the **USDC reserve only**
 - Core pool events (supply, withdraw, borrow, repay, liquidations, reserve data updates, ...)
   are filtered to USDC at the log level in `ponder.config.ts`.
 - USDC oracle price snapshots are taken every 300 blocks.
-- Yield / portfolio APIs live in `src/api/index.ts`.
+- `daily_reserve_index` stores the reserve state (last `ReserveDataUpdated`) as of every UTC
+  midnight, written at index time. The yield API resolves liquidity/borrow indices at day
+  boundaries from it instead of scanning `reserve_data_event`.
+- Yield / portfolio APIs live in `src/api/index.ts`; the calculation code in `src/helpers/yield`
+  loads a user's rows once per asset and evaluates everything in memory.
 
 Isolated pairs and liquid staking tokens (kHYPE, beHYPE, wstHYPE) are not tracked.

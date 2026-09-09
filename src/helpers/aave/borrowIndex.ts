@@ -1,7 +1,7 @@
 import { ReserveDataEvent } from "ponder:schema";
 import { eq, desc, lte, and } from "ponder";
 import { RAY, SECONDS_PER_YEAR, RayMath } from "./rayMath";
-import { calculateLinearInterest } from "./liquidityIndex";
+import { calculateLinearInterest, type ReserveIndexPoint } from "./liquidityIndex";
 
 /**
  * Calculate new variable borrow index using AAVE's linear interest methodology
@@ -42,6 +42,27 @@ export function calculateVariableBorrowIndex(
 export function validateVariableBorrowIndex(index: bigint): boolean {
     // Index should be at least 1 RAY and not exceed reasonable bounds
     return index >= RAY && index <= RAY * 10n; // Max 10x growth
+}
+
+/**
+ * Variable borrow index at `targetTimestamp`, given the last reserve update at
+ * or before it. Pure counterpart of liquidityIndexFromPoint.
+ */
+export function variableBorrowIndexFromPoint(base: ReserveIndexPoint, targetTimestamp: number): bigint {
+    const baseVariableBorrowIndex = base.variableBorrowIndex;
+    if (!validateVariableBorrowIndex(baseVariableBorrowIndex)) {
+        return RAY;
+    }
+    if (base.timestamp === targetTimestamp) {
+        return baseVariableBorrowIndex;
+    }
+    const timeElapsed = BigInt(targetTimestamp - base.timestamp);
+    const newVariableBorrowIndex = calculateVariableBorrowIndex(baseVariableBorrowIndex, base.variableBorrowRate, timeElapsed);
+    if (!validateVariableBorrowIndex(newVariableBorrowIndex)) {
+        console.warn(`Calculated variable borrow index is invalid: ${newVariableBorrowIndex.toString()}, using base index`);
+        return baseVariableBorrowIndex;
+    }
+    return newVariableBorrowIndex;
 }
 
 /**
@@ -126,37 +147,13 @@ export async function calculateVariableBorrowIndexAtTimestamp(
         }
 
         const closestEvent = events[0];
-        // Validate the base variable borrow index
-        const baseVariableBorrowIndex = BigInt(closestEvent.variableBorrowIndex);
-        if (!validateVariableBorrowIndex(baseVariableBorrowIndex)) {
-            return RAY;
-        }
-
-        // If the event timestamp exactly matches the target, return the index directly
-        if (closestEvent.timestamp === targetTimestamp) {
-            return baseVariableBorrowIndex;
-        }
-
-        // Calculate the time elapsed since the closest event
-        const timeElapsed = BigInt(targetTimestamp - closestEvent.timestamp);
-
-        // Get the variable borrow rate from the event (in ray precision)
-        const variableBorrowRate = BigInt(closestEvent.variableBorrowRate);
-
-        // Use AAVE's borrow index calculation to get the new index
-        const newVariableBorrowIndex = calculateVariableBorrowIndex(
-            baseVariableBorrowIndex,
-            variableBorrowRate,
-            timeElapsed
-        );
-
-        // Validate the calculated index
-        if (!validateVariableBorrowIndex(newVariableBorrowIndex)) {
-            console.warn(`Calculated variable borrow index is invalid: ${newVariableBorrowIndex.toString()}, using base index`);
-            return baseVariableBorrowIndex;
-        }
-
-        return newVariableBorrowIndex;
+        return variableBorrowIndexFromPoint({
+            timestamp: Number(closestEvent.timestamp),
+            liquidityIndex: BigInt(closestEvent.liquidityIndex),
+            liquidityRate: BigInt(closestEvent.liquidityRate),
+            variableBorrowIndex: BigInt(closestEvent.variableBorrowIndex),
+            variableBorrowRate: BigInt(closestEvent.variableBorrowRate),
+        }, targetTimestamp);
 
     } catch (error) {
         console.error(`Error calculating variable borrow index for reserve ${reserve} at timestamp ${targetTimestamp}:`, error);

@@ -1,643 +1,314 @@
-import { UserBalanceEvent, Borrow, Repay, LiquidationCall, AssetPriceSnapshot } from "ponder:schema";
-import { eq, and, gte, lte, desc } from "ponder";
-import { calculateLiquidityIndexAtTimestamp, calculateActualBalance } from "../aave";
-import { getScaledBalanceAtTimestamp, getScaledBorrowBalanceAtTimestamp } from "./balanceQueries";
-import { LiquidityIndexCache } from "./liquidityIndexCache";
-import { calculateVariableBorrowIndexAtTimestamp } from "../aave/borrowIndex";
-import { calculateUSDValueNumber } from "../usdCalculations";
+/**
+ * Segmented yield and borrow-cost calculations for one (user, asset) over a
+ * period. Everything is evaluated in memory from a pre-loaded
+ * UserAssetActivity, a ReserveIndexSeries and a PriceSeries.
+ */
+import {calculateActualBalance} from "../aave/balanceConversions";
+import {calculateUSDValueNumber} from "../usdCalculations";
+import {type UserAssetActivity, scaledBalanceAt, scaledBorrowBalanceAt, lastBalanceEventAt} from "./userAssetActivity";
+import type {ReserveIndexSeries} from "./reserveIndexSeries";
+import type {PriceSeries} from "./priceSeries";
+
+const SECONDS_PER_DAY = 24 * 60 * 60;
 
 /**
- * Calculate interest earned in a specific time segment
- * @param indexCache - Optional cache to avoid redundant liquidity index queries
+ * Pre-loaded inputs for all calculations on one (user, asset) pair.
  */
-export async function calculateSegmentInterest(
-    context: any,
-    asset: string,
-    segment: {
-        startTime: number;
-        endTime: number;
-        scaledBalance: bigint;
-    },
-    indexCache?: LiquidityIndexCache
-): Promise<bigint> {
-    if (segment.scaledBalance === 0n || segment.startTime >= segment.endTime) {
-        return 0n;
-    }
+export interface AssetYieldContext {
+    activity: UserAssetActivity;
+    series: ReserveIndexSeries;
+    prices: PriceSeries;
+}
 
-    // Get liquidity indices at segment boundaries (use cache if available)
-    let startIndex: bigint;
-    let endIndex: bigint;
+export interface YieldSegment {
+    startTime: number;
+    endTime: number;
+    startDate: string;
+    endDate: string;
+    scaledBalance: bigint;
+    actualBalance: bigint;
+    startLiquidityIndex: bigint;
+    endLiquidityIndex: bigint;
+    segmentYield: bigint;
+    segmentYieldUSD: string;
+    durationDays: number;
+    assetPrice: string; // Oracle price used for this segment (8 decimals)
+    assetPriceTimestamp: number; // Timestamp of the price snapshot used (0 when falling back to an event price)
+}
 
-    if (indexCache) {
-        [startIndex, endIndex] = await Promise.all([
-            indexCache.get(context, asset, segment.startTime),
-            indexCache.get(context, asset, segment.endTime)
-        ]);
-    } else {
-        [startIndex, endIndex] = await Promise.all([
-            calculateLiquidityIndexAtTimestamp(context, asset, segment.startTime),
-            calculateLiquidityIndexAtTimestamp(context, asset, segment.endTime)
-        ]);
-    }
+export interface BorrowCostSegment {
+    startTime: number;
+    endTime: number;
+    startDate: string;
+    endDate: string;
+    scaledBorrowBalance: bigint;
+    actualBorrowBalance: bigint;
+    startBorrowIndex: bigint;
+    endBorrowIndex: bigint;
+    segmentBorrowCost: bigint;
+    segmentBorrowCostUSD: string;
+    durationDays: number;
+    assetPrice: string; // Oracle price used for this segment (8 decimals)
+    assetPriceTimestamp: number; // Timestamp of the price snapshot used (0 when falling back to an event price)
+}
 
-    // Calculate actual balances
-    const startActualBalance = calculateActualBalance(segment.scaledBalance, startIndex);
-    const endActualBalance = calculateActualBalance(segment.scaledBalance, endIndex);
-
-    // Interest earned = growth in actual balance (no deposits/withdrawals in this segment)
-    const interest = endActualBalance - startActualBalance;
-
-    return interest;
+function sameAddress(a: string | null | undefined, b: string): boolean {
+    return !!a && a.toLowerCase() === b.toLowerCase();
 }
 
 /**
- * Create time segments based on balance events
+ * Split [startTimestamp, endTimestamp] into segments of constant scaled supply
+ * balance, one boundary per balance-changing event.
  */
-export async function createTimeSegments(
-    context: any,
-    user: string,
-    asset: string,
+export function buildSupplySegments(
     startTimestamp: number,
     endTimestamp: number,
-    events: any[]
-): Promise<Array<{
-    startTime: number;
-    endTime: number;
-    scaledBalance: bigint;
-}>> {
-    const segments = [];
-
-    // Start with balance at beginning of period
+    startBalance: bigint,
+    events: Array<{ timestamp: number; scaledBalance: bigint }>
+): Array<{ startTime: number; endTime: number; scaledBalance: bigint }> {
+    const segments: Array<{ startTime: number; endTime: number; scaledBalance: bigint }> = [];
     let currentTime = startTimestamp;
-    let currentBalance = await getScaledBalanceAtTimestamp(context, user, asset, startTimestamp);
+    let currentBalance = startBalance;
 
-    // Create segments between events
     for (const event of events) {
-        // Ensure timestamp is a number (not BigInt)
-        const eventTimestamp = Number(event.timestamp);
-
-        if (eventTimestamp > currentTime) {
-            // Create segment from currentTime to event.timestamp
-            segments.push({
-                startTime: currentTime,
-                endTime: eventTimestamp,
-                scaledBalance: currentBalance
-            });
-
-            currentTime = eventTimestamp;
+        if (event.timestamp > currentTime) {
+            segments.push({startTime: currentTime, endTime: event.timestamp, scaledBalance: currentBalance});
+            currentTime = event.timestamp;
         }
-
-        // Update balance after this event
+        // Balance after this event
         currentBalance = event.scaledBalance;
     }
 
-    // Create final segment from last event to end of period
     if (currentTime < endTimestamp) {
-        segments.push({
-            startTime: currentTime,
-            endTime: endTimestamp,
-            scaledBalance: currentBalance
-        });
+        segments.push({startTime: currentTime, endTime: endTimestamp, scaledBalance: currentBalance});
     }
 
     return segments;
 }
 
 /**
- * Custom period yield calculation that handles intra-period positions
- *
- * @param indexCache - Optional cache to avoid redundant liquidity index queries
- * @param decimals - Token decimals for USD calculation
+ * Split [startTimestamp, endTimestamp] into segments of constant scaled borrow
+ * balance. Segments with a zero balance are omitted.
  */
-export async function calculateSegmentedCustomPeriodYield(
-    context: any,
-    user: string,
-    asset: string,
+export function buildBorrowSegments(
     startTimestamp: number,
     endTimestamp: number,
-    decimals: number,
-    indexCache?: LiquidityIndexCache
+    startScaledBorrowBalance: bigint,
+    events: Array<{ timestamp: number; amount: bigint; eventType: 'borrow' | 'repay' }>
+): Array<{ startTime: number; endTime: number; scaledBorrowBalance: bigint }> {
+    const segments: Array<{ startTime: number; endTime: number; scaledBorrowBalance: bigint }> = [];
+
+    if (events.length === 0) {
+        if (startScaledBorrowBalance > 0n) {
+            segments.push({startTime: startTimestamp, endTime: endTimestamp, scaledBorrowBalance: startScaledBorrowBalance});
+        }
+        return segments;
+    }
+
+    let currentScaledBalance = startScaledBorrowBalance;
+    let previousTime = startTimestamp;
+
+    for (const event of events) {
+        if (event.timestamp > previousTime && currentScaledBalance > 0n) {
+            segments.push({startTime: previousTime, endTime: event.timestamp, scaledBorrowBalance: currentScaledBalance});
+        }
+        if (event.eventType === 'borrow') {
+            currentScaledBalance += event.amount;
+        } else {
+            currentScaledBalance -= event.amount;
+        }
+        previousTime = event.timestamp;
+    }
+
+    if (previousTime < endTimestamp && currentScaledBalance > 0n) {
+        segments.push({startTime: previousTime, endTime: endTimestamp, scaledBorrowBalance: currentScaledBalance});
+    }
+
+    return segments;
+}
+
+/**
+ * Supply-side yield over a custom period, broken into segments of constant
+ * scaled balance so every number can be verified by hand:
+ * segmentYield = scaledBalance * (endIndex - startIndex) / RAY.
+ */
+export async function calculateSegmentedCustomPeriodYield(
+    ctx: AssetYieldContext,
+    startTimestamp: number,
+    endTimestamp: number,
+    decimals: number
 ): Promise<{
     totalYield: bigint;
     totalYieldUSD: string;
-    segments: Array<{
-        startTime: number;
-        endTime: number;
-        startDate: string;
-        endDate: string;
-        scaledBalance: bigint;
-        actualBalance: bigint;
-        startLiquidityIndex: bigint;
-        endLiquidityIndex: bigint;
-        segmentYield: bigint;
-        segmentYieldUSD: string;
-        durationDays: number;
-    }>;
+    segments: YieldSegment[];
 }> {
-    // Get all balance events during the period, ordered chronologically
-    const dbQuery = context.db.sql || context.db;
-    const [periodEvents, liquidationEvents] = await Promise.all([
-        dbQuery
-            .select()
-            .from(UserBalanceEvent)
-            .where(
-                and(
-                    eq(UserBalanceEvent.user, user as `0x${string}`),
-                    eq(UserBalanceEvent.asset, asset as `0x${string}`),
-                    gte(UserBalanceEvent.timestamp, startTimestamp),
-                    lte(UserBalanceEvent.timestamp, endTimestamp)
-                )
-            )
-            .orderBy(UserBalanceEvent.timestamp),
-        // Get liquidations where this asset was the collateral
-        dbQuery
-            .select()
-            .from(LiquidationCall)
-            .where(
-                and(
-                    eq(LiquidationCall.user, user as `0x${string}`),
-                    eq(LiquidationCall.collateralAsset, asset as `0x${string}`),
-                    gte(LiquidationCall.timestamp, startTimestamp),
-                    lte(LiquidationCall.timestamp, endTimestamp)
-                )
-            )
-            .orderBy(LiquidationCall.timestamp)
-    ]);
+    const {activity, series, prices} = ctx;
+    const inPeriod = (timestamp: number) => timestamp >= startTimestamp && timestamp <= endTimestamp;
 
-    // Combine balance events and liquidation events, treating liquidations as balance-changing events
-    // For liquidations, we need to create synthetic events with the new scaled balance after liquidation
-    const allEvents = [...periodEvents];
+    // Balance events during the period, plus liquidations of this asset as
+    // synthetic events carrying the balance after the liquidation
+    const events: Array<{ timestamp: number; scaledBalance: bigint }> = activity.balanceEvents
+        .filter((e) => inPeriod(Number(e.timestamp)))
+        .map((e) => ({timestamp: Number(e.timestamp), scaledBalance: BigInt(e.scaledBalance ?? 0n)}));
 
-    // Add liquidation events as synthetic balance events
-    for (const liquidation of liquidationEvents) {
-        // Get the scaled balance at the liquidation timestamp (after accounting for the liquidation)
-        const scaledBalanceAfterLiquidation = await getScaledBalanceAtTimestamp(
-            context,
-            user,
-            asset,
-            Number(liquidation.timestamp)
-        );
-
-        allEvents.push({
-            timestamp: liquidation.timestamp,
-            scaledBalance: scaledBalanceAfterLiquidation,
-            eventType: 'liquidation',
-            txHash: liquidation.txHash
-        } as any);
+    const liquidations = activity.liquidations.filter(
+        (l) => sameAddress(l.collateralAsset, activity.asset) && inPeriod(Number(l.timestamp))
+    );
+    for (const liquidation of liquidations) {
+        const timestamp = Number(liquidation.timestamp);
+        events.push({timestamp, scaledBalance: await scaledBalanceAt(activity, timestamp, series)});
     }
+    events.sort((a, b) => a.timestamp - b.timestamp);
 
-    // Sort all events by timestamp
-    allEvents.sort((a, b) => Number(a.timestamp) - Number(b.timestamp));
+    const startBalance = await scaledBalanceAt(activity, startTimestamp, series);
+    const segments = buildSupplySegments(startTimestamp, endTimestamp, startBalance, events);
 
-    // Create time segments for interest calculation
-    const segments = await createTimeSegments(context, user, asset, startTimestamp, endTimestamp, allEvents);
+    await series.prefetch(segments.flatMap((s) => [s.startTime, s.endTime]));
 
-    // Prefetch all liquidity indices for segments if cache provided
-    if (indexCache) {
-        const indexPrefetchList = [];
-        for (const segment of segments) {
-            indexPrefetchList.push(
-                { asset, timestamp: segment.startTime },
-                { asset, timestamp: segment.endTime }
-            );
-        }
-        await indexCache.prefetch(context, indexPrefetchList);
-    }
+    // Fallback price: the one recorded on the user's most recent balance event
+    const recentEvent = lastBalanceEventAt(activity, endTimestamp);
+    const currentPrice = recentEvent && recentEvent.assetPrice != null ? BigInt(recentEvent.assetPrice) : 0n;
 
-    // Get the most recent price from UserBalanceEvent for USD calculations
-    // This avoids needing to make a blockchain call to the oracle
-    const recentEvent = await dbQuery
-        .select()
-        .from(UserBalanceEvent)
-        .where(
-            and(
-                eq(UserBalanceEvent.user, user as `0x${string}`),
-                eq(UserBalanceEvent.asset, asset as `0x${string}`),
-                lte(UserBalanceEvent.timestamp, endTimestamp)
-            )
-        )
-        .orderBy(desc(UserBalanceEvent.timestamp))
-        .limit(1);
-
-    // Use the most recent price, or 0 if no events found
-    const currentPrice = recentEvent.length > 0 ? recentEvent[0].assetPrice : 0n;
-
-    // Batch-fetch all price snapshots for this asset once (avoids one DB query per segment)
-    const allPriceSnapshots = await dbQuery
-        .select()
-        .from(AssetPriceSnapshot)
-        .where(
-            and(
-                eq(AssetPriceSnapshot.asset, asset as `0x${string}`),
-                lte(AssetPriceSnapshot.timestamp, endTimestamp)
-            )
-        )
-        .orderBy(desc(AssetPriceSnapshot.timestamp));
-
-    // Calculate interest for each segment and collect detailed information
     let totalInterest = 0n;
     let totalInterestUSD = 0;
-    const detailedSegments = [];
+    const detailedSegments: YieldSegment[] = [];
 
-    for (let i = 0; i < segments.length; i++) {
-        const segment = segments[i];
-        if (!segment) continue; // Skip if segment is undefined
+    for (const segment of segments) {
+        const [startLiquidityIndex, endLiquidityIndex] = await Promise.all([
+            series.liquidityIndexAt(segment.startTime),
+            series.liquidityIndexAt(segment.endTime),
+        ]);
 
-        const segmentInterest = await calculateSegmentInterest(context, asset, segment, indexCache);
+        let segmentInterest = 0n;
+        if (segment.scaledBalance !== 0n && segment.startTime < segment.endTime) {
+            segmentInterest =
+                calculateActualBalance(segment.scaledBalance, endLiquidityIndex) -
+                calculateActualBalance(segment.scaledBalance, startLiquidityIndex);
+        }
         totalInterest += segmentInterest;
 
-        // Get liquidity indices for this segment (use cache if available)
-        let startLiquidityIndex: bigint;
-        let endLiquidityIndex: bigint;
-
-        if (indexCache) {
-            [startLiquidityIndex, endLiquidityIndex] = await Promise.all([
-                indexCache.get(context, asset, segment.startTime),
-                indexCache.get(context, asset, segment.endTime)
-            ]);
-        } else {
-            [startLiquidityIndex, endLiquidityIndex] = await Promise.all([
-                calculateLiquidityIndexAtTimestamp(context, asset, segment.startTime),
-                calculateLiquidityIndexAtTimestamp(context, asset, segment.endTime)
-            ]);
-        }
-
         const actualBalance = calculateActualBalance(segment.scaledBalance, startLiquidityIndex);
-        const durationDays = (Number(segment.endTime) - Number(segment.startTime)) / (24 * 60 * 60);
+        const durationDays = (segment.endTime - segment.startTime) / SECONDS_PER_DAY;
 
-        // Get segment-specific asset price from pre-fetched snapshots (no DB query)
         const segmentMidpoint = Math.floor((segment.startTime + segment.endTime) / 2);
-        let segmentPrice = 0n;
-        for (const snap of allPriceSnapshots) {
-            if (Number(snap.timestamp) <= segmentMidpoint && snap.price) {
-                segmentPrice = snap.price;
-                break;
-            }
-        }
-        const priceToUse = segmentPrice > 0n ? segmentPrice : currentPrice;
+        const segmentPricePoint = prices.priceAt(segmentMidpoint);
+        const priceToUse = segmentPricePoint.price > 0n ? segmentPricePoint.price : currentPrice;
+        const priceTimestamp = segmentPricePoint.price > 0n ? segmentPricePoint.priceTimestamp : 0;
 
-        // Calculate USD value for this segment's yield using segment-specific price
         const segmentYieldUSD = calculateUSDValueNumber(segmentInterest, priceToUse, decimals);
         totalInterestUSD += segmentYieldUSD;
 
         detailedSegments.push({
-            startTime: Number(segment.startTime),
-            endTime: Number(segment.endTime),
-            startDate: new Date(Number(segment.startTime) * 1000).toISOString(),
-            endDate: new Date(Number(segment.endTime) * 1000).toISOString(),
+            startTime: segment.startTime,
+            endTime: segment.endTime,
+            startDate: new Date(segment.startTime * 1000).toISOString(),
+            endDate: new Date(segment.endTime * 1000).toISOString(),
             scaledBalance: segment.scaledBalance,
             actualBalance,
             startLiquidityIndex,
             endLiquidityIndex,
             segmentYield: segmentInterest,
             segmentYieldUSD: segmentYieldUSD.toString(),
-            durationDays: Math.round(durationDays * 100) / 100, // Round to 2 decimal places
-            assetPrice: priceToUse.toString() // Add asset price for this segment
+            durationDays: Math.round(durationDays * 100) / 100,
+            assetPrice: priceToUse.toString(),
+            assetPriceTimestamp: priceTimestamp,
         });
     }
 
     return {
         totalYield: totalInterest,
         totalYieldUSD: totalInterestUSD.toString(),
-        segments: detailedSegments
+        segments: detailedSegments,
     };
 }
 
 /**
- * Calculate borrow cost (interest paid) in a specific time segment
- * Similar to calculateSegmentInterest but for borrows using variable borrow index
- *
- * @param context - Ponder context with database access
- * @param asset - Asset address
- * @param segment - Time segment with scaled borrow balance
- * @param borrowIndexCache - Optional cache to avoid redundant borrow index queries
- */
-export async function calculateSegmentBorrowCost(
-    context: any,
-    asset: string,
-    segment: {
-        startTime: number;
-        endTime: number;
-        scaledBorrowBalance: bigint;
-    },
-    borrowIndexCache?: Map<string, bigint>
-): Promise<bigint> {
-    if (segment.scaledBorrowBalance === 0n || segment.startTime >= segment.endTime) {
-        return 0n;
-    }
-
-    // Get borrow indices at segment boundaries (use cache if available)
-    let startIndex: bigint;
-    let endIndex: bigint;
-
-    if (borrowIndexCache) {
-        const startKey = `${asset}_${segment.startTime}`;
-        const endKey = `${asset}_${segment.endTime}`;
-
-        let cachedStart = borrowIndexCache.get(startKey);
-        let cachedEnd = borrowIndexCache.get(endKey);
-
-        if (!cachedStart) {
-            cachedStart = await calculateVariableBorrowIndexAtTimestamp(context, asset, segment.startTime);
-            borrowIndexCache.set(startKey, cachedStart);
-        }
-        if (!cachedEnd) {
-            cachedEnd = await calculateVariableBorrowIndexAtTimestamp(context, asset, segment.endTime);
-            borrowIndexCache.set(endKey, cachedEnd);
-        }
-
-        startIndex = cachedStart;
-        endIndex = cachedEnd;
-    } else {
-        [startIndex, endIndex] = await Promise.all([
-            calculateVariableBorrowIndexAtTimestamp(context, asset, segment.startTime),
-            calculateVariableBorrowIndexAtTimestamp(context, asset, segment.endTime)
-        ]);
-    }
-
-    // Calculate actual borrow balances
-    const startActualBalance = calculateActualBalance(segment.scaledBorrowBalance, startIndex);
-    const endActualBalance = calculateActualBalance(segment.scaledBorrowBalance, endIndex);
-
-    // Borrow cost = growth in actual borrow balance (interest accrued)
-    const borrowCost = endActualBalance - startActualBalance;
-
-    return borrowCost;
-}
-
-/**
- * Helper function to create time segments for borrow cost calculation
- * Similar to createTimeSegments but for borrow events
- */
-async function createBorrowTimeSegments(
-    context: any,
-    user: string,
-    asset: string,
-    startTimestamp: number,
-    endTimestamp: number,
-    borrowEvents: any[]
-): Promise<Array<{ startTime: number; endTime: number; scaledBorrowBalance: bigint }>> {
-    const segments = [];
-
-    // Get scaled borrow balance at start of period
-    const startScaledBorrowBalance = await getScaledBorrowBalanceAtTimestamp(context, user, asset, startTimestamp);
-
-    // If no events during period, create single segment
-    if (borrowEvents.length === 0) {
-        if (startScaledBorrowBalance > 0n) {
-            segments.push({
-                startTime: startTimestamp,
-                endTime: endTimestamp,
-                scaledBorrowBalance: startScaledBorrowBalance
-            });
-        }
-        return segments;
-    }
-
-    // Create segments between events
-    let currentScaledBalance = startScaledBorrowBalance;
-    let previousTime = startTimestamp;
-
-    for (const event of borrowEvents) {
-        // Ensure timestamp is a number (not BigInt)
-        const eventTimestamp = Number(event.timestamp);
-
-        // Add segment before this event (if there's time)
-        if (eventTimestamp > previousTime && currentScaledBalance > 0n) {
-            segments.push({
-                startTime: previousTime,
-                endTime: eventTimestamp,
-                scaledBorrowBalance: currentScaledBalance
-            });
-        }
-
-        // Update scaled balance based on event type
-        if (event.eventType === 'borrow') {
-            currentScaledBalance += event.amount;
-        } else if (event.eventType === 'repay') {
-            currentScaledBalance -= event.amount;
-        }
-
-        previousTime = eventTimestamp;
-    }
-
-    // Add final segment from last event to end of period
-    if (previousTime < endTimestamp && currentScaledBalance > 0n) {
-        segments.push({
-            startTime: previousTime,
-            endTime: endTimestamp,
-            scaledBorrowBalance: currentScaledBalance
-        });
-    }
-
-    return segments;
-}
-
-/**
- * Calculate segmented borrow cost for a custom period with detailed breakdown
- * Similar to calculateSegmentedCustomPeriodYield but for borrow interest
- *
- * @param context - Ponder context with database access
- * @param user - User address
- * @param asset - Asset address
- * @param startTimestamp - Start of time period
- * @param endTimestamp - End of time period
- * @param decimals - Token decimals for USD calculation
- * @param borrowIndexCache - Optional cache to avoid redundant borrow index queries
+ * Borrow-side interest cost over a custom period, segmented by borrow balance
+ * changes: segmentCost = scaledBorrow * (endIndex - startIndex) / RAY.
+ * Liquidations of this asset's debt count as forced repayments.
  */
 export async function calculateSegmentedCustomPeriodBorrowCost(
-    context: any,
-    user: string,
-    asset: string,
+    ctx: AssetYieldContext,
     startTimestamp: number,
     endTimestamp: number,
-    decimals: number,
-    borrowIndexCache?: Map<string, bigint>
+    decimals: number
 ): Promise<{
     totalBorrowCost: bigint;
     totalBorrowCostUSD: string;
-    segments: Array<{
-        startTime: number;
-        endTime: number;
-        startDate: string;
-        endDate: string;
-        scaledBorrowBalance: bigint;
-        actualBorrowBalance: bigint;
-        startBorrowIndex: bigint;
-        endBorrowIndex: bigint;
-        segmentBorrowCost: bigint;
-        segmentBorrowCostUSD: string;
-        durationDays: number;
-    }>;
+    segments: BorrowCostSegment[];
 }> {
-    // Get all borrow and repay events during the period, ordered chronologically
-    const dbQuery = context.db.sql || context.db;
+    const {activity, series, prices} = ctx;
+    const inPeriod = (timestamp: number) => timestamp >= startTimestamp && timestamp <= endTimestamp;
 
-    const [borrowEvents, repayEvents, liquidationEvents] = await Promise.all([
-        dbQuery.select().from(Borrow).where(
-            and(
-                eq(Borrow.onBehalfOf, user as `0x${string}`),
-                eq(Borrow.reserve, asset as `0x${string}`),
-                gte(Borrow.timestamp, startTimestamp),
-                lte(Borrow.timestamp, endTimestamp)
-            )
-        ).orderBy(Borrow.timestamp),
-        dbQuery.select().from(Repay).where(
-            and(
-                eq(Repay.user, user as `0x${string}`),
-                eq(Repay.reserve, asset as `0x${string}`),
-                gte(Repay.timestamp, startTimestamp),
-                lte(Repay.timestamp, endTimestamp)
-            )
-        ).orderBy(Repay.timestamp),
-        // Get liquidations where this asset was the debt asset
-        dbQuery.select().from(LiquidationCall).where(
-            and(
-                eq(LiquidationCall.user, user as `0x${string}`),
-                eq(LiquidationCall.debtAsset, asset as `0x${string}`),
-                gte(LiquidationCall.timestamp, startTimestamp),
-                lte(LiquidationCall.timestamp, endTimestamp)
-            )
-        ).orderBy(LiquidationCall.timestamp)
-    ]);
+    const events: Array<{ timestamp: number; amount: bigint; eventType: 'borrow' | 'repay' }> = [
+        ...activity.borrows
+            .filter((e) => inPeriod(Number(e.timestamp)))
+            .map((e) => ({timestamp: Number(e.timestamp), amount: BigInt(e.amount ?? 0n), eventType: 'borrow' as const})),
+        ...activity.repays
+            .filter((e) => inPeriod(Number(e.timestamp)))
+            .map((e) => ({timestamp: Number(e.timestamp), amount: BigInt(e.amount ?? 0n), eventType: 'repay' as const})),
+        ...activity.liquidations
+            .filter((l) => sameAddress(l.debtAsset, activity.asset) && inPeriod(Number(l.timestamp)))
+            .map((l) => ({timestamp: Number(l.timestamp), amount: BigInt(l.debtToCover ?? 0n), eventType: 'repay' as const})),
+    ].sort((a, b) => a.timestamp - b.timestamp);
 
-    // Combine and sort events
-    // Treat liquidations as repay events (forced repayment)
-    const allEvents = [
-        ...borrowEvents.map((e: any) => ({ ...e, eventType: 'borrow' as const })),
-        ...repayEvents.map((e: any) => ({ ...e, eventType: 'repay' as const })),
-        ...liquidationEvents.map((e: any) => ({
-            ...e,
-            eventType: 'repay' as const,
-            amount: e.debtToCover  // Use debtToCover as the repay amount
-        }))
-    ].sort((a, b) => Number(a.timestamp) - Number(b.timestamp));
+    const startScaledBorrowBalance = await scaledBorrowBalanceAt(activity, startTimestamp, series);
+    const segments = buildBorrowSegments(startTimestamp, endTimestamp, startScaledBorrowBalance, events);
 
-    // Create time segments for borrow cost calculation
-    const segments = await createBorrowTimeSegments(context, user, asset, startTimestamp, endTimestamp, allEvents);
+    await series.prefetch(segments.flatMap((s) => [s.startTime, s.endTime]));
 
-    // Prefetch all borrow indices for segments if cache provided
-    if (borrowIndexCache) {
-        const prefetchPromises = [];
-        for (const segment of segments) {
-            const startKey = `${asset}_${segment.startTime}`;
-            const endKey = `${asset}_${segment.endTime}`;
-
-            if (!borrowIndexCache.has(startKey)) {
-                prefetchPromises.push(
-                    calculateVariableBorrowIndexAtTimestamp(context, asset, segment.startTime)
-                        .then(index => borrowIndexCache.set(startKey, index))
-                );
-            }
-            if (!borrowIndexCache.has(endKey)) {
-                prefetchPromises.push(
-                    calculateVariableBorrowIndexAtTimestamp(context, asset, segment.endTime)
-                        .then(index => borrowIndexCache.set(endKey, index))
-                );
-            }
-        }
-        await Promise.all(prefetchPromises);
-    }
-
-    // Get the most recent price from Borrow/Repay events for USD calculations
-    // This avoids needing to make a blockchain call to the oracle
-    // Try to get price from recent Borrow events first
-    const recentBorrow = await dbQuery
-        .select()
-        .from(Borrow)
-        .where(
-            and(
-                eq(Borrow.onBehalfOf, user as `0x${string}`),
-                eq(Borrow.reserve, asset as `0x${string}`),
-                lte(Borrow.timestamp, endTimestamp)
-            )
-        )
-        .orderBy(desc(Borrow.timestamp))
-        .limit(1);
-
+    // Fallback price: the most recent borrow (or, failing that, repay) at or before the period end
     let currentPrice = 0n;
-    if (recentBorrow.length > 0) {
-        currentPrice = recentBorrow[0].price;
+    let lastBorrow: (typeof activity.borrows)[number] | undefined;
+    for (const borrow of activity.borrows) {
+        if (Number(borrow.timestamp) <= endTimestamp) lastBorrow = borrow;
+    }
+    if (lastBorrow) {
+        currentPrice = lastBorrow.price != null ? BigInt(lastBorrow.price) : 0n;
     } else {
-        // If no borrow events, try Repay events
-        const recentRepay = await dbQuery
-            .select()
-            .from(Repay)
-            .where(
-                and(
-                    eq(Repay.user, user as `0x${string}`),
-                    eq(Repay.reserve, asset as `0x${string}`),
-                    lte(Repay.timestamp, endTimestamp)
-                )
-            )
-            .orderBy(desc(Repay.timestamp))
-            .limit(1);
-
-        if (recentRepay.length > 0) {
-            currentPrice = recentRepay[0].price;
+        let lastRepay: (typeof activity.repays)[number] | undefined;
+        for (const repay of activity.repays) {
+            if (Number(repay.timestamp) <= endTimestamp) lastRepay = repay;
+        }
+        if (lastRepay) {
+            currentPrice = lastRepay.price != null ? BigInt(lastRepay.price) : 0n;
         }
     }
 
-    // Batch-fetch all price snapshots for this asset once (avoids one DB query per segment)
-    const allPriceSnapshots = await dbQuery
-        .select()
-        .from(AssetPriceSnapshot)
-        .where(
-            and(
-                eq(AssetPriceSnapshot.asset, asset as `0x${string}`),
-                lte(AssetPriceSnapshot.timestamp, endTimestamp)
-            )
-        )
-        .orderBy(desc(AssetPriceSnapshot.timestamp));
-
-    // Calculate borrow cost for each segment and collect detailed information
     let totalBorrowCost = 0n;
     let totalBorrowCostUSD = 0;
-    const detailedSegments = [];
+    const detailedSegments: BorrowCostSegment[] = [];
 
     for (const segment of segments) {
-        const segmentBorrowCost = await calculateSegmentBorrowCost(context, asset, segment, borrowIndexCache);
+        const [startBorrowIndex, endBorrowIndex] = await Promise.all([
+            series.variableBorrowIndexAt(segment.startTime),
+            series.variableBorrowIndexAt(segment.endTime),
+        ]);
+
+        let segmentBorrowCost = 0n;
+        if (segment.scaledBorrowBalance !== 0n && segment.startTime < segment.endTime) {
+            segmentBorrowCost =
+                calculateActualBalance(segment.scaledBorrowBalance, endBorrowIndex) -
+                calculateActualBalance(segment.scaledBorrowBalance, startBorrowIndex);
+        }
         totalBorrowCost += segmentBorrowCost;
 
-        // Get borrow indices for this segment (use cache if available)
-        let startBorrowIndex: bigint;
-        let endBorrowIndex: bigint;
-
-        if (borrowIndexCache) {
-            const startKey = `${asset}_${segment.startTime}`;
-            const endKey = `${asset}_${segment.endTime}`;
-            startBorrowIndex = borrowIndexCache.get(startKey)!;
-            endBorrowIndex = borrowIndexCache.get(endKey)!;
-        } else {
-            [startBorrowIndex, endBorrowIndex] = await Promise.all([
-                calculateVariableBorrowIndexAtTimestamp(context, asset, segment.startTime),
-                calculateVariableBorrowIndexAtTimestamp(context, asset, segment.endTime)
-            ]);
-        }
-
         const actualBorrowBalance = calculateActualBalance(segment.scaledBorrowBalance, startBorrowIndex);
-        const durationDays = (Number(segment.endTime) - Number(segment.startTime)) / (24 * 60 * 60);
+        const durationDays = (segment.endTime - segment.startTime) / SECONDS_PER_DAY;
 
-        // Get segment-specific asset price from pre-fetched snapshots (no DB query)
         const segmentMidpoint = Math.floor((segment.startTime + segment.endTime) / 2);
-        let segmentPrice = 0n;
-        for (const snap of allPriceSnapshots) {
-            if (Number(snap.timestamp) <= segmentMidpoint && snap.price) {
-                segmentPrice = snap.price;
-                break;
-            }
-        }
-        const priceToUse = segmentPrice > 0n ? segmentPrice : currentPrice;
+        const segmentPricePoint = prices.priceAt(segmentMidpoint);
+        const priceToUse = segmentPricePoint.price > 0n ? segmentPricePoint.price : currentPrice;
+        const priceTimestamp = segmentPricePoint.price > 0n ? segmentPricePoint.priceTimestamp : 0;
 
-        // Calculate USD value for this segment's borrow cost using segment-specific price
         const segmentBorrowCostUSD = calculateUSDValueNumber(segmentBorrowCost, priceToUse, decimals);
         totalBorrowCostUSD += segmentBorrowCostUSD;
 
         detailedSegments.push({
-            startTime: Number(segment.startTime),
-            endTime: Number(segment.endTime),
-            startDate: new Date(Number(segment.startTime) * 1000).toISOString(),
-            endDate: new Date(Number(segment.endTime) * 1000).toISOString(),
+            startTime: segment.startTime,
+            endTime: segment.endTime,
+            startDate: new Date(segment.startTime * 1000).toISOString(),
+            endDate: new Date(segment.endTime * 1000).toISOString(),
             scaledBorrowBalance: segment.scaledBorrowBalance,
             actualBorrowBalance,
             startBorrowIndex,
@@ -645,14 +316,14 @@ export async function calculateSegmentedCustomPeriodBorrowCost(
             segmentBorrowCost,
             segmentBorrowCostUSD: segmentBorrowCostUSD.toString(),
             durationDays: Math.round(durationDays * 100) / 100,
-            assetPrice: priceToUse.toString() // Add asset price for this segment
+            assetPrice: priceToUse.toString(),
+            assetPriceTimestamp: priceTimestamp,
         });
     }
 
     return {
         totalBorrowCost,
         totalBorrowCostUSD: totalBorrowCostUSD.toString(),
-        segments: detailedSegments
+        segments: detailedSegments,
     };
 }
-
