@@ -5,6 +5,18 @@
  * using oracle prices with 8 decimals precision.
  */
 
+const ORACLE_SCALE = 100_000_000n;
+const tokenScales = new Map<number, bigint>();
+
+function tokenScale(decimals: number): bigint {
+    let scale = tokenScales.get(decimals);
+    if (scale === undefined) {
+        scale = 10n ** BigInt(decimals);
+        tokenScales.set(decimals, scale);
+    }
+    return scale;
+}
+
 /**
  * Calculate USD value from token amount and oracle price
  * 
@@ -31,14 +43,11 @@ export function calculateUSDValueNumber(
     }
     
     try {
-        // Oracle prices have 8 decimals precision
-        const ORACLE_DECIMALS = 8;
-        
         // Formula: usdValue = (amount / 10^decimals) * (price / 10^8)
         // To avoid floating point, we calculate: (amount * price) / (10^decimals * 10^8)
         
         const numerator = amount * assetPrice;
-        const denominator = BigInt(10 ** decimals) * BigInt(10 ** ORACLE_DECIMALS);
+        const denominator = tokenScale(decimals) * ORACLE_SCALE;
         
         // Calculate integer part and remainder for decimal places
         const integerPart = numerator / denominator;
@@ -54,4 +63,3 @@ export function calculateUSDValueNumber(
         return 0;
     }
 }
-

@@ -72,10 +72,10 @@ export default createConfig({
         },
     },
     blocks: {
-        // Periodic USDC oracle price snapshots
+        // Hourly USDC oracle anchor shared by all event and report calculations.
         ChainlinkOracleUpdate: {
             chain: "hyperEvm",
-            interval: 300, // Every 300 blocks
+            interval: 3600,
             startBlock: 787000,
         },
     },

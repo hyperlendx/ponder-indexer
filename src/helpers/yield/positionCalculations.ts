@@ -12,16 +12,15 @@ import {calculateActualBalance} from "../aave/balanceConversions";
 import {calculateUSDValueNumber} from "../usdCalculations";
 import {
     type EventDetail,
-    discoverUserAssets,
     loadUserAssetActivity,
     isActiveInPeriod,
-    recordedScaledBalanceAt,
-    recordedBorrowBalanceAt,
+    scaledBalanceAt,
     formatBalanceEvents,
     formatBorrowEvents,
 } from "./userAssetActivity";
 import {ReserveIndexSeries} from "./reserveIndexSeries";
 import {loadPriceSeries} from "./priceSeries";
+import {USDC_ADDRESS} from "../usdc";
 import {
     type AssetYieldContext,
     calculateSegmentedCustomPeriodYield,
@@ -46,7 +45,7 @@ export interface YieldSegmentDetail {
     segmentYieldUSD: string; // USD value of yield for this segment
     durationDays: number;
     assetPrice: string; // Oracle price of the asset during this segment (8 decimals precision)
-    assetPriceTimestamp: number; // Timestamp of the price snapshot used (0 when falling back to an event price)
+    assetPriceTimestamp: number; // Timestamp of the price snapshot used (0 when unavailable)
 }
 
 /**
@@ -65,7 +64,7 @@ export interface BorrowCostSegmentDetail {
     segmentBorrowCostUSD: string; // USD value of borrow cost for this segment
     durationDays: number;
     assetPrice: string; // Oracle price of the asset during this segment (8 decimals precision)
-    assetPriceTimestamp: number; // Timestamp of the price snapshot used (0 when falling back to an event price)
+    assetPriceTimestamp: number; // Timestamp of the price snapshot used (0 when unavailable)
 }
 
 /**
@@ -131,30 +130,21 @@ export async function calculateUserYieldPositions(
     startTimestamp: number,
     endTimestamp: number
 ): Promise<SimplifiedYieldPosition[]> {
-    const assets = await discoverUserAssets(context, user);
-    if (assets.length === 0) {
+    // This indexer is intentionally USDC-only, so discovering assets with three
+    // database queries on every request can never produce additional results.
+    const asset = USDC_ADDRESS;
+    const [activity, prices] = await Promise.all([
+        loadUserAssetActivity(context, user, asset, endTimestamp, {startTimestamp}),
+        loadPriceSeries(context, asset),
+    ]);
+    const series = new ReserveIndexSeries(context, asset);
+
+    if (!isActiveInPeriod(activity, startTimestamp, endTimestamp)) {
         return [];
     }
 
-    const positions = await Promise.all(
-        assets.map(async (asset): Promise<SimplifiedYieldPosition | null> => {
-            const [activity, prices] = await Promise.all([
-                loadUserAssetActivity(context, user, asset, endTimestamp),
-                loadPriceSeries(context, asset, startTimestamp, endTimestamp),
-            ]);
-            const series = new ReserveIndexSeries(context, asset);
-
-            if (!(await isActiveInPeriod(activity, startTimestamp, endTimestamp, series))) {
-                return null;
-            }
-
-            return buildYieldPosition({activity, series, prices}, startTimestamp, endTimestamp);
-        })
-    );
-
-    // Filter to only positions with activity during the period
-    return positions
-        .filter((pos): pos is SimplifiedYieldPosition => pos !== null)
+    const position = await buildYieldPosition({activity, series, prices}, startTimestamp, endTimestamp);
+    return [position]
         .filter(
             (pos) =>
                 pos.totalDeposited > 0n ||
@@ -174,7 +164,6 @@ async function buildYieldPosition(
     const decimals = prices.decimals;
     const inPeriod = (timestamp: number | null) =>
         Number(timestamp) >= startTimestamp && Number(timestamp) <= endTimestamp;
-    const beforeStart = (timestamp: number | null) => Number(timestamp) <= startTimestamp;
 
     // Events during the period
     const depositEvents = activity.balanceEvents.filter((e) => e.eventType === 'deposit' && inPeriod(e.timestamp));
@@ -185,11 +174,6 @@ async function buildYieldPosition(
     // Raw transaction events for totalRawDeposited/totalRawBorrowed
     const supplyEvents = activity.supplies.filter((e) => inPeriod(e.timestamp));
     const withdrawRawEvents = activity.withdraws.filter((e) => inPeriod(e.timestamp));
-    // Raw transaction events before the period for starting raw balances
-    const supplyEventsBeforeStart = activity.supplies.filter((e) => beforeStart(e.timestamp));
-    const withdrawEventsBeforeStart = activity.withdraws.filter((e) => beforeStart(e.timestamp));
-    const borrowEventsBeforeStart = activity.borrows.filter((e) => beforeStart(e.timestamp));
-    const repayEventsBeforeStart = activity.repays.filter((e) => beforeStart(e.timestamp));
 
     // Resolve every reserve index this position needs in one batch
     await series.prefetch([
@@ -200,10 +184,24 @@ async function buildYieldPosition(
         ...repayEvents.map((e) => Number(e.timestamp)),
         ...activity.liquidations.map((e) => Number(e.timestamp)),
     ]);
+    await prices.prefetch([
+        startTimestamp,
+        endTimestamp,
+        ...activity.balanceEvents.map((e) => Number(e.timestamp)),
+        ...activity.borrows.map((e) => Number(e.timestamp)),
+        ...activity.repays.map((e) => Number(e.timestamp)),
+        ...activity.supplies.map((e) => Number(e.timestamp)),
+        ...activity.withdraws.map((e) => Number(e.timestamp)),
+        ...activity.liquidations.map((e) => Number(e.timestamp)),
+    ]);
 
     // Starting balances as recorded (capital already active at period start) and the events behind them
-    const startScaledSupplyBalance = recordedScaledBalanceAt(activity, startTimestamp);
-    const startScaledBorrowBalance = recordedBorrowBalanceAt(activity, startTimestamp);
+    // Starting state is immediately before the inclusive range. Events exactly
+    // at startTimestamp are counted once as in-period activity below.
+    const startScaledSupplyBalance = scaledBalanceAt(activity, startTimestamp - 1);
+    const startScaledBorrowBalance = activity.startingScaledBorrowBalance > 0n
+        ? activity.startingScaledBorrowBalance
+        : 0n;
     const startLiquidityIndex = await series.liquidityIndexAt(startTimestamp);
     const startBorrowIndex = await series.variableBorrowIndexAt(startTimestamp);
 
@@ -211,8 +209,8 @@ async function buildYieldPosition(
     const startBorrowBalance = calculateActualBalance(startScaledBorrowBalance, startBorrowIndex);
 
     const events_before_period: EventDetail[] = [
-        ...formatBalanceEvents(activity, startTimestamp),
-        ...formatBorrowEvents(activity, startTimestamp),
+        ...formatBalanceEvents(activity, startTimestamp - 1, prices),
+        ...formatBorrowEvents(activity, startTimestamp - 1, prices),
     ].sort((a, b) => a.timestamp - b.timestamp);
 
     // Segmented yield and borrow cost
@@ -225,24 +223,29 @@ async function buildYieldPosition(
     let totalWithdrawn = 0n;
     let totalRepaid = 0n;
 
-    let totalDepositedUSD = 0;
+    const startPrice = prices.priceAt(startTimestamp).price;
+    let totalDepositedUSD = startPrice > 0n
+        ? calculateUSDValueNumber(startSupplyBalance, startPrice, decimals)
+        : 0;
     let totalWithdrawnUSD = 0;
-    let totalBorrowedUSD = 0;
+    let totalBorrowedUSD = startPrice > 0n
+        ? calculateUSDValueNumber(startBorrowBalance, startPrice, decimals)
+        : 0;
     let totalRepaidUSD = 0;
-    let totalScaledDepositedUSD = 0;
-    let totalScaledBorrowedUSD = 0;
+    let totalScaledDepositedUSD = startPrice > 0n
+        ? calculateUSDValueNumber(startScaledSupplyBalance, startPrice, decimals)
+        : 0;
+    let totalScaledBorrowedUSD = startPrice > 0n
+        ? calculateUSDValueNumber(startScaledBorrowBalance, startPrice, decimals)
+        : 0;
 
     // Scaled totals (raw transaction amounts, consistent across query periods)
     let totalScaledDeposited = startScaledSupplyBalance;
     let totalScaledBorrowed = startScaledBorrowBalance;
 
     // Starting raw balances (from events before period start)
-    let startRawDeposits = 0n;
-    let startRawBorrows = 0n;
-    for (const event of supplyEventsBeforeStart) startRawDeposits += BigInt(event.amount ?? 0n);
-    for (const event of withdrawEventsBeforeStart) startRawDeposits -= BigInt(event.amount ?? 0n);
-    for (const event of borrowEventsBeforeStart) startRawBorrows += BigInt(event.amount ?? 0n);
-    for (const event of repayEventsBeforeStart) startRawBorrows -= BigInt(event.amount ?? 0n);
+    const startRawDeposits = activity.startingRawSupplyBalance;
+    const startRawBorrows = activity.startingRawBorrowBalance;
 
     // Raw transaction amounts during the period
     let totalRawDeposited = 0n;
@@ -252,30 +255,34 @@ async function buildYieldPosition(
 
     for (const event of supplyEvents) {
         const amount = BigInt(event.amount ?? 0n);
+        const price = prices.priceAt(Number(event.timestamp)).price;
         totalRawDeposited += amount;
-        if (event.price) {
-            totalRawDepositedUSD += calculateUSDValueNumber(amount, event.price, decimals);
+        if (price > 0n) {
+            totalRawDepositedUSD += calculateUSDValueNumber(amount, price, decimals);
         }
     }
     for (const event of withdrawRawEvents) {
         const amount = BigInt(event.amount ?? 0n);
+        const price = prices.priceAt(Number(event.timestamp)).price;
         totalRawDeposited -= amount;
-        if (event.price) {
-            totalRawDepositedUSD -= calculateUSDValueNumber(amount, event.price, decimals);
+        if (price > 0n) {
+            totalRawDepositedUSD -= calculateUSDValueNumber(amount, price, decimals);
         }
     }
     for (const event of borrowEvents) {
         const amount = BigInt(event.amount ?? 0n);
+        const price = prices.priceAt(Number(event.timestamp)).price;
         totalRawBorrowed += amount;
-        if (event.price) {
-            totalRawBorrowedUSD += calculateUSDValueNumber(amount, event.price, decimals);
+        if (price > 0n) {
+            totalRawBorrowedUSD += calculateUSDValueNumber(amount, price, decimals);
         }
     }
     for (const event of repayEvents) {
         const amount = BigInt(event.amount ?? 0n);
+        const price = prices.priceAt(Number(event.timestamp)).price;
         totalRawBorrowed -= amount;
-        if (event.price) {
-            totalRawBorrowedUSD -= calculateUSDValueNumber(amount, event.price, decimals);
+        if (price > 0n) {
+            totalRawBorrowedUSD -= calculateUSDValueNumber(amount, price, decimals);
         }
     }
 
@@ -284,12 +291,13 @@ async function buildYieldPosition(
     for (const event of depositEvents) {
         const transactionAmount = BigInt(event.transactionAmount ?? 0n);
         const actualAmount = calculateActualBalance(transactionAmount, BigInt(event.liquidityIndex ?? 0n));
+        const price = prices.priceAt(Number(event.timestamp)).price;
         totalDeposited += actualAmount;
         totalScaledDeposited += transactionAmount;
 
-        if (event.assetPrice) {
-            totalDepositedUSD += calculateUSDValueNumber(actualAmount, event.assetPrice, decimals);
-            totalScaledDepositedUSD += calculateUSDValueNumber(transactionAmount, event.assetPrice, decimals);
+        if (price > 0n) {
+            totalDepositedUSD += calculateUSDValueNumber(actualAmount, price, decimals);
+            totalScaledDepositedUSD += calculateUSDValueNumber(transactionAmount, price, decimals);
         }
 
         events.push({
@@ -298,17 +306,19 @@ async function buildYieldPosition(
             date: new Date(Number(event.timestamp) * 1000).toISOString(),
             amount: actualAmount.toString(),
             txHash: event.txHash as string,
-            assetPrice: event.assetPrice?.toString(),
+            assetPrice: price > 0n ? price.toString() : undefined,
         });
     }
 
     for (const event of withdrawEvents) {
         const transactionAmount = BigInt(event.transactionAmount ?? 0n);
-        const actualAmount = calculateActualBalance(transactionAmount, BigInt(event.liquidityIndex ?? 0n));
+        const scaledAmount = transactionAmount < 0n ? -transactionAmount : transactionAmount;
+        const actualAmount = calculateActualBalance(scaledAmount, BigInt(event.liquidityIndex ?? 0n));
+        const price = prices.priceAt(Number(event.timestamp)).price;
         totalWithdrawn += actualAmount;
 
-        if (event.assetPrice) {
-            totalWithdrawnUSD += calculateUSDValueNumber(actualAmount, event.assetPrice, decimals);
+        if (price > 0n) {
+            totalWithdrawnUSD += calculateUSDValueNumber(actualAmount, price, decimals);
             // totalScaledDeposited is cumulative (not net), so its USD counterpart is too
         }
 
@@ -318,18 +328,20 @@ async function buildYieldPosition(
             date: new Date(Number(event.timestamp) * 1000).toISOString(),
             amount: actualAmount.toString(),
             txHash: event.txHash as string,
-            assetPrice: event.assetPrice?.toString(),
+            assetPrice: price > 0n ? price.toString() : undefined,
         });
     }
 
     for (const event of borrowEvents) {
         const amount = BigInt(event.amount ?? 0n);
+        const scaledAmount = BigInt(event.scaledAmount ?? 0n);
+        const price = prices.priceAt(Number(event.timestamp)).price;
         totalBorrowed += amount;
-        totalScaledBorrowed += amount;
+        totalScaledBorrowed += scaledAmount;
 
-        if (event.price) {
-            totalBorrowedUSD += calculateUSDValueNumber(amount, event.price, decimals);
-            totalScaledBorrowedUSD += calculateUSDValueNumber(amount, event.price, decimals);
+        if (price > 0n) {
+            totalBorrowedUSD += calculateUSDValueNumber(amount, price, decimals);
+            totalScaledBorrowedUSD += calculateUSDValueNumber(scaledAmount, price, decimals);
         }
 
         events.push({
@@ -338,16 +350,17 @@ async function buildYieldPosition(
             date: new Date(Number(event.timestamp) * 1000).toISOString(),
             amount: amount.toString(),
             txHash: event.txHash as string,
-            assetPrice: event.price?.toString(),
+            assetPrice: price > 0n ? price.toString() : undefined,
         });
     }
 
     for (const event of repayEvents) {
         const amount = BigInt(event.amount ?? 0n);
+        const price = prices.priceAt(Number(event.timestamp)).price;
         totalRepaid += amount;
 
-        if (event.price) {
-            totalRepaidUSD += calculateUSDValueNumber(amount, event.price, decimals);
+        if (price > 0n) {
+            totalRepaidUSD += calculateUSDValueNumber(amount, price, decimals);
             // totalScaledBorrowed is cumulative (not net), so its USD counterpart is too
         }
 
@@ -357,7 +370,7 @@ async function buildYieldPosition(
             date: new Date(Number(event.timestamp) * 1000).toISOString(),
             amount: amount.toString(),
             txHash: event.txHash as string,
-            assetPrice: event.price?.toString(),
+            assetPrice: price > 0n ? price.toString() : undefined,
         });
     }
 
@@ -365,25 +378,41 @@ async function buildYieldPosition(
     for (const liquidation of liquidationEvents) {
         if (liquidation.collateralAsset?.toLowerCase() === asset.toLowerCase()) {
             const amount = BigInt(liquidation.liquidatedCollateralAmount ?? 0n);
+            const price = prices.priceAt(Number(liquidation.timestamp)).price;
             totalWithdrawn += amount;
+            totalRawDeposited -= amount;
+            if (price > 0n) {
+                const amountUSD = calculateUSDValueNumber(amount, price, decimals);
+                totalWithdrawnUSD += amountUSD;
+                totalRawDepositedUSD -= amountUSD;
+            }
             events.push({
-                eventType: 'liquidation_collateral' as any,
+                eventType: 'liquidation_collateral',
                 timestamp: Number(liquidation.timestamp),
                 date: new Date(Number(liquidation.timestamp) * 1000).toISOString(),
                 amount: amount.toString(),
                 txHash: liquidation.txHash as string,
+                assetPrice: price > 0n ? price.toString() : undefined,
             });
         }
 
         if (liquidation.debtAsset?.toLowerCase() === asset.toLowerCase()) {
             const amount = BigInt(liquidation.debtToCover ?? 0n);
+            const price = prices.priceAt(Number(liquidation.timestamp)).price;
             totalRepaid += amount;
+            totalRawBorrowed -= amount;
+            if (price > 0n) {
+                const amountUSD = calculateUSDValueNumber(amount, price, decimals);
+                totalRepaidUSD += amountUSD;
+                totalRawBorrowedUSD -= amountUSD;
+            }
             events.push({
-                eventType: 'liquidation_debt' as any,
+                eventType: 'liquidation_debt',
                 timestamp: Number(liquidation.timestamp),
                 date: new Date(Number(liquidation.timestamp) * 1000).toISOString(),
                 amount: amount.toString(),
                 txHash: liquidation.txHash as string,
+                assetPrice: price > 0n ? price.toString() : undefined,
             });
         }
     }

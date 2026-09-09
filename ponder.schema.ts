@@ -34,14 +34,14 @@ export const Borrow = onchainTable(
         user: t.hex(),
         onBehalfOf: t.hex(),
         amount: t.bigint(),
+        scaledAmount: t.bigint(),
+        variableBorrowIndex: t.bigint(),
         interestRateMode: t.integer(),
         borrowRate: t.bigint(),
         referralCode: t.integer(),
         timestamp: t.integer(),
-        price: t.bigint(),
     }),
     (table) => ({
-        onBehalfOfIdx: index().on(table.onBehalfOf),
         onBehalfOfReserveTimestampIdx: index().on(table.onBehalfOf, table.reserve, table.timestamp),
     })
 );
@@ -56,9 +56,10 @@ export const Repay = onchainTable(
         user: t.hex(),
         repayer: t.hex(),
         amount: t.bigint(),
+        scaledAmount: t.bigint(),
+        variableBorrowIndex: t.bigint(),
         useATokens: t.boolean(),
         timestamp: t.integer(),
-        price: t.bigint(),
     }),
     (table) => ({
         userReserveTimestampIdx: index().on(table.user, table.reserve, table.timestamp),
@@ -77,11 +78,9 @@ export const Supply = onchainTable(
         amount: t.bigint(),
         referralCode: t.integer(),
         timestamp: t.integer(),
-        price: t.bigint(),
     }),
     (table) => ({
         onBehalfOfReserveTimestampIdx: index().on(table.onBehalfOf, table.reserve, table.timestamp),
-        reserveTimestampIdx: index().on(table.reserve, table.timestamp),
     })
 );
 
@@ -97,11 +96,9 @@ export const Withdraw = onchainTable(
         to: t.hex(),
         amount: t.bigint(),
         timestamp: t.integer(),
-        price: t.bigint(),
     }),
     (table) => ({
         onBehalfOfReserveTimestampIdx: index().on(table.onBehalfOf, table.reserve, table.timestamp),
-        reserveTimestampIdx: index().on(table.reserve, table.timestamp),
     })
 );
 
@@ -116,14 +113,13 @@ export const LiquidationCall = onchainTable(
         user: t.hex(),
         debtToCover: t.bigint(),
         liquidatedCollateralAmount: t.bigint(),
+        scaledDebtToCover: t.bigint(),
+        scaledCollateralAmount: t.bigint(),
         liquidator: t.hex(),
         receiveAToken: t.boolean(),
         timestamp: t.integer(),
-        priceCollateral: t.bigint(),
-        priceDebt: t.bigint(),
     }),
     (table) => ({
-        userIdx: index().on(table.user),
         userCollateralTimestampIdx: index().on(table.user, table.collateralAsset, table.timestamp),
         userDebtTimestampIdx: index().on(table.user, table.debtAsset, table.timestamp),
     })
@@ -141,21 +137,6 @@ export const FlashLoan = onchainTable("flash_loan", (t) => ({
     premium: t.bigint(),
     referralCode: t.integer(),
     timestamp: t.integer(),
-    price: t.bigint(),
-}));
-
-export const ReserveDataUpdated = onchainTable("reserve_data_updated", (t) => ({
-    id: t.text().primaryKey(),
-    txHash: t.hex(),
-    pool: t.hex(),
-    reserve: t.hex(),
-    liquidityRate: t.bigint(),
-    stableBorrowRate: t.bigint(),
-    variableBorrowRate: t.bigint(),
-    liquidityIndex: t.bigint(),
-    variableBorrowIndex: t.bigint(),
-    timestamp: t.integer(),
-    price: t.bigint(),
 }));
 
 export const ReserveUsedAsCollateralEnabled = onchainTable("reserve_collateral_enabled", (t) => ({
@@ -193,7 +174,6 @@ export const MintedToTreasury = onchainTable("minted_to_treasury", (t) => ({
     reserve: t.hex(),
     amountMinted: t.bigint(),
     timestamp: t.integer(),
-    price: t.bigint(),
 }));
 
 export const MintUnbacked = onchainTable("mint_unbacked", (t) => ({
@@ -206,7 +186,6 @@ export const MintUnbacked = onchainTable("mint_unbacked", (t) => ({
     amount: t.bigint(),
     referralCode: t.integer(),
     timestamp: t.integer(),
-    price: t.bigint(),
 }));
 
 export const BackUnbacked = onchainTable("back_unbacked", (t) => ({
@@ -218,7 +197,6 @@ export const BackUnbacked = onchainTable("back_unbacked", (t) => ({
     amount: t.bigint(),
     fee: t.bigint(),
     timestamp: t.integer(),
-    price: t.bigint(),
 }));
 
 export const RebalanceStableBorrowRate = onchainTable("rebalance_stable_borrow_rate", (t) => ({
@@ -267,9 +245,7 @@ export const ReserveDataEvent = onchainTable(
         logIndex: t.integer(), // Orders several updates of the same reserve within one block
     }),
     (table) => ({
-        reserveIdx: index().on(table.reserve),
-        timestampIdx: index().on(table.timestamp),
-        reserveTimestampIdx: index().on(table.reserve, table.timestamp),
+        reserveTimestampOrderIdx: index().on(table.reserve, table.timestamp, table.blockNumber, table.logIndex),
     })
 );
 
@@ -310,15 +286,15 @@ export const UserBalanceEvent = onchainTable(
         blockNumber: t.bigint(),
         logIndex: t.integer(), // Log index of the triggering event, for deterministic ordering within a block
         liquidityIndex: t.bigint(),
-        assetPrice: t.bigint(), // Oracle price of the asset at the time of the event (8 decimals precision)
     }),
     (table) => ({
-        userIdx: index().on(table.user),
-        assetIdx: index().on(table.asset),
-        userAssetIdx: index().on(table.user, table.asset),
-        timestampIdx: index().on(table.timestamp),
-        eventTypeIdx: index().on(table.eventType),
-        userAssetTimestampIdx: index().on(table.user, table.asset, table.timestamp),
+        userAssetTimestampOrderIdx: index().on(
+            table.user,
+            table.asset,
+            table.timestamp,
+            table.blockNumber,
+            table.logIndex
+        ),
     })
 );
 
@@ -335,16 +311,10 @@ export const UserPosition = onchainTable(
         totalWithdrawals: t.bigint(), // Cumulative withdrawals in underlying asset
         lastUpdated: t.integer(),
         lastLiquidityIndex: t.bigint(),
-    }),
-    (table) => ({
-        userIdx: index().on(table.user),
-        assetIdx: index().on(table.asset),
-        userAssetIdx: index().on(table.user, table.asset),
-        lastUpdatedIdx: index().on(table.lastUpdated),
     })
 );
 
-// Store periodic oracle price snapshots for all assets
+// Store periodic USDC oracle anchors used by report-time sparse lookups.
 export const AssetPriceSnapshot = onchainTable(
     "asset_price_snapshot",
     (t) => ({
@@ -356,10 +326,6 @@ export const AssetPriceSnapshot = onchainTable(
         timestamp: t.integer(),
     }),
     (table) => ({
-        assetIdx: index().on(table.asset),
-        timestampIdx: index().on(table.timestamp),
-        blockNumberIdx: index().on(table.blockNumber),
         assetTimestampIdx: index().on(table.asset, table.timestamp),
-        assetBlockIdx: index().on(table.asset, table.blockNumber),
     })
 );

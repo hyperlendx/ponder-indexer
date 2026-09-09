@@ -19,6 +19,7 @@
  */
 import {DailyReserveIndex} from "ponder:schema";
 import {calculateLiquidityIndexAtTimestamp, liquidityIndexFromPoint, type ReserveIndexPoint} from "./aave/liquidityIndex";
+import {calculateVariableBorrowIndexAtTimestamp, variableBorrowIndexFromPoint} from "./aave/borrowIndex";
 
 const SECONDS_PER_DAY = 86400;
 
@@ -118,4 +119,18 @@ export async function getLiquidityIndexForEvent(
         return liquidityIndexFromPoint(state, timestamp);
     }
     return calculateLiquidityIndexAtTimestamp(context, reserve, timestamp, txHash);
+}
+
+/** Variable borrow index to apply to a debt-changing event. */
+export async function getVariableBorrowIndexForEvent(
+    context: any,
+    reserve: string,
+    timestamp: number,
+    txHash: string
+): Promise<bigint> {
+    const state = reserveStates.get(key(reserve));
+    if (state && state.timestamp <= timestamp) {
+        return variableBorrowIndexFromPoint(state, timestamp);
+    }
+    return calculateVariableBorrowIndexAtTimestamp(context, reserve, timestamp, txHash);
 }

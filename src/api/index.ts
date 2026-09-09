@@ -3,6 +3,7 @@ import schema from "ponder:schema";
 import {Hono} from "hono";
 import {graphql, eq, and, desc} from "ponder";
 import {
+    buildReportDayEnds,
     calculateUserDailyYieldBreakdown,
     calculateUserDailyPortfolioValue,
 } from "../helpers/yield/yieldReports";
@@ -10,12 +11,58 @@ import {cors} from 'hono/cors'
 
 const app = new Hono();
 
+const RESPONSE_CACHE_TTL_MS = 30_000;
+const RESPONSE_CACHE_MAX_ENTRIES = 256;
+const responseCache = new Map<string, {expiresAt: number; payload: unknown}>();
+
+function getCachedResponse(key: string): unknown | undefined {
+    const cached = responseCache.get(key);
+    if (!cached) return undefined;
+    if (cached.expiresAt <= Date.now()) {
+        responseCache.delete(key);
+        return undefined;
+    }
+    // Refresh insertion order so the map behaves as a small LRU.
+    responseCache.delete(key);
+    responseCache.set(key, cached);
+    return cached.payload;
+}
+
+function setCachedResponse(key: string, payload: unknown): void {
+    if (responseCache.size >= RESPONSE_CACHE_MAX_ENTRIES) {
+        const oldest = responseCache.keys().next().value;
+        if (oldest !== undefined) responseCache.delete(oldest);
+    }
+    responseCache.set(key, {expiresAt: Date.now() + RESPONSE_CACHE_TTL_MS, payload});
+}
+
+function setCacheHeaders(c: any, status: 'HIT' | 'MISS'): void {
+    c.header('Cache-Control', 'public, max-age=30, stale-while-revalidate=120');
+    c.header('X-Response-Cache', status);
+}
+
+function cachedJson(c: any, key: string, payload: unknown) {
+    setCachedResponse(key, payload);
+    setCacheHeaders(c, 'MISS');
+    return c.json(payload);
+}
+
+function getDetailOptions(c: any): {includeDetails: boolean; detailLimit: number} {
+    const includeDetails = c.req.query('includeDetails') !== 'false';
+    if (!includeDetails) return {includeDetails: false, detailLimit: 0};
+    const requestedLimit = Number.parseInt(c.req.query('detailLimit') ?? '1000', 10);
+    const detailLimit = Number.isFinite(requestedLimit)
+        ? Math.min(5000, Math.max(1, requestedLimit))
+        : 1000;
+    return {includeDetails, detailLimit};
+}
+
 //fix CORS
 app.use('/*', cors({
     origin: '*',
     allowHeaders: ['Origin', 'Content-Type', 'Accept', 'Authorization'],
     allowMethods: ['GET', 'POST', 'OPTIONS'],
-    exposeHeaders: ['Content-Length'],
+    exposeHeaders: ['Content-Length', 'X-Response-Cache'],
     maxAge: 600,
     credentials: false, // Must be false when using wildcard '*'
 }))
@@ -30,6 +77,7 @@ app.get("/user/:address/custom-period-yield", async (c) => {
     const userAddress = c.req.param("address");
     const fromTimestampParam = c.req.query("fromTimestamp");
     const toTimestampParam = c.req.query("toTimestamp");
+    const {includeDetails, detailLimit} = getDetailOptions(c);
 
     if (!userAddress || !fromTimestampParam || !toTimestampParam) {
         return c.json({error: "User address, fromTimestamp, and toTimestamp are required"}, 400);
@@ -69,6 +117,13 @@ app.get("/user/:address/custom-period-yield", async (c) => {
         return c.json({error: "toTimestamp cannot be in the future"}, 400);
     }
 
+    const cacheKey = `custom-period-yield:${userAddress.toLowerCase()}:${fromTimestamp}:${toTimestamp}:${includeDetails}:${detailLimit}`;
+    const cached = getCachedResponse(cacheKey);
+    if (cached !== undefined) {
+        setCacheHeaders(c, 'HIT');
+        return c.json(cached);
+    }
+
     try {
         const context = {db};
 
@@ -77,7 +132,7 @@ app.get("/user/:address/custom-period-yield", async (c) => {
         const positions = await calculateUserYieldPositions(context, userAddress, fromTimestamp, toTimestamp);
 
         if (positions.length === 0) {
-            return c.json({
+            return cachedJson(c, cacheKey, {
                 user: userAddress,
                 fromTimestamp,
                 toTimestamp,
@@ -119,8 +174,8 @@ app.get("/user/:address/custom-period-yield", async (c) => {
             totalRawBorrowed: pos.totalRawBorrowed.toString(),
             netDeposits: pos.netDeposits.toString(),
             netBorrows: pos.netBorrows.toString(),
-            events: pos.events, // Already formatted with string amounts and assetPrice
-            events_before_period: pos.events_before_period, // Events that contributed to starting balances
+            events: includeDetails ? pos.events.slice(0, detailLimit) : [],
+            events_before_period: includeDetails ? pos.events_before_period.slice(-detailLimit) : [],
             starting_balances: {
                 deposits: pos.starting_balances.deposits.toString(),
                 borrows: pos.starting_balances.borrows.toString(),
@@ -129,7 +184,7 @@ app.get("/user/:address/custom-period-yield", async (c) => {
                 rawDeposits: pos.starting_balances.rawDeposits.toString(),
                 rawBorrows: pos.starting_balances.rawBorrows.toString()
             },
-            yieldSegments: pos.yieldSegments.map(seg => ({
+            yieldSegments: (includeDetails ? pos.yieldSegments.slice(0, detailLimit) : []).map(seg => ({
                 startTime: seg.startTime,
                 endTime: seg.endTime,
                 startDate: seg.startDate,
@@ -144,7 +199,7 @@ app.get("/user/:address/custom-period-yield", async (c) => {
                 assetPrice: seg.assetPrice, // Asset price during this segment
                 assetPriceTimestamp: seg.assetPriceTimestamp // Timestamp of the price snapshot
             })),
-            borrowCostSegments: pos.borrowCostSegments.map(seg => ({
+            borrowCostSegments: (includeDetails ? pos.borrowCostSegments.slice(0, detailLimit) : []).map(seg => ({
                 startTime: seg.startTime,
                 endTime: seg.endTime,
                 startDate: seg.startDate,
@@ -161,7 +216,7 @@ app.get("/user/:address/custom-period-yield", async (c) => {
             }))
         }));
 
-        return c.json({
+        return cachedJson(c, cacheKey, {
             user: userAddress,
             fromTimestamp,
             toTimestamp,
@@ -170,6 +225,7 @@ app.get("/user/:address/custom-period-yield", async (c) => {
             days: Math.round((toTimestamp - fromTimestamp) / (24 * 60 * 60) * 100) / 100,
             assets: formattedAssets,
             totalAssets: formattedAssets.length,
+            details: {included: includeDetails, limit: detailLimit},
             calculatedAt: Math.floor(Date.now() / 1000)
         });
 
@@ -188,6 +244,7 @@ app.get("/user/:address/daily-yield-breakdown", async (c) => {
     const userAddress = c.req.param("address");
     const fromTimestampParam = c.req.query("fromTimestamp");
     const toTimestampParam = c.req.query("toTimestamp");
+    const {includeDetails, detailLimit} = getDetailOptions(c);
 
     if (!userAddress || !fromTimestampParam || !toTimestampParam) {
         return c.json({error: "User address, fromTimestamp, and toTimestamp are required"}, 400);
@@ -227,6 +284,13 @@ app.get("/user/:address/daily-yield-breakdown", async (c) => {
         return c.json({error: "toTimestamp cannot be in the future"}, 400);
     }
 
+    const cacheKey = `daily-yield:${userAddress.toLowerCase()}:${fromTimestamp}:${toTimestamp}:${includeDetails}:${detailLimit}`;
+    const cached = getCachedResponse(cacheKey);
+    if (cached !== undefined) {
+        setCacheHeaders(c, 'HIT');
+        return c.json(cached);
+    }
+
     try {
         const context = {db};
 
@@ -237,8 +301,8 @@ app.get("/user/:address/daily-yield-breakdown", async (c) => {
         // Only return empty response if no data could be calculated at all (e.g., no assets found)
         if (yieldData.dailyValues.length === 0 && !yieldData.currentValue) {
             // Calculate expected number of days for empty response
-            const expectedDays = Math.ceil((toTimestamp - fromTimestamp) / (24 * 60 * 60));
-            return c.json({
+            const expectedDays = buildReportDayEnds(fromTimestamp, toTimestamp).length;
+            return cachedJson(c, cacheKey, {
                 user: userAddress,
                 fromTimestamp,
                 toTimestamp,
@@ -253,7 +317,7 @@ app.get("/user/:address/daily-yield-breakdown", async (c) => {
                 },
                 calculatedAt: Math.floor(Date.now() / 1000),
                 message: "No positions found for this user during the specified period",
-                note: "USD values are calculated using historical oracle prices from the database events and formatted with 4 decimal places"
+                note: "USD values use the latest periodic oracle snapshot at each calculation timestamp and are formatted with 4 decimal places"
             });
         }
 
@@ -277,12 +341,12 @@ app.get("/user/:address/daily-yield-breakdown", async (c) => {
                 assetYieldUSD: asset.assetYieldUSD,
                 borrowCostUSD: asset.borrowCostUSD,
                 netYieldUSD: asset.netYieldUSD,
-                segments: asset.segments, // Already converted to strings in the helper function
-                borrowSegments: asset.borrowSegments // Already converted to strings in the helper function
+                segments: includeDetails ? asset.segments.slice(0, detailLimit) : [],
+                borrowSegments: includeDetails ? asset.borrowSegments.slice(0, detailLimit) : []
             }))
         }));
 
-        return c.json({
+        return cachedJson(c, cacheKey, {
             user: userAddress,
             fromTimestamp,
             toTimestamp,
@@ -293,8 +357,9 @@ app.get("/user/:address/daily-yield-breakdown", async (c) => {
             summary: {
                 totalDaysInPeriod: yieldData.dailyValues.length
             },
+            details: {included: includeDetails, limit: detailLimit},
             calculatedAt: Math.floor(Date.now() / 1000),
-            note: "USD values are calculated using historical oracle prices from the database events and formatted with 4 decimal places"
+            note: "USD values use the latest periodic oracle snapshot at each calculation timestamp and are formatted with 4 decimal places"
         });
 
     } catch (error) {
@@ -348,6 +413,13 @@ app.get("/user/:address/daily-portfolio-value", async (c) => {
         return c.json({error: "toTimestamp cannot be in the future"}, 400);
     }
 
+    const cacheKey = `daily-portfolio:${userAddress.toLowerCase()}:${fromTimestamp}:${toTimestamp}`;
+    const cached = getCachedResponse(cacheKey);
+    if (cached !== undefined) {
+        setCacheHeaders(c, 'HIT');
+        return c.json(cached);
+    }
+
     try {
         const context = {db};
 
@@ -356,8 +428,8 @@ app.get("/user/:address/daily-portfolio-value", async (c) => {
 
         if (portfolioData.dailyValues.length === 0) {
             // Calculate expected number of days for empty response
-            const expectedDays = Math.ceil((toTimestamp - fromTimestamp) / (24 * 60 * 60));
-            return c.json({
+            const expectedDays = buildReportDayEnds(fromTimestamp, toTimestamp).length;
+            return cachedJson(c, cacheKey, {
                 user: userAddress,
                 fromTimestamp,
                 toTimestamp,
@@ -393,7 +465,7 @@ app.get("/user/:address/daily-portfolio-value", async (c) => {
             }))
         }));
 
-        return c.json({
+        return cachedJson(c, cacheKey, {
             user: userAddress,
             fromTimestamp,
             toTimestamp,
@@ -402,7 +474,7 @@ app.get("/user/:address/daily-portfolio-value", async (c) => {
             days: portfolioData.dailyValues.length,
             dailyPortfolioValues: serializedPortfolio,
             calculatedAt: Math.floor(Date.now() / 1000),
-            note: "USD values are calculated using historical oracle prices from the database events and formatted with 4 decimal places. Portfolio values represent actual balances (including accrued interest/yield) at the END of each day (23:59:59 UTC)."
+            note: "USD values use the latest periodic oracle snapshot at each calculation timestamp and are formatted with 4 decimal places. Portfolio values represent actual balances (including accrued interest/yield) at the END of each day (23:59:59 UTC)."
         });
 
     } catch (error) {

@@ -7,7 +7,7 @@
     "dev": "ponder dev",
     "start": "ponder start",
     "codegen": "ponder codegen",
-    "lint": "eslint .",
+    "lint": "eslint . --ext .ts",
     "typecheck": "tsc",
     "test": "vitest",
     "test:watch": "vitest --watch",

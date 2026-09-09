@@ -5,7 +5,10 @@
  */
 import {calculateActualBalance} from "../aave/balanceConversions";
 import {calculateUSDValueNumber} from "../usdCalculations";
-import {type UserAssetActivity, scaledBalanceAt, scaledBorrowBalanceAt, lastBalanceEventAt} from "./userAssetActivity";
+import {
+    type UserAssetActivity,
+    recordedScaledBalanceAt,
+} from "./userAssetActivity";
 import type {ReserveIndexSeries} from "./reserveIndexSeries";
 import type {PriceSeries} from "./priceSeries";
 
@@ -33,7 +36,7 @@ export interface YieldSegment {
     segmentYieldUSD: string;
     durationDays: number;
     assetPrice: string; // Oracle price used for this segment (8 decimals)
-    assetPriceTimestamp: number; // Timestamp of the price snapshot used (0 when falling back to an event price)
+    assetPriceTimestamp: number; // Timestamp of the price snapshot used (0 when unavailable)
 }
 
 export interface BorrowCostSegment {
@@ -49,7 +52,7 @@ export interface BorrowCostSegment {
     segmentBorrowCostUSD: string;
     durationDays: number;
     assetPrice: string; // Oracle price used for this segment (8 decimals)
-    assetPriceTimestamp: number; // Timestamp of the price snapshot used (0 when falling back to an event price)
+    assetPriceTimestamp: number; // Timestamp of the price snapshot used (0 when unavailable)
 }
 
 function sameAddress(a: string | null | undefined, b: string): boolean {
@@ -145,29 +148,51 @@ export async function calculateSegmentedCustomPeriodYield(
     const {activity, series, prices} = ctx;
     const inPeriod = (timestamp: number) => timestamp >= startTimestamp && timestamp <= endTimestamp;
 
-    // Balance events during the period, plus liquidations of this asset as
-    // synthetic events carrying the balance after the liquidation
-    const events: Array<{ timestamp: number; scaledBalance: bigint }> = activity.balanceEvents
-        .filter((e) => inPeriod(Number(e.timestamp)))
-        .map((e) => ({timestamp: Number(e.timestamp), scaledBalance: BigInt(e.scaledBalance ?? 0n)}));
+    // Merge balance events and liquidations once. The previous implementation
+    // recalculated the entire balance/liquidation prefix for every liquidation.
+    const changes: Array<
+        | {timestamp: number; kind: 'balance'; scaledBalance: bigint}
+        | {timestamp: number; kind: 'liquidation'; scaledAmount: bigint}
+    > = [
+        ...activity.balanceEvents
+            .filter((event) => inPeriod(Number(event.timestamp)))
+            .map((event) => ({
+                timestamp: Number(event.timestamp),
+                kind: 'balance' as const,
+                scaledBalance: BigInt(event.scaledBalance ?? 0n),
+            })),
+        ...activity.liquidations
+            .filter((event) => sameAddress(event.collateralAsset, activity.asset) && inPeriod(Number(event.timestamp)))
+            .map((event) => ({
+                timestamp: Number(event.timestamp),
+                kind: 'liquidation' as const,
+                scaledAmount: BigInt(event.scaledCollateralAmount ?? 0n),
+            })),
+    ].sort((a, b) => a.timestamp - b.timestamp);
 
-    const liquidations = activity.liquidations.filter(
-        (l) => sameAddress(l.collateralAsset, activity.asset) && inPeriod(Number(l.timestamp))
-    );
-    for (const liquidation of liquidations) {
-        const timestamp = Number(liquidation.timestamp);
-        events.push({timestamp, scaledBalance: await scaledBalanceAt(activity, timestamp, series)});
+    let recordedBalance = recordedScaledBalanceAt(activity, startTimestamp - 1);
+    let liquidatedBalance = activity.startingScaledCollateralLiquidated;
+    const startBalance = recordedBalance > liquidatedBalance ? recordedBalance - liquidatedBalance : 0n;
+    const events: Array<{timestamp: number; scaledBalance: bigint}> = [];
+    for (const change of changes) {
+        if (change.kind === 'balance') recordedBalance = change.scaledBalance;
+        else liquidatedBalance += change.scaledAmount;
+        events.push({
+            timestamp: change.timestamp,
+            scaledBalance: recordedBalance > liquidatedBalance ? recordedBalance - liquidatedBalance : 0n,
+        });
     }
-    events.sort((a, b) => a.timestamp - b.timestamp);
-
-    const startBalance = await scaledBalanceAt(activity, startTimestamp, series);
     const segments = buildSupplySegments(startTimestamp, endTimestamp, startBalance, events);
 
-    await series.prefetch(segments.flatMap((s) => [s.startTime, s.endTime]));
+    await Promise.all([
+        series.prefetch(segments.flatMap((s) => [s.startTime, s.endTime])),
+        prices.prefetch([
+            endTimestamp,
+            ...segments.map((s) => Math.floor((s.startTime + s.endTime) / 2)),
+        ]),
+    ]);
 
-    // Fallback price: the one recorded on the user's most recent balance event
-    const recentEvent = lastBalanceEventAt(activity, endTimestamp);
-    const currentPrice = recentEvent && recentEvent.assetPrice != null ? BigInt(recentEvent.assetPrice) : 0n;
+    const currentPricePoint = prices.priceAt(endTimestamp);
 
     let totalInterest = 0n;
     let totalInterestUSD = 0;
@@ -192,8 +217,10 @@ export async function calculateSegmentedCustomPeriodYield(
 
         const segmentMidpoint = Math.floor((segment.startTime + segment.endTime) / 2);
         const segmentPricePoint = prices.priceAt(segmentMidpoint);
-        const priceToUse = segmentPricePoint.price > 0n ? segmentPricePoint.price : currentPrice;
-        const priceTimestamp = segmentPricePoint.price > 0n ? segmentPricePoint.priceTimestamp : 0;
+        const priceToUse = segmentPricePoint.price > 0n ? segmentPricePoint.price : currentPricePoint.price;
+        const priceTimestamp = segmentPricePoint.price > 0n
+            ? segmentPricePoint.priceTimestamp
+            : currentPricePoint.priceTimestamp;
 
         const segmentYieldUSD = calculateUSDValueNumber(segmentInterest, priceToUse, decimals);
         totalInterestUSD += segmentYieldUSD;
@@ -243,37 +270,29 @@ export async function calculateSegmentedCustomPeriodBorrowCost(
     const events: Array<{ timestamp: number; amount: bigint; eventType: 'borrow' | 'repay' }> = [
         ...activity.borrows
             .filter((e) => inPeriod(Number(e.timestamp)))
-            .map((e) => ({timestamp: Number(e.timestamp), amount: BigInt(e.amount ?? 0n), eventType: 'borrow' as const})),
+            .map((e) => ({timestamp: Number(e.timestamp), amount: BigInt(e.scaledAmount ?? 0n), eventType: 'borrow' as const})),
         ...activity.repays
             .filter((e) => inPeriod(Number(e.timestamp)))
-            .map((e) => ({timestamp: Number(e.timestamp), amount: BigInt(e.amount ?? 0n), eventType: 'repay' as const})),
+            .map((e) => ({timestamp: Number(e.timestamp), amount: BigInt(e.scaledAmount ?? 0n), eventType: 'repay' as const})),
         ...activity.liquidations
             .filter((l) => sameAddress(l.debtAsset, activity.asset) && inPeriod(Number(l.timestamp)))
-            .map((l) => ({timestamp: Number(l.timestamp), amount: BigInt(l.debtToCover ?? 0n), eventType: 'repay' as const})),
+            .map((l) => ({timestamp: Number(l.timestamp), amount: BigInt(l.scaledDebtToCover ?? 0n), eventType: 'repay' as const})),
     ].sort((a, b) => a.timestamp - b.timestamp);
 
-    const startScaledBorrowBalance = await scaledBorrowBalanceAt(activity, startTimestamp, series);
+    const startScaledBorrowBalance = activity.startingScaledBorrowBalance > 0n
+        ? activity.startingScaledBorrowBalance
+        : 0n;
     const segments = buildBorrowSegments(startTimestamp, endTimestamp, startScaledBorrowBalance, events);
 
-    await series.prefetch(segments.flatMap((s) => [s.startTime, s.endTime]));
+    await Promise.all([
+        series.prefetch(segments.flatMap((s) => [s.startTime, s.endTime])),
+        prices.prefetch([
+            endTimestamp,
+            ...segments.map((s) => Math.floor((s.startTime + s.endTime) / 2)),
+        ]),
+    ]);
 
-    // Fallback price: the most recent borrow (or, failing that, repay) at or before the period end
-    let currentPrice = 0n;
-    let lastBorrow: (typeof activity.borrows)[number] | undefined;
-    for (const borrow of activity.borrows) {
-        if (Number(borrow.timestamp) <= endTimestamp) lastBorrow = borrow;
-    }
-    if (lastBorrow) {
-        currentPrice = lastBorrow.price != null ? BigInt(lastBorrow.price) : 0n;
-    } else {
-        let lastRepay: (typeof activity.repays)[number] | undefined;
-        for (const repay of activity.repays) {
-            if (Number(repay.timestamp) <= endTimestamp) lastRepay = repay;
-        }
-        if (lastRepay) {
-            currentPrice = lastRepay.price != null ? BigInt(lastRepay.price) : 0n;
-        }
-    }
+    const currentPricePoint = prices.priceAt(endTimestamp);
 
     let totalBorrowCost = 0n;
     let totalBorrowCostUSD = 0;
@@ -298,8 +317,10 @@ export async function calculateSegmentedCustomPeriodBorrowCost(
 
         const segmentMidpoint = Math.floor((segment.startTime + segment.endTime) / 2);
         const segmentPricePoint = prices.priceAt(segmentMidpoint);
-        const priceToUse = segmentPricePoint.price > 0n ? segmentPricePoint.price : currentPrice;
-        const priceTimestamp = segmentPricePoint.price > 0n ? segmentPricePoint.priceTimestamp : 0;
+        const priceToUse = segmentPricePoint.price > 0n ? segmentPricePoint.price : currentPricePoint.price;
+        const priceTimestamp = segmentPricePoint.price > 0n
+            ? segmentPricePoint.priceTimestamp
+            : currentPricePoint.priceTimestamp;
 
         const segmentBorrowCostUSD = calculateUSDValueNumber(segmentBorrowCost, priceToUse, decimals);
         totalBorrowCostUSD += segmentBorrowCostUSD;

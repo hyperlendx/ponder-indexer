@@ -97,14 +97,16 @@ export async function calculateVariableBorrowIndexAtTimestamp(
         if (currentTxHash) {
             const dbQuery = db.sql || db;
             const sameTransactionEvents = await dbQuery
-                .select()
+                .select({variableBorrowIndex: ReserveDataEvent.variableBorrowIndex})
                 .from(ReserveDataEvent)
                 .where(
                     and(
                         eq(ReserveDataEvent.reserve, reserve as `0x${string}`),
                         eq(ReserveDataEvent.txHash, currentTxHash as `0x${string}`)
                     )
-                );
+                )
+                .orderBy(desc(ReserveDataEvent.logIndex))
+                .limit(1);
 
             if (sameTransactionEvents && sameTransactionEvents.length > 0) {
                 return BigInt(sameTransactionEvents[0].variableBorrowIndex);
@@ -114,7 +116,13 @@ export async function calculateVariableBorrowIndexAtTimestamp(
         // Query for the most recent ReserveDataEvent at or before the target timestamp
         const dbQuery = db.sql || db;
         const events = await dbQuery
-            .select()
+            .select({
+                timestamp: ReserveDataEvent.timestamp,
+                liquidityIndex: ReserveDataEvent.liquidityIndex,
+                liquidityRate: ReserveDataEvent.liquidityRate,
+                variableBorrowIndex: ReserveDataEvent.variableBorrowIndex,
+                variableBorrowRate: ReserveDataEvent.variableBorrowRate,
+            })
             .from(ReserveDataEvent)
             .where(
                 and(
@@ -122,7 +130,11 @@ export async function calculateVariableBorrowIndexAtTimestamp(
                     lte(ReserveDataEvent.timestamp, targetTimestamp)
                 )
             )
-            .orderBy(desc(ReserveDataEvent.timestamp))
+            .orderBy(
+                desc(ReserveDataEvent.timestamp),
+                desc(ReserveDataEvent.blockNumber),
+                desc(ReserveDataEvent.logIndex)
+            )
             .limit(1); // Only need the most recent one
 
         if (!events || events.length === 0) {
@@ -131,10 +143,14 @@ export async function calculateVariableBorrowIndexAtTimestamp(
             if (!currentTxHash) {
                 const dbQuery = db.sql || db;
                 const mostRecentEvents = await dbQuery
-                    .select()
+                    .select({variableBorrowIndex: ReserveDataEvent.variableBorrowIndex})
                     .from(ReserveDataEvent)
                     .where(eq(ReserveDataEvent.reserve, reserve as `0x${string}`))
-                    .orderBy(desc(ReserveDataEvent.timestamp))
+                    .orderBy(
+                        desc(ReserveDataEvent.timestamp),
+                        desc(ReserveDataEvent.blockNumber),
+                        desc(ReserveDataEvent.logIndex)
+                    )
                     .limit(1);
 
                 if (mostRecentEvents && mostRecentEvents.length > 0) {
@@ -161,4 +177,3 @@ export async function calculateVariableBorrowIndexAtTimestamp(
         return RAY;
     }
 }
-

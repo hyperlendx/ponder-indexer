@@ -1,20 +1,20 @@
 /**
  * Daily reports: yield breakdown and portfolio value per UTC day.
  *
- * Per asset this loads the user's rows once, the price snapshots for the
- * period, and the reserve index anchors for every day boundary, then evaluates
- * all days in memory.
+ * Per asset this loads a bounded activity window plus starting aggregates,
+ * sparse price points, and reserve-index anchors, then evaluates all days in
+ * one chronological pass.
  */
-import {calculateActualBalance, calculateScaledBalance} from "../aave";
+import {calculateActualBalance} from "../aave";
 import {calculateUSDValueNumber} from "../usdCalculations";
 import {
     type UserAssetActivity,
-    discoverUserAssets,
     loadUserAssetActivity,
     isActiveInPeriod,
 } from "./userAssetActivity";
 import {ReserveIndexSeries} from "./reserveIndexSeries";
 import {loadPriceSeries} from "./priceSeries";
+import {USDC_ADDRESS} from "../usdc";
 import {
     type AssetYieldContext,
     calculateSegmentedCustomPeriodYield,
@@ -22,6 +22,25 @@ import {
 } from "./yieldCalculations";
 
 const SECONDS_PER_DAY = 24 * 60 * 60;
+
+/** Calendar-day samples intersecting the half-open report range [start, end). */
+export function buildReportDayEnds(startTimestamp: number, endTimestamp: number): Array<{
+    date: string;
+    timestamp: number;
+}> {
+    if (endTimestamp <= startTimestamp) return [];
+
+    const firstDayStart = Math.floor(startTimestamp / SECONDS_PER_DAY) * SECONDS_PER_DAY;
+    const lastDayStart = Math.floor((endTimestamp - 1) / SECONDS_PER_DAY) * SECONDS_PER_DAY;
+    const days: Array<{date: string; timestamp: number}> = [];
+    for (let dayStart = firstDayStart; dayStart <= lastDayStart; dayStart += SECONDS_PER_DAY) {
+        days.push({
+            date: new Date(dayStart * 1000).toISOString().split('T')[0]!,
+            timestamp: Math.min(dayStart + SECONDS_PER_DAY - 1, endTimestamp),
+        });
+    }
+    return days;
+}
 
 /**
  * Load the inputs for every asset the user was active in during the period.
@@ -32,24 +51,17 @@ async function loadActiveAssetContexts(
     startTimestamp: number,
     endTimestamp: number
 ): Promise<AssetYieldContext[]> {
-    const assets = await discoverUserAssets(context, user);
-    if (assets.length === 0) return [];
-
-    const contexts = await Promise.all(
-        assets.map(async (asset): Promise<AssetYieldContext | null> => {
-            const [activity, prices] = await Promise.all([
-                loadUserAssetActivity(context, user, asset, endTimestamp),
-                loadPriceSeries(context, asset, startTimestamp, endTimestamp),
-            ]);
-            const series = new ReserveIndexSeries(context, asset);
-            if (!(await isActiveInPeriod(activity, startTimestamp, endTimestamp, series))) {
-                return null;
-            }
-            return {activity, series, prices};
-        })
-    );
-
-    return contexts.filter((ctx): ctx is AssetYieldContext => ctx !== null);
+    const asset = USDC_ADDRESS;
+    const [activity, prices] = await Promise.all([
+        loadUserAssetActivity(context, user, asset, endTimestamp, {
+            includeRawActivity: false,
+            startTimestamp,
+        }),
+        loadPriceSeries(context, asset),
+    ]);
+    const series = new ReserveIndexSeries(context, asset);
+    if (!isActiveInPeriod(activity, startTimestamp, endTimestamp)) return [];
+    return [{activity, series, prices}];
 }
 
 /** Every timestamp of the user's activity in this asset, for index prefetching */
@@ -148,13 +160,13 @@ function emptyAssetBucket(asset: string): DailyAssetBucket {
 }
 
 /**
- * The UTC days a segment overlaps, clipped to the segment and to `endTimestampForDays`.
+ * The UTC days a segment overlaps, clipped to the segment and report end.
  * Days are keyed by YYYY-MM-DD; days without a bucket are skipped by the caller.
  */
 function splitSegmentByDay(
     startTime: number,
     endTime: number,
-    endTimestampForDays: number
+    reportEndTimestamp: number
 ): Array<{ dateStr: string; overlapStart: number; overlapEnd: number }> {
     const segmentStartDate = new Date(startTime * 1000);
     const segmentEndDate = new Date(endTime * 1000);
@@ -169,8 +181,8 @@ function splitSegmentByDay(
         const dayStart = Math.floor(Date.UTC(currentDate.getUTCFullYear(), currentDate.getUTCMonth(), currentDate.getUTCDate()) / 1000);
         // Full 86,400-second days with half-open interval [dayStart, dayEnd), capped at the period end
         let dayEnd = dayStart + SECONDS_PER_DAY;
-        if (dayEnd > endTimestampForDays) {
-            dayEnd = endTimestampForDays;
+        if (dayEnd > reportEndTimestamp) {
+            dayEnd = reportEndTimestamp;
         }
         const overlapStart = Math.max(startTime, dayStart);
         const overlapEnd = Math.min(endTime, dayEnd);
@@ -211,14 +223,7 @@ export async function calculateUserDailyYieldBreakdown(
     currentValue?: DailyYieldData & { isPartialDay: boolean };
 }> {
     try {
-        // For the last day, if endTimestamp is before midnight, calculate yield up to endTimestamp
-        const endDate = new Date(endTimestamp * 1000);
-        const endDayStart = Date.UTC(endDate.getUTCFullYear(), endDate.getUTCMonth(), endDate.getUTCDate()) / 1000;
-        const endOfLastDay = endDayStart + SECONDS_PER_DAY;
-        const isPartialDay = endTimestamp < endOfLastDay;
-        const endTimestampForDays = isPartialDay ? endTimestamp : endOfLastDay;
-
-        const assetContexts = await loadActiveAssetContexts(context, user, startTimestamp, endTimestampForDays);
+        const assetContexts = await loadActiveAssetContexts(context, user, startTimestamp, endTimestamp);
         if (assetContexts.length === 0) {
             return {
                 dailyValues: [],
@@ -228,25 +233,10 @@ export async function calculateUserDailyYieldBreakdown(
 
         // Daily buckets (including the partial last day)
         const dailyResults = new Map<string, DailyBucket>();
-        const startDate = new Date(startTimestamp * 1000);
-        const totalDays = Math.ceil((endDayStart - startTimestamp) / SECONDS_PER_DAY) + 1;
-
-        for (let dayOffset = 0; dayOffset < totalDays; dayOffset++) {
-            const currentDate = new Date(startDate);
-            currentDate.setUTCDate(startDate.getUTCDate() + dayOffset);
-
-            const dateStr = currentDate.toISOString().split('T')[0]!; // YYYY-MM-DD format
-            const dayStartTimestamp = Math.floor(Date.UTC(currentDate.getUTCFullYear(), currentDate.getUTCMonth(), currentDate.getUTCDate()) / 1000);
-            // END of day timestamp (23:59:59 UTC) for complete days, endTimestamp for the partial last day
-            let dayEndTimestamp = dayStartTimestamp + SECONDS_PER_DAY - 1;
-            const isLastDay = dayOffset === totalDays - 1;
-            if (isLastDay && isPartialDay) {
-                dayEndTimestamp = endTimestamp;
-            }
-
-            dailyResults.set(dateStr, {
-                date: dateStr,
-                timestamp: dayEndTimestamp,
+        for (const day of buildReportDayEnds(startTimestamp, endTimestamp)) {
+            dailyResults.set(day.date, {
+                date: day.date,
+                timestamp: day.timestamp,
                 assetYield: 0n,
                 borrowCost: 0n,
                 netYield: 0n,
@@ -258,14 +248,14 @@ export async function calculateUserDailyYieldBreakdown(
         }
 
         // Day boundaries every asset will need indices for
-        const dayBoundaries: number[] = [startTimestamp, endTimestampForDays];
+        const dayBoundaries: number[] = [startTimestamp, endTimestamp];
         for (const day of dailyResults.values()) {
             const dayStart = Math.floor(Date.UTC(
                 new Date(day.timestamp * 1000).getUTCFullYear(),
                 new Date(day.timestamp * 1000).getUTCMonth(),
                 new Date(day.timestamp * 1000).getUTCDate()
             ) / 1000);
-            dayBoundaries.push(dayStart, Math.min(dayStart + SECONDS_PER_DAY, endTimestampForDays));
+            dayBoundaries.push(dayStart, Math.min(dayStart + SECONDS_PER_DAY, endTimestamp));
         }
 
         for (const ctx of assetContexts) {
@@ -274,8 +264,16 @@ export async function calculateUserDailyYieldBreakdown(
             try {
                 const decimals = prices.decimals;
 
-                // Resolve every index needed for this asset in one batch
-                await series.prefetch([...dayBoundaries, ...activityTimestamps(activity)]);
+                // Resolve every index and price needed for this asset in bounded batches.
+                const reportTimestamps = [
+                    ...dayBoundaries,
+                    ...Array.from(dailyResults.values(), (day) => day.timestamp),
+                    ...activityTimestamps(activity),
+                ];
+                await Promise.all([
+                    series.prefetch(reportTimestamps),
+                    prices.prefetch(reportTimestamps),
+                ]);
 
                 // Initialize this asset in all days with zero yield
                 for (const dayData of dailyResults.values()) {
@@ -288,8 +286,8 @@ export async function calculateUserDailyYieldBreakdown(
                     }
                 }
 
-                const segmentedResult = await calculateSegmentedCustomPeriodYield(ctx, startTimestamp, endTimestampForDays, decimals);
-                const borrowCostResult = await calculateSegmentedCustomPeriodBorrowCost(ctx, startTimestamp, endTimestampForDays, decimals);
+                const segmentedResult = await calculateSegmentedCustomPeriodYield(ctx, startTimestamp, endTimestamp, decimals);
+                const borrowCostResult = await calculateSegmentedCustomPeriodBorrowCost(ctx, startTimestamp, endTimestamp, decimals);
 
                 // Assign supply yield to days
                 for (const segment of segmentedResult.segments) {
@@ -323,7 +321,7 @@ export async function calculateUserDailyYieldBreakdown(
                         }
                     } else {
                         // Segment spans multiple days: exact yield per day from the index at each boundary
-                        const overlaps = splitSegmentByDay(segment.startTime, segment.endTime, endTimestampForDays)
+                        const overlaps = splitSegmentByDay(segment.startTime, segment.endTime, endTimestamp)
                             .filter(({dateStr}) => dailyResults.has(dateStr));
                         await series.prefetch(overlaps.flatMap((o) => [o.overlapStart, o.overlapEnd]));
 
@@ -390,7 +388,7 @@ export async function calculateUserDailyYieldBreakdown(
                             });
                         }
                     } else {
-                        const overlaps = splitSegmentByDay(segment.startTime, segment.endTime, endTimestampForDays)
+                        const overlaps = splitSegmentByDay(segment.startTime, segment.endTime, endTimestamp)
                             .filter(({dateStr}) => dailyResults.has(dateStr));
                         await series.prefetch(overlaps.flatMap((o) => [o.overlapStart, o.overlapEnd]));
 
@@ -484,89 +482,6 @@ export async function calculateUserDailyYieldBreakdown(
 
 
 /**
- * Helper: Calculate scaled balance at a specific timestamp from pre-fetched events
- */
-function calculateBalanceFromEvents(
-    events: any[],
-    timestamp: number
-): bigint {
-    let balance = 0n;
-    for (const event of events) {
-        if (event.timestamp <= timestamp) {
-            balance = event.scaledBalance;
-        } else {
-            break; // Events are sorted, so we can stop here
-        }
-    }
-    return balance;
-}
-
-/**
- * Helper: Calculate scaled borrow balance at a specific timestamp from pre-fetched events
- *
- * IMPORTANT: In AAVE, borrow/repay events emit ACTUAL amounts (what the user receives/pays),
- * not scaled amounts. To get the true scaled balance, we must convert each event's amount
- * to scaled form using the variableBorrowIndex at that event's timestamp:
- *   scaledAmount = actualAmount * RAY / variableBorrowIndex
- */
-function calculateScaledBorrowBalanceFromEvents(
-    borrows: any[],
-    repays: any[],
-    timestamp: number,
-    borrowIndexAtEventTime: Map<number, bigint>
-): bigint {
-    let scaledBorrowBalance = 0n;
-
-    for (const borrow of borrows) {
-        if (borrow.timestamp <= timestamp) {
-            const indexAtBorrow = borrowIndexAtEventTime.get(borrow.timestamp);
-            if (indexAtBorrow && indexAtBorrow > 0n) {
-                scaledBorrowBalance += calculateScaledBalance(BigInt(borrow.amount), indexAtBorrow);
-            } else {
-                throw new Error(
-                    `Missing borrow index for event at timestamp ${borrow.timestamp}. ` +
-                    `Cannot calculate scaled borrow balance without index data.`
-                );
-            }
-        }
-    }
-
-    for (const repay of repays) {
-        if (repay.timestamp <= timestamp) {
-            const indexAtRepay = borrowIndexAtEventTime.get(repay.timestamp);
-            if (indexAtRepay && indexAtRepay > 0n) {
-                scaledBorrowBalance -= calculateScaledBalance(BigInt(repay.amount), indexAtRepay);
-            } else {
-                throw new Error(
-                    `Missing borrow index for repay event at timestamp ${repay.timestamp}. ` +
-                    `Cannot calculate scaled borrow balance without index data.`
-                );
-            }
-        }
-    }
-
-    return scaledBorrowBalance > 0n ? scaledBorrowBalance : 0n;
-}
-
-/**
- * Helper: Calculate borrowed balance (with accrued interest) at a specific timestamp
- */
-function calculateBorrowedFromEvents(
-    borrows: any[],
-    repays: any[],
-    timestamp: number,
-    variableBorrowIndex: bigint,
-    borrowIndexAtEventTime: Map<number, bigint>
-): bigint {
-    const scaledBorrowBalance = calculateScaledBorrowBalanceFromEvents(borrows, repays, timestamp, borrowIndexAtEventTime);
-    if (scaledBorrowBalance <= 0n) {
-        return 0n;
-    }
-    const actualBorrowedBalance = calculateActualBalance(scaledBorrowBalance, variableBorrowIndex);
-    return actualBorrowedBalance > 0n ? actualBorrowedBalance : 0n;
-}
-
-/**
  * Calculate daily portfolio values for a user over a custom time period
  * Portfolio Value = Total Supplied - Total Borrowed
  *
@@ -630,23 +545,12 @@ export async function calculateUserDailyPortfolioValue(
             }>;
         }>();
 
-        const startDate = new Date(startTimestamp * 1000);
-        const endDate = new Date(endTimestamp * 1000);
-        const firstDayStart = Math.floor(Date.UTC(startDate.getUTCFullYear(), startDate.getUTCMonth(), startDate.getUTCDate()) / 1000);
-        const lastDayStart = Math.floor(Date.UTC(endDate.getUTCFullYear(), endDate.getUTCMonth(), endDate.getUTCDate()) / 1000);
-
         const dayTimestamps: number[] = [];
-        for (let dayStart = firstDayStart; dayStart <= lastDayStart; dayStart += SECONDS_PER_DAY) {
-            const dateStr = new Date(dayStart * 1000).toISOString().split('T')[0]!;
-            let dayEnd = dayStart + SECONDS_PER_DAY - 1;
-            if (dayEnd > endTimestamp) {
-                dayEnd = endTimestamp;
-            }
-
-            dayTimestamps.push(dayEnd);
-            dailyResults.set(dateStr, {
-                date: dateStr,
-                timestamp: dayEnd,
+        for (const day of buildReportDayEnds(startTimestamp, endTimestamp)) {
+            dayTimestamps.push(day.timestamp);
+            dailyResults.set(day.date, {
+                date: day.date,
+                timestamp: day.timestamp,
                 totalSupplied: 0n,
                 totalBorrowed: 0n,
                 totalSuppliedUSD: 0,
@@ -661,36 +565,75 @@ export async function calculateUserDailyPortfolioValue(
                 timestamp: Number(e.timestamp),
                 scaledBalance: BigInt(e.scaledBalance ?? 0n),
             }));
-            const borrows = activity.borrows.map((e) => ({timestamp: Number(e.timestamp), amount: BigInt(e.amount ?? 0n)}));
-            const repays = activity.repays.map((e) => ({timestamp: Number(e.timestamp), amount: BigInt(e.amount ?? 0n)}));
+            await Promise.all([
+                series.prefetch(dayTimestamps),
+                prices.prefetch(dayTimestamps),
+            ]);
 
-            // Indices at every day end, and the borrow index at every borrow/repay
-            // (to convert their actual amounts to scaled amounts)
-            const eventTimestamps = [...borrows.map((b) => b.timestamp), ...repays.map((r) => r.timestamp)];
-            await series.prefetch([...dayTimestamps, ...eventTimestamps]);
+            // Convert actual debt/collateral amounts to scaled deltas once, then
+            // advance cursors alongside the ascending day list. This replaces
+            // rescanning every event in the report window for every output day.
+            const debtDeltas: Array<{timestamp: number; delta: bigint}> = [
+                ...activity.borrows.map((event) => ({
+                    timestamp: Number(event.timestamp),
+                    delta: BigInt(event.scaledAmount ?? 0n),
+                })),
+                ...activity.repays.map((event) => ({
+                    timestamp: Number(event.timestamp),
+                    delta: -BigInt(event.scaledAmount ?? 0n),
+                })),
+                ...activity.liquidations
+                    .filter((event) => event.debtAsset?.toLowerCase() === asset.toLowerCase())
+                    .map((event) => ({
+                        timestamp: Number(event.timestamp),
+                        delta: -BigInt(event.scaledDebtToCover ?? 0n),
+                    })),
+            ];
+            debtDeltas.sort((a, b) => a.timestamp - b.timestamp);
 
-            const borrowIndexAtEventTime = new Map<number, bigint>();
-            for (const timestamp of eventTimestamps) {
-                if (!borrowIndexAtEventTime.has(timestamp)) {
-                    borrowIndexAtEventTime.set(timestamp, await series.variableBorrowIndexAt(timestamp));
-                }
-            }
+            const collateralDeltas = activity.liquidations
+                .filter((event) => event.collateralAsset?.toLowerCase() === asset.toLowerCase())
+                .map((event) => ({
+                    timestamp: Number(event.timestamp),
+                    amount: BigInt(event.scaledCollateralAmount ?? 0n),
+                }));
+
+            let balanceCursor = 0;
+            let collateralCursor = 0;
+            let debtCursor = 0;
+            let recordedScaledBalance = 0n;
+            let liquidatedScaledBalance = activity.startingScaledCollateralLiquidated;
+            let scaledBorrowBalance = activity.startingScaledBorrowBalance;
 
             for (const dayData of dailyResults.values()) {
                 const dayEndTimestamp = dayData.timestamp;
 
-                const scaledBalance = calculateBalanceFromEvents(balanceEvents, dayEndTimestamp);
+                while (balanceCursor < balanceEvents.length && balanceEvents[balanceCursor]!.timestamp <= dayEndTimestamp) {
+                    recordedScaledBalance = balanceEvents[balanceCursor]!.scaledBalance;
+                    balanceCursor++;
+                }
+                while (
+                    collateralCursor < collateralDeltas.length &&
+                    collateralDeltas[collateralCursor]!.timestamp <= dayEndTimestamp
+                ) {
+                    liquidatedScaledBalance += collateralDeltas[collateralCursor]!.amount;
+                    collateralCursor++;
+                }
+                while (debtCursor < debtDeltas.length && debtDeltas[debtCursor]!.timestamp <= dayEndTimestamp) {
+                    scaledBorrowBalance += debtDeltas[debtCursor]!.delta;
+                    debtCursor++;
+                }
+
+                const scaledBalance = recordedScaledBalance > liquidatedScaledBalance
+                    ? recordedScaledBalance - liquidatedScaledBalance
+                    : 0n;
                 const liquidityIndex = await series.liquidityIndexAt(dayEndTimestamp);
                 const suppliedBalance = calculateActualBalance(scaledBalance, liquidityIndex);
 
                 const variableBorrowIndex = await series.variableBorrowIndexAt(dayEndTimestamp);
-                const borrowedBalance = calculateBorrowedFromEvents(
-                    borrows,
-                    repays,
-                    dayEndTimestamp,
-                    variableBorrowIndex,
-                    borrowIndexAtEventTime
-                );
+                const borrowedBalance = scaledBorrowBalance > 0n
+                    ? calculateActualBalance(scaledBorrowBalance, variableBorrowIndex)
+                    : 0n;
 
                 const pricePoint = prices.priceAt(dayEndTimestamp);
                 const assetPrice = pricePoint.priceTimestamp !== 0 ? pricePoint.price : undefined;

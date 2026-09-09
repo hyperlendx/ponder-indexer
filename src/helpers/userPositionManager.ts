@@ -1,7 +1,6 @@
 import { UserPosition, UserBalanceEvent } from "ponder:schema";
 import { calculateActualBalance } from "./aave";
 import { getLiquidityIndexForEvent } from "./reserveState";
-import { eq } from "ponder";
 
 /**
  * Update or create a user position record
@@ -19,7 +18,6 @@ export async function updateUserPosition(
     txHash: string,
     blockNumber: bigint,
     logIndex: number,
-    assetPrice: bigint, // Oracle price of the asset at the time of the event (8 decimals precision)
     currentLiquidityIndex?: bigint
 ): Promise<void> {
     const { db } = context;
@@ -29,14 +27,10 @@ export async function updateUserPosition(
         currentLiquidityIndex = await getLiquidityIndexForEvent(context, asset, timestamp, txHash);
     }
 
-    // Get existing position
-    const dbQuery = db.sql || db;
-    const existingPositions = await dbQuery
-        .select()
-        .from(UserPosition)
-        .where(eq(UserPosition.id, positionId));
-
-    const existingPosition = existingPositions[0] || null;
+    // Use Ponder's primary-key store API here. Raw `db.sql` reads/writes force the
+    // historical indexing cache to flush, which turns this per-event hot path into
+    // a database round trip and prevents Ponder from batching writes.
+    const existingPosition = await db.find(UserPosition, {id: positionId});
 
     let newScaledBalance: bigint;
     let totalDeposits: bigint;
@@ -108,15 +102,12 @@ export async function updateUserPosition(
         blockNumber,
         logIndex,
         liquidityIndex: currentLiquidityIndex,
-        assetPrice // Oracle price at the time of the event
     });
 
     if (newScaledBalance === 0n) {
         // Remove position if balance is zero
         if (existingPosition) {
-            await dbQuery
-                .delete(UserPosition)
-                .where(eq(UserPosition.id, positionId));
+            await db.delete(UserPosition, {id: positionId});
         }
     } else {
         // Update or create position
@@ -133,10 +124,7 @@ export async function updateUserPosition(
         };
 
         if (existingPosition) {
-            await dbQuery
-                .update(UserPosition)
-                .set(positionData)
-                .where(eq(UserPosition.id, positionId));
+            await db.update(UserPosition, {id: positionId}).set(positionData);
         } else {
             await db.insert(UserPosition).values(positionData);
         }

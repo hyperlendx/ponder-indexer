@@ -6,7 +6,6 @@ import {
     Withdraw,
     LiquidationCall,
     FlashLoan,
-    ReserveDataUpdated,
     ReserveUsedAsCollateralEnabled,
     ReserveUsedAsCollateralDisabled,
     SwapBorrowRateMode,
@@ -26,13 +25,37 @@ import config from "../ponder.config";
 import {getOraclePrice} from "./helpers/getPrice";
 import {updateUserPosition} from "./helpers/userPositionManager";
 import {calculateScaledBalance} from "./helpers/aave";
-import {recordReserveDataUpdate, finalizeDailyAnchors, getLiquidityIndexForEvent} from "./helpers/reserveState";
+import {
+    recordReserveDataUpdate,
+    finalizeDailyAnchors,
+    getLiquidityIndexForEvent,
+    getVariableBorrowIndexForEvent,
+} from "./helpers/reserveState";
 import {USDC_ADDRESS, USDC_DECIMALS, isUSDC} from "./helpers/usdc";
 import {getAddress} from 'viem'
 
 const wrappedTokenGatewayAddress = getAddress("0x49558c794ea2aC8974C9F27886DDfAa951E99171");
 const collateralSwapperAddress = getAddress("0x7469AA4124cc6ee078f98B581198eB39d2487E79");
 const liquidSwapRepayAdapter = getAddress("0x6C674165E3AFaD857fab8CB0E91BCC057b813F03");
+
+/** Store the canonical periodic USDC price series used by all reports. */
+async function snapshotUSDCPrice(context: any, blockNumber: bigint, timestamp: number): Promise<void> {
+    try {
+        const price = await getOraclePrice(context, USDC_ADDRESS);
+        if (price > 0n) {
+            await context.db.insert(AssetPriceSnapshot).values({
+                id: `${USDC_ADDRESS}-${blockNumber}`,
+                asset: USDC_ADDRESS,
+                price,
+                decimals: USDC_DECIMALS,
+                blockNumber,
+                timestamp,
+            }).onConflictDoNothing();
+        }
+    } catch (error) {
+        console.error(`[AssetPriceSnapshot] Error fetching USDC price at block ${blockNumber}:`, error);
+    }
+}
 
 // ============================================================================
 // This indexer tracks ONLY the USDC reserve of the HyperLend core pool.
@@ -59,12 +82,14 @@ ponder.on("USDCHToken:BalanceTransfer", async ({event, context}) => {
 ponder.on("CorePool:Borrow", async ({event, context}) => {
     if (!isUSDC(event.args.reserve)) return;
 
-    let reservePrice = null;
-    try {
-        reservePrice = await getOraclePrice(context, event.args.reserve);
-    } catch (e: any) {
-        console.error(`Error fetching reserve price: ${e.message}`);
-    }
+    const timestamp = Number(event.block.timestamp);
+    const variableBorrowIndex = await getVariableBorrowIndexForEvent(
+        context,
+        event.args.reserve,
+        timestamp,
+        event.transaction.hash
+    );
+    const scaledAmount = calculateScaledBalance(event.args.amount, variableBorrowIndex);
 
     await context.db.insert(Borrow).values({
         id: event.id,
@@ -74,11 +99,12 @@ ponder.on("CorePool:Borrow", async ({event, context}) => {
         user: event.args.user,
         onBehalfOf: event.args.onBehalfOf,
         amount: event.args.amount,
+        scaledAmount,
+        variableBorrowIndex,
         interestRateMode: event.args.interestRateMode,
         borrowRate: event.args.borrowRate,
         referralCode: event.args.referralCode,
-        timestamp: Number(event.block.timestamp),
-        price: reservePrice,
+        timestamp,
     });
 });
 
@@ -86,9 +112,15 @@ ponder.on("CorePool:Borrow", async ({event, context}) => {
 ponder.on("CorePool:Repay", async ({event, context}) => {
     if (!isUSDC(event.args.reserve)) return;
 
-    const reservePrice = await getOraclePrice(context, event.args.reserve);
     const timestamp = Number(event.block.timestamp);
     const blockNumber = event.block.number;
+    const variableBorrowIndex = await getVariableBorrowIndexForEvent(
+        context,
+        event.args.reserve,
+        timestamp,
+        event.transaction.hash
+    );
+    const scaledAmount = calculateScaledBalance(event.args.amount, variableBorrowIndex);
 
     await context.db.insert(Repay).values({
         id: event.id,
@@ -98,9 +130,10 @@ ponder.on("CorePool:Repay", async ({event, context}) => {
         user: event.args.user,
         repayer: event.args.repayer,
         amount: event.args.amount,
+        scaledAmount,
+        variableBorrowIndex,
         useATokens: event.args.useATokens,
         timestamp: timestamp,
-        price: reservePrice,
     });
 
     // When useATokens=true, the user is using their aTokens (supplied balance) to repay debt
@@ -129,7 +162,6 @@ ponder.on("CorePool:Repay", async ({event, context}) => {
             event.transaction.hash,
             blockNumber,
             event.log.logIndex,
-            reservePrice,
             currentLiquidityIndex
         );
     }
@@ -139,7 +171,6 @@ ponder.on("CorePool:Repay", async ({event, context}) => {
 ponder.on("CorePool:Supply", async ({event, context}) => {
     if (!isUSDC(event.args.reserve)) return;
 
-    const reservePrice = await getOraclePrice(context, event.args.reserve);
     const timestamp = Number(event.block.timestamp);
     const blockNumber = event.block.number;
 
@@ -154,7 +185,6 @@ ponder.on("CorePool:Supply", async ({event, context}) => {
         amount: event.args.amount,
         referralCode: event.args.referralCode,
         timestamp: timestamp,
-        price: reservePrice,
     });
 
     // Liquidity index from the in-memory reserve state (updated by the ReserveDataUpdated
@@ -180,7 +210,6 @@ ponder.on("CorePool:Supply", async ({event, context}) => {
         event.transaction.hash,
         blockNumber,
         event.log.logIndex,
-        reservePrice, // Pass the oracle price
         currentLiquidityIndex
     );
 });
@@ -189,7 +218,6 @@ ponder.on("CorePool:Supply", async ({event, context}) => {
 ponder.on("CorePool:Withdraw", async ({event, context}) => {
     if (!isUSDC(event.args.reserve)) return;
 
-    const reservePrice = await getOraclePrice(context, event.args.reserve);
     const timestamp = Number(event.block.timestamp);
     const blockNumber = event.block.number;
 
@@ -213,7 +241,6 @@ ponder.on("CorePool:Withdraw", async ({event, context}) => {
         to: event.args.to,
         amount: event.args.amount,
         timestamp: timestamp,
-        price: reservePrice,
     });
 
     // Liquidity index from the in-memory reserve state (updated by the ReserveDataUpdated
@@ -239,7 +266,6 @@ ponder.on("CorePool:Withdraw", async ({event, context}) => {
         event.transaction.hash,
         blockNumber,
         event.log.logIndex,
-        reservePrice, // Pass the oracle price
         currentLiquidityIndex
     );
 });
@@ -248,8 +274,15 @@ ponder.on("CorePool:Withdraw", async ({event, context}) => {
 ponder.on("CorePool:LiquidationCall", async ({event, context}) => {
     if (!isUSDC(event.args.collateralAsset) && !isUSDC(event.args.debtAsset)) return;
 
-    const reservePriceCollateral = await getOraclePrice(context, event.args.collateralAsset);
-    const reservePriceDebt = await getOraclePrice(context, event.args.debtAsset);
+    const timestamp = Number(event.block.timestamp);
+    const [liquidityIndex, variableBorrowIndex] = await Promise.all([
+        isUSDC(event.args.collateralAsset)
+            ? getLiquidityIndexForEvent(context, USDC_ADDRESS, timestamp, event.transaction.hash)
+            : Promise.resolve(0n),
+        isUSDC(event.args.debtAsset)
+            ? getVariableBorrowIndexForEvent(context, USDC_ADDRESS, timestamp, event.transaction.hash)
+            : Promise.resolve(0n),
+    ]);
 
     await context.db.insert(LiquidationCall).values({
         id: event.id,
@@ -260,19 +293,21 @@ ponder.on("CorePool:LiquidationCall", async ({event, context}) => {
         user: event.args.user,
         debtToCover: event.args.debtToCover,
         liquidatedCollateralAmount: event.args.liquidatedCollateralAmount,
+        scaledDebtToCover: variableBorrowIndex > 0n
+            ? calculateScaledBalance(event.args.debtToCover, variableBorrowIndex)
+            : 0n,
+        scaledCollateralAmount: liquidityIndex > 0n
+            ? calculateScaledBalance(event.args.liquidatedCollateralAmount, liquidityIndex)
+            : 0n,
         liquidator: event.args.liquidator,
         receiveAToken: event.args.receiveAToken,
-        timestamp: Number(event.block.timestamp),
-        priceCollateral: reservePriceCollateral,
-        priceDebt: reservePriceDebt,
+        timestamp,
     });
 });
 
 // FlashLoan Event Handler
 ponder.on("CorePool:FlashLoan", async ({event, context}) => {
     if (!isUSDC(event.args.asset)) return;
-
-    const reservePrice = await getOraclePrice(context, event.args.asset);
 
     await context.db.insert(FlashLoan).values({
         id: event.id,
@@ -286,7 +321,6 @@ ponder.on("CorePool:FlashLoan", async ({event, context}) => {
         premium: event.args.premium,
         referralCode: event.args.referralCode,
         timestamp: Number(event.block.timestamp),
-        price: reservePrice,
     });
 });
 
@@ -294,26 +328,10 @@ ponder.on("CorePool:FlashLoan", async ({event, context}) => {
 ponder.on("CorePool:ReserveDataUpdated", async ({event, context}) => {
     if (!isUSDC(event.args.reserve)) return;
 
-    const reservePrice = await getOraclePrice(context, event.args.reserve);
     const timestamp = Number(event.block.timestamp);
     const blockNumber = event.block.number;
 
-    // Insert historical ReserveDataUpdated record
-    await context.db.insert(ReserveDataUpdated).values({
-        id: event.id,
-        txHash: event.transaction.hash,
-        pool: event.log.address,
-        reserve: event.args.reserve,
-        liquidityRate: event.args.liquidityRate,
-        stableBorrowRate: event.args.stableBorrowRate,
-        variableBorrowRate: event.args.variableBorrowRate,
-        liquidityIndex: event.args.liquidityIndex,
-        variableBorrowIndex: event.args.variableBorrowIndex,
-        timestamp: timestamp,
-        price: reservePrice,
-    });
-
-    // Insert ReserveDataEvent for interest calculations (both supply and borrow)
+    // Store one canonical reserve-state row for both API history and interest calculations.
     await context.db.insert(ReserveDataEvent).values({
         id: `${event.transaction.hash}_${event.log.logIndex}_${event.args.reserve}`,
         txHash: event.transaction.hash,
@@ -391,8 +409,6 @@ ponder.on("CorePool:SwapBorrowRateMode", async ({event, context}) => {
 ponder.on("CorePool:MintedToTreasury", async ({event, context}) => {
     if (!isUSDC(event.args.reserve)) return;
 
-    const reservePrice = await getOraclePrice(context, event.args.reserve);
-
     await context.db.insert(MintedToTreasury).values({
         id: event.id,
         txHash: event.transaction.hash,
@@ -400,15 +416,12 @@ ponder.on("CorePool:MintedToTreasury", async ({event, context}) => {
         reserve: event.args.reserve,
         amountMinted: event.args.amountMinted,
         timestamp: Number(event.block.timestamp),
-        price: reservePrice,
     });
 });
 
 // MintUnbacked Event Handler
 ponder.on("CorePool:MintUnbacked", async ({event, context}) => {
     if (!isUSDC(event.args.reserve)) return;
-
-    const reservePrice = await getOraclePrice(context, event.args.reserve);
 
     await context.db.insert(MintUnbacked).values({
         id: event.id,
@@ -420,15 +433,12 @@ ponder.on("CorePool:MintUnbacked", async ({event, context}) => {
         amount: event.args.amount,
         referralCode: event.args.referralCode,
         timestamp: Number(event.block.timestamp),
-        price: reservePrice,
     });
 });
 
 // BackUnbacked Event Handler
 ponder.on("CorePool:BackUnbacked", async ({event, context}) => {
     if (!isUSDC(event.args.reserve)) return;
-
-    const reservePrice = await getOraclePrice(context, event.args.reserve);
 
     await context.db.insert(BackUnbacked).values({
         id: event.id,
@@ -439,7 +449,6 @@ ponder.on("CorePool:BackUnbacked", async ({event, context}) => {
         amount: event.args.amount,
         fee: event.args.fee,
         timestamp: Number(event.block.timestamp),
-        price: reservePrice,
     });
 });
 
@@ -507,7 +516,7 @@ async function isUsdcReserveListed(context: any, blockNumber: bigint): Promise<b
     return usdcReserveListed;
 }
 
-// USDC oracle price snapshot every 300 blocks, and DailyReserveIndex rows for
+// Hourly USDC oracle anchor, and DailyReserveIndex rows for
 // midnights that passed without any USDC reserve activity
 ponder.on("ChainlinkOracleUpdate:block", async ({event, context}) => {
     const blockNumber = event.block.number;
@@ -520,18 +529,7 @@ ponder.on("ChainlinkOracleUpdate:block", async ({event, context}) => {
             return;
         }
 
-        const price = await getOraclePrice(context, USDC_ADDRESS);
-
-        if (price && price > 0n) {
-            await context.db.insert(AssetPriceSnapshot).values({
-                id: `${USDC_ADDRESS}-${blockNumber}`,
-                asset: USDC_ADDRESS,
-                price: price,
-                decimals: USDC_DECIMALS,
-                blockNumber: blockNumber,
-                timestamp: timestamp,
-            });
-        }
+        await snapshotUSDCPrice(context, blockNumber, timestamp);
     } catch (error) {
         console.error(`[ChainlinkOracleUpdate] Error fetching USDC price at block ${blockNumber}:`, error);
     }
