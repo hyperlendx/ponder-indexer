@@ -8,4 +8,4 @@ Indexes the HyperLend core pool on HyperEVM for the **USDC reserve only**
 - USDC oracle price snapshots are taken every 300 blocks.
 - Yield / portfolio APIs live in `src/api/index.ts`.
 
-Isolated pairs and liquid staking tokens (kHYPE, beHYPE, wstHYPE) are not tracked.
+Isolated pairs and liquid staking tokens (kHYPE, beHYPE, wstHYPE) are not tracked
