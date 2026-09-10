@@ -31,7 +31,7 @@ async function snapshotUSDCPrice(context: any, blockNumber: bigint, timestamp: n
         const price = await getOraclePrice(context, USDC_ADDRESS);
         if (price > 0n) {
             await context.db.insert(AssetPriceSnapshot).values({
-                id: `${USDC_ADDRESS}-${blockNumber}`,
+                id: `${USDC_ADDRESS.toLowerCase()}-${blockNumber}`, // text id: keep every address key lowercase
                 asset: USDC_ADDRESS,
                 price,
                 decimals: USDC_DECIMALS,
@@ -127,8 +127,9 @@ ponder.on("CorePool:Repay", async ({event, context}) => {
         timestamp: timestamp,
     });
 
-    // When useATokens=true, the user is using their aTokens (supplied balance) to repay debt
-    // This means we need to reduce their supply position by the repay amount
+    // When useATokens=true the pool burns hTokens to repay the debt. The burned hTokens
+    // belong to msg.sender, i.e. event.args.repayer, not necessarily to the debtor
+    // (event.args.user), so the supply position reduced here is the repayer's.
     if (event.args.useATokens) {
         // Liquidity index from the in-memory reserve state (updated by the ReserveDataUpdated
         // event emitted earlier in this same transaction)
@@ -142,10 +143,10 @@ ponder.on("CorePool:Repay", async ({event, context}) => {
         // Calculate scaled balance from repay amount
         const scaledBalance = calculateScaledBalance(event.args.amount, currentLiquidityIndex);
 
-        // Update user position with negative scaled balance (like a withdraw)
+        // Update the repayer's position with a negative scaled balance (like a withdraw)
         await updateUserPosition(
             context,
-            event.args.user,
+            event.args.repayer,
             event.args.reserve,
             -scaledBalance, // Negative for reducing supply
             'withdraw', // Treat as withdraw since aTokens are being burned
