@@ -118,6 +118,11 @@ export async function loadUserAssetActivity(
     const db = context.db.sql || context.db;
     const userHex = user as `0x${string}`;
     const assetHex = asset as `0x${string}`;
+    // Ponder's hex columns lowercase values on write. The query builder applies that
+    // encoder automatically (eq(column, value)), but a raw sql`` template binds values
+    // verbatim, so addresses interpolated below must go through the column encoder too.
+    const userParam = sql.param(userHex, UserBalanceEvent.user);
+    const assetParam = sql.param(assetHex, UserBalanceEvent.asset);
     const startTimestamp = options.startTimestamp ?? 0;
     const includeRawActivity = options.includeRawActivity !== false;
 
@@ -155,8 +160,8 @@ export async function loadUserAssetActivity(
     const rawActivityTotals = includeRawActivity
         ? sql`
             select
-                coalesce((select sum(${Supply.amount}) from ${Supply} where ${Supply.onBehalfOf} = ${userHex} and ${Supply.reserve} = ${assetHex} and ${Supply.timestamp} < ${startTimestamp}), 0) as raw_supplied,
-                coalesce((select sum(${Withdraw.amount}) from ${Withdraw} where ${Withdraw.onBehalfOf} = ${userHex} and ${Withdraw.reserve} = ${assetHex} and ${Withdraw.timestamp} < ${startTimestamp}), 0) as raw_withdrawn
+                coalesce((select sum(${Supply.amount}) from ${Supply} where ${Supply.onBehalfOf} = ${userParam} and ${Supply.reserve} = ${assetParam} and ${Supply.timestamp} < ${startTimestamp}), 0) as raw_supplied,
+                coalesce((select sum(${Withdraw.amount}) from ${Withdraw} where ${Withdraw.onBehalfOf} = ${userParam} and ${Withdraw.reserve} = ${assetParam} and ${Withdraw.timestamp} < ${startTimestamp}), 0) as raw_withdrawn
         `
         : sql`select 0::numeric as raw_supplied, 0::numeric as raw_withdrawn`;
     const startingResultPromise = db.execute(sql`
@@ -165,26 +170,26 @@ export async function loadUserAssetActivity(
                 coalesce(sum(${Borrow.scaledAmount}), 0) as scaled_borrowed,
                 coalesce(sum(${Borrow.amount}), 0) as raw_borrowed
             from ${Borrow}
-            where ${Borrow.onBehalfOf} = ${userHex}
-              and ${Borrow.reserve} = ${assetHex}
+            where ${Borrow.onBehalfOf} = ${userParam}
+              and ${Borrow.reserve} = ${assetParam}
               and ${Borrow.timestamp} < ${startTimestamp}
         ), repay_totals as (
             select
                 coalesce(sum(${Repay.scaledAmount}), 0) as scaled_repaid,
                 coalesce(sum(${Repay.amount}), 0) as raw_repaid
             from ${Repay}
-            where ${Repay.user} = ${userHex}
-              and ${Repay.reserve} = ${assetHex}
+            where ${Repay.user} = ${userParam}
+              and ${Repay.reserve} = ${assetParam}
               and ${Repay.timestamp} < ${startTimestamp}
         ), liquidation_totals as (
             select
-                coalesce(sum(${LiquidationCall.scaledDebtToCover}) filter (where ${LiquidationCall.debtAsset} = ${assetHex}), 0) as scaled_debt_liquidated,
-                coalesce(sum(${LiquidationCall.debtToCover}) filter (where ${LiquidationCall.debtAsset} = ${assetHex}), 0) as raw_debt_liquidated,
-                coalesce(sum(${LiquidationCall.scaledCollateralAmount}) filter (where ${LiquidationCall.collateralAsset} = ${assetHex}), 0) as scaled_collateral_liquidated,
-                coalesce(sum(${LiquidationCall.liquidatedCollateralAmount}) filter (where ${LiquidationCall.collateralAsset} = ${assetHex}), 0) as raw_collateral_liquidated
+                coalesce(sum(${LiquidationCall.scaledDebtToCover}) filter (where ${LiquidationCall.debtAsset} = ${assetParam}), 0) as scaled_debt_liquidated,
+                coalesce(sum(${LiquidationCall.debtToCover}) filter (where ${LiquidationCall.debtAsset} = ${assetParam}), 0) as raw_debt_liquidated,
+                coalesce(sum(${LiquidationCall.scaledCollateralAmount}) filter (where ${LiquidationCall.collateralAsset} = ${assetParam}), 0) as scaled_collateral_liquidated,
+                coalesce(sum(${LiquidationCall.liquidatedCollateralAmount}) filter (where ${LiquidationCall.collateralAsset} = ${assetParam}), 0) as raw_collateral_liquidated
             from ${LiquidationCall}
-            where ${LiquidationCall.user} = ${userHex}
-              and (${LiquidationCall.debtAsset} = ${assetHex} or ${LiquidationCall.collateralAsset} = ${assetHex})
+            where ${LiquidationCall.user} = ${userParam}
+              and (${LiquidationCall.debtAsset} = ${assetParam} or ${LiquidationCall.collateralAsset} = ${assetParam})
               and ${LiquidationCall.timestamp} < ${startTimestamp}
         ), raw_activity_totals as (
             ${rawActivityTotals}

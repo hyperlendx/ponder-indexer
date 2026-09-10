@@ -282,7 +282,8 @@ export class ReserveIndexSeries {
                         ${ReserveDataEvent.variableBorrowIndex} as variable_borrow_index,
                         ${ReserveDataEvent.variableBorrowRate} as variable_borrow_rate
                     from ${ReserveDataEvent}
-                    where ${ReserveDataEvent.reserve} = ${this.reserve}
+                    -- Bind through the hex column encoder: stored addresses are lowercase.
+                    where ${ReserveDataEvent.reserve} = ${sql.param(this.reserve, ReserveDataEvent.reserve)}
                       and ${ReserveDataEvent.timestamp} <= requested.requested_timestamp
                     order by
                         ${ReserveDataEvent.timestamp} desc,

@@ -64,7 +64,8 @@ export class PriceSeries {
                         ${AssetPriceSnapshot.price} as price,
                         ${AssetPriceSnapshot.decimals} as decimals
                     from ${AssetPriceSnapshot}
-                    where ${AssetPriceSnapshot.asset} = ${this.asset}
+                    -- Bind through the hex column encoder: stored addresses are lowercase.
+                    where ${AssetPriceSnapshot.asset} = ${sql.param(this.asset, AssetPriceSnapshot.asset)}
                       and ${AssetPriceSnapshot.timestamp} <= requested.requested_timestamp
                     order by ${AssetPriceSnapshot.timestamp} desc
                     limit 1
