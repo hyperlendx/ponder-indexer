@@ -5,16 +5,6 @@ import {
     Supply,
     Withdraw,
     LiquidationCall,
-    FlashLoan,
-    ReserveUsedAsCollateralEnabled,
-    ReserveUsedAsCollateralDisabled,
-    SwapBorrowRateMode,
-    MintedToTreasury,
-    MintUnbacked,
-    BackUnbacked,
-    RebalanceStableBorrowRate,
-    IsolationModeTotalDebtUpdated,
-    HTokenTransfer,
     ReserveDataEvent,
     AssetPriceSnapshot,
 } from "ponder:schema";
@@ -32,11 +22,8 @@ import {
     getVariableBorrowIndexForEvent,
 } from "./helpers/reserveState";
 import {USDC_ADDRESS, USDC_DECIMALS, isUSDC} from "./helpers/usdc";
-import {getAddress} from 'viem'
-
-const wrappedTokenGatewayAddress = getAddress("0x49558c794ea2aC8974C9F27886DDfAa951E99171");
-const collateralSwapperAddress = getAddress("0x7469AA4124cc6ee078f98B581198eB39d2487E79");
-const liquidSwapRepayAdapter = getAddress("0x6C674165E3AFaD857fab8CB0E91BCC057b813F03");
+import {isWithdrawAdapter} from "./helpers/adapters";
+import {applyHTokenBalanceTransfer} from "./helpers/hTokenTransfers";
 
 /** Store the canonical periodic USDC price series used by all reports. */
 async function snapshotUSDCPrice(context: any, blockNumber: bigint, timestamp: number): Promise<void> {
@@ -58,24 +45,28 @@ async function snapshotUSDCPrice(context: any, blockNumber: bigint, timestamp: n
 }
 
 // ============================================================================
-// This indexer tracks ONLY the USDC reserve of the HyperLend core pool.
-// ponder.config.ts restricts which CorePool logs are fetched (event filters on
-// the indexed reserve/asset args); every handler below re-checks the reserve so
-// the USDC-only invariant is explicit and survives config changes.
+// This indexer tracks ONLY the USDC reserve of the HyperLend core pool, and only
+// the events the yield API reads (supply, withdraw, borrow, repay, liquidation,
+// reserve data updates, hUSDC transfers). ponder.config.ts restricts which
+// CorePool logs are fetched (event filters on the indexed reserve args); every
+// handler below re-checks the reserve so the USDC-only invariant is explicit and
+// survives config changes.
 // ============================================================================
 
-// USDC hToken BalanceTransfer Event Handler
-// The contract address is pinned to the USDC hToken, so the underlying reserve is always USDC.
+// hUSDC BalanceTransfer: the user's supply moved to another holder without a
+// Supply/Withdraw. Without this, a user who transfers hUSDC away keeps earning
+// "yield" in the API on a balance they no longer hold.
 ponder.on("USDCHToken:BalanceTransfer", async ({event, context}) => {
-    await context.db.insert(HTokenTransfer).values({
-        id: event.id,
-        txHash: event.transaction.hash,
-        reserve: USDC_ADDRESS,
-        from: event.args.from,
-        to: event.args.to,
-        value: event.args.value,
-        index: event.args.index
-    });
+    await applyHTokenBalanceTransfer(
+        context,
+        {from: event.args.from, to: event.args.to, value: event.args.value, index: event.args.index},
+        {
+            timestamp: Number(event.block.timestamp),
+            txHash: event.transaction.hash,
+            blockNumber: event.block.number,
+            logIndex: event.log.logIndex,
+        }
+    );
 });
 
 // Borrow Event Handler
@@ -221,14 +212,11 @@ ponder.on("CorePool:Withdraw", async ({event, context}) => {
     const timestamp = Number(event.block.timestamp);
     const blockNumber = event.block.number;
 
-    // Determine the actual user:
-    // - For WrappedTokenGateway withdrawals: event.args.user is the gateway, actual user is transaction.from
-    // - For CollateralSwapper withdrawals: event.args.user is the swapper, actual user is transaction.from
-    // - For LeverageHelper withdrawals: event.args.user is the helper, actual user is transaction.from
-    const isGatewayWithdrawal = getAddress(event.args.user) === wrappedTokenGatewayAddress;
-    const isCollateralSwapWithdrawal = getAddress(event.args.user) === collateralSwapperAddress;
-    const isLiquidSwapRepayAdapterWithdrawal = getAddress(event.args.user) === liquidSwapRepayAdapter;
-    const actualUser = (isGatewayWithdrawal || isCollateralSwapWithdrawal || isLiquidSwapRepayAdapterWithdrawal) ? event.transaction.from : event.args.user;
+    // Withdrawals through a known adapter (gateway, collateral swapper, repay adapter):
+    // event.args.user is the adapter, which pulled the user's hTokens with transferFrom
+    // in this same transaction; the actual user is transaction.from. The matching
+    // BalanceTransfer(user -> adapter) is skipped by the hToken handler (see adapters.ts).
+    const actualUser = isWithdrawAdapter(event.args.user) ? event.transaction.from : event.args.user;
 
     // Insert the historical Withdraw transaction record
     await context.db.insert(Withdraw).values({
@@ -305,25 +293,6 @@ ponder.on("CorePool:LiquidationCall", async ({event, context}) => {
     });
 });
 
-// FlashLoan Event Handler
-ponder.on("CorePool:FlashLoan", async ({event, context}) => {
-    if (!isUSDC(event.args.asset)) return;
-
-    await context.db.insert(FlashLoan).values({
-        id: event.id,
-        txHash: event.transaction.hash,
-        pool: event.log.address,
-        target: event.args.target,
-        initiator: event.args.initiator,
-        asset: event.args.asset,
-        amount: event.args.amount,
-        interestRateMode: event.args.interestRateMode,
-        premium: event.args.premium,
-        referralCode: event.args.referralCode,
-        timestamp: Number(event.block.timestamp),
-    });
-});
-
 // ReserveDataUpdated Event Handler - Enhanced for Interest Tracking
 ponder.on("CorePool:ReserveDataUpdated", async ({event, context}) => {
     if (!isUSDC(event.args.reserve)) return;
@@ -362,131 +331,13 @@ ponder.on("CorePool:ReserveDataUpdated", async ({event, context}) => {
     );
 });
 
-// ReserveUsedAsCollateralEnabled Event Handler
-ponder.on("CorePool:ReserveUsedAsCollateralEnabled", async ({event, context}) => {
-    if (!isUSDC(event.args.reserve)) return;
-
-    await context.db.insert(ReserveUsedAsCollateralEnabled).values({
-        id: event.id,
-        txHash: event.transaction.hash,
-        pool: event.log.address,
-        reserve: event.args.reserve,
-        user: event.args.user,
-        timestamp: Number(event.block.timestamp),
-    });
-});
-
-// ReserveUsedAsCollateralDisabled Event Handler
-ponder.on("CorePool:ReserveUsedAsCollateralDisabled", async ({event, context}) => {
-    if (!isUSDC(event.args.reserve)) return;
-
-    await context.db.insert(ReserveUsedAsCollateralDisabled).values({
-        id: event.id,
-        txHash: event.transaction.hash,
-        pool: event.log.address,
-        reserve: event.args.reserve,
-        user: event.args.user,
-        timestamp: Number(event.block.timestamp),
-    });
-});
-
-// SwapBorrowRateMode Event Handler
-ponder.on("CorePool:SwapBorrowRateMode", async ({event, context}) => {
-    if (!isUSDC(event.args.reserve)) return;
-
-    await context.db.insert(SwapBorrowRateMode).values({
-        id: event.id,
-        txHash: event.transaction.hash,
-        pool: event.log.address,
-        reserve: event.args.reserve,
-        user: event.args.user,
-        interestRateMode: event.args.interestRateMode,
-        timestamp: Number(event.block.timestamp),
-    });
-});
-
-// MintedToTreasury Event Handler
-ponder.on("CorePool:MintedToTreasury", async ({event, context}) => {
-    if (!isUSDC(event.args.reserve)) return;
-
-    await context.db.insert(MintedToTreasury).values({
-        id: event.id,
-        txHash: event.transaction.hash,
-        pool: event.log.address,
-        reserve: event.args.reserve,
-        amountMinted: event.args.amountMinted,
-        timestamp: Number(event.block.timestamp),
-    });
-});
-
-// MintUnbacked Event Handler
-ponder.on("CorePool:MintUnbacked", async ({event, context}) => {
-    if (!isUSDC(event.args.reserve)) return;
-
-    await context.db.insert(MintUnbacked).values({
-        id: event.id,
-        txHash: event.transaction.hash,
-        pool: event.log.address,
-        reserve: event.args.reserve,
-        user: event.args.user,
-        onBehalfOf: event.args.onBehalfOf,
-        amount: event.args.amount,
-        referralCode: event.args.referralCode,
-        timestamp: Number(event.block.timestamp),
-    });
-});
-
-// BackUnbacked Event Handler
-ponder.on("CorePool:BackUnbacked", async ({event, context}) => {
-    if (!isUSDC(event.args.reserve)) return;
-
-    await context.db.insert(BackUnbacked).values({
-        id: event.id,
-        txHash: event.transaction.hash,
-        pool: event.log.address,
-        reserve: event.args.reserve,
-        backer: event.args.backer,
-        amount: event.args.amount,
-        fee: event.args.fee,
-        timestamp: Number(event.block.timestamp),
-    });
-});
-
-// RebalanceStableBorrowRate Event Handler
-ponder.on("CorePool:RebalanceStableBorrowRate", async ({event, context}) => {
-    if (!isUSDC(event.args.reserve)) return;
-
-    await context.db.insert(RebalanceStableBorrowRate).values({
-        id: event.id,
-        txHash: event.transaction.hash,
-        pool: event.log.address,
-        reserve: event.args.reserve,
-        user: event.args.user,
-        timestamp: Number(event.block.timestamp),
-    });
-});
-
-// IsolationModeTotalDebtUpdated Event Handler
-ponder.on("CorePool:IsolationModeTotalDebtUpdated", async ({event, context}) => {
-    if (!isUSDC(event.args.asset)) return;
-
-    await context.db.insert(IsolationModeTotalDebtUpdated).values({
-        id: event.id,
-        txHash: event.transaction.hash,
-        pool: event.log.address,
-        asset: event.args.asset,
-        totalDebt: event.args.totalDebt,
-        timestamp: Number(event.block.timestamp),
-    });
-});
-
 // ============================================================================
 // USDC oracle price snapshots
 // ============================================================================
 
 // The USDC reserve was added to the pool after the CorePool startBlock. Until the
 // reserve is listed, the oracle has no price source for it, so we check the
-// reserves list (refreshed every ~1 hour = 3600 blocks at ~1 block/sec) before
+// reserves list (at most once per RESERVES_REFRESH_INTERVAL blocks) before
 // querying the oracle. Once listed, the flag stays true (reserves are never removed).
 let usdcReserveListed = false;
 let lastReservesRefreshBlock: bigint | null = null;
@@ -516,7 +367,7 @@ async function isUsdcReserveListed(context: any, blockNumber: bigint): Promise<b
     return usdcReserveListed;
 }
 
-// Hourly USDC oracle anchor, and DailyReserveIndex rows for
+// Daily USDC oracle anchor, and DailyReserveIndex rows for
 // midnights that passed without any USDC reserve activity
 ponder.on("ChainlinkOracleUpdate:block", async ({event, context}) => {
     const blockNumber = event.block.number;

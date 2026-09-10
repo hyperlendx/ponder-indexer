@@ -11,6 +11,7 @@ import {
     type UserAssetActivity,
     loadUserAssetActivity,
     isActiveInPeriod,
+    liquidationReducesRecordedBalance,
 } from "./userAssetActivity";
 import {ReserveIndexSeries} from "./reserveIndexSeries";
 import {loadPriceSeries} from "./priceSeries";
@@ -592,7 +593,7 @@ export async function calculateUserDailyPortfolioValue(
             debtDeltas.sort((a, b) => a.timestamp - b.timestamp);
 
             const collateralDeltas = activity.liquidations
-                .filter((event) => event.collateralAsset?.toLowerCase() === asset.toLowerCase())
+                .filter((event) => liquidationReducesRecordedBalance(event, asset))
                 .map((event) => ({
                     timestamp: Number(event.timestamp),
                     amount: BigInt(event.scaledCollateralAmount ?? 0n),

@@ -8,6 +8,7 @@ import {calculateUSDValueNumber} from "../usdCalculations";
 import {
     type UserAssetActivity,
     recordedScaledBalanceAt,
+    liquidationReducesRecordedBalance,
 } from "./userAssetActivity";
 import type {ReserveIndexSeries} from "./reserveIndexSeries";
 import type {PriceSeries} from "./priceSeries";
@@ -162,7 +163,7 @@ export async function calculateSegmentedCustomPeriodYield(
                 scaledBalance: BigInt(event.scaledBalance ?? 0n),
             })),
         ...activity.liquidations
-            .filter((event) => sameAddress(event.collateralAsset, activity.asset) && inPeriod(Number(event.timestamp)))
+            .filter((event) => liquidationReducesRecordedBalance(event, activity.asset) && inPeriod(Number(event.timestamp)))
             .map((event) => ({
                 timestamp: Number(event.timestamp),
                 kind: 'liquidation' as const,

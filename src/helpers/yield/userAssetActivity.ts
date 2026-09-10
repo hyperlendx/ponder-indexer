@@ -17,7 +17,7 @@ export type RepayRow = Pick<typeof Repay.$inferSelect,
     'id' | 'txHash' | 'amount' | 'scaledAmount' | 'timestamp'>;
 export type LiquidationRow = Pick<typeof LiquidationCall.$inferSelect,
     'id' | 'txHash' | 'collateralAsset' | 'debtAsset' | 'debtToCover' |
-    'liquidatedCollateralAmount' | 'scaledDebtToCover' | 'scaledCollateralAmount' | 'timestamp'>;
+    'liquidatedCollateralAmount' | 'scaledDebtToCover' | 'scaledCollateralAmount' | 'receiveAToken' | 'timestamp'>;
 export type SupplyRow = Pick<typeof Supply.$inferSelect, 'id' | 'txHash' | 'amount' | 'timestamp'>;
 export type WithdrawRow = Pick<typeof Withdraw.$inferSelect, 'id' | 'txHash' | 'amount' | 'timestamp'>;
 
@@ -54,6 +54,7 @@ const liquidationColumns = {
     liquidatedCollateralAmount: LiquidationCall.liquidatedCollateralAmount,
     scaledDebtToCover: LiquidationCall.scaledDebtToCover,
     scaledCollateralAmount: LiquidationCall.scaledCollateralAmount,
+    receiveAToken: LiquidationCall.receiveAToken,
     timestamp: LiquidationCall.timestamp,
 };
 const supplyColumns = {id: Supply.id, txHash: Supply.txHash, amount: Supply.amount, timestamp: Supply.timestamp};
@@ -103,6 +104,18 @@ export interface UserAssetActivity {
 
 function sameAddress(a: string | null | undefined, b: string): boolean {
     return !!a && a.toLowerCase() === b.toLowerCase();
+}
+
+/**
+ * Whether a liquidation of this asset's collateral must be subtracted from the
+ * recorded scaled balance. When the liquidator takes the underlying, the
+ * hTokens are burned without a BalanceTransfer, so only the LiquidationCall
+ * row knows about it. When the liquidator receives hTokens instead, the pool
+ * moves them with transferOnLiquidation, which emits BalanceTransfer, and the
+ * hToken handler has already written a transfer_out balance event for it.
+ */
+export function liquidationReducesRecordedBalance(liquidation: {collateralAsset: string | null; receiveAToken: boolean | null}, asset: string): boolean {
+    return sameAddress(liquidation.collateralAsset, asset) && liquidation.receiveAToken !== true;
 }
 
 /**
@@ -185,7 +198,7 @@ export async function loadUserAssetActivity(
             select
                 coalesce(sum(${LiquidationCall.scaledDebtToCover}) filter (where ${LiquidationCall.debtAsset} = ${assetParam}), 0) as scaled_debt_liquidated,
                 coalesce(sum(${LiquidationCall.debtToCover}) filter (where ${LiquidationCall.debtAsset} = ${assetParam}), 0) as raw_debt_liquidated,
-                coalesce(sum(${LiquidationCall.scaledCollateralAmount}) filter (where ${LiquidationCall.collateralAsset} = ${assetParam}), 0) as scaled_collateral_liquidated,
+                coalesce(sum(${LiquidationCall.scaledCollateralAmount}) filter (where ${LiquidationCall.collateralAsset} = ${assetParam} and ${LiquidationCall.receiveAToken} is not true), 0) as scaled_collateral_liquidated,
                 coalesce(sum(${LiquidationCall.liquidatedCollateralAmount}) filter (where ${LiquidationCall.collateralAsset} = ${assetParam}), 0) as raw_collateral_liquidated
             from ${LiquidationCall}
             where ${LiquidationCall.user} = ${userParam}
@@ -310,7 +323,7 @@ export function scaledBalanceAt(activity: UserAssetActivity, timestamp: number):
     let scaledBalance = BigInt(last.scaledBalance ?? 0n) - activity.startingScaledCollateralLiquidated;
 
     const liquidations = activity.liquidations.filter(
-        (l) => sameAddress(l.collateralAsset, activity.asset) && Number(l.timestamp) <= timestamp
+        (l) => liquidationReducesRecordedBalance(l, activity.asset) && Number(l.timestamp) <= timestamp
     );
     if (liquidations.length > 0) {
         for (const liquidation of liquidations) {
