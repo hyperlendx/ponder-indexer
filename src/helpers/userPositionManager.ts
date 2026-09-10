@@ -21,6 +21,11 @@ export async function updateUserPosition(
     currentLiquidityIndex?: bigint
 ): Promise<void> {
     const { db } = context;
+    // Ponder delivers event.args addresses lowercased, while constants such as USDC_ADDRESS
+    // are checksummed. The id columns are plain text (not hex), so the key must be
+    // normalized here or two callers can split one position across two rows.
+    user = user.toLowerCase();
+    asset = asset.toLowerCase();
     const positionId = `${user}_${asset}`;
 
     if (currentLiquidityIndex === undefined) {

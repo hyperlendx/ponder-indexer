@@ -41,6 +41,7 @@ function makeStore() {
 }
 
 const meta = {timestamp: 1_700_000_000, txHash: "0x01", blockNumber: 10n, logIndex: 3};
+const positionId = (user: string, asset: string = USDC_ADDRESS) => `${user.toLowerCase()}_${asset.toLowerCase()}`;
 
 describe("hUSDC BalanceTransfer", () => {
     it("moves scaled balance from sender to recipient and records both events at the transfer index", async () => {
@@ -51,8 +52,8 @@ describe("hUSDC BalanceTransfer", () => {
         const outcome = await applyHTokenBalanceTransfer(context, {from: ALICE, to: BOB, value: 400n, index}, meta);
 
         expect(outcome).toBe('applied');
-        expect(positions.get(`${ALICE}_${USDC_ADDRESS}`).scaledBalance).toBe(600n);
-        expect(positions.get(`${BOB}_${USDC_ADDRESS}`).scaledBalance).toBe(400n);
+        expect(positions.get(positionId(ALICE)).scaledBalance).toBe(600n);
+        expect(positions.get(positionId(BOB)).scaledBalance).toBe(400n);
         const transferEvents = events.filter((e) => e.txHash === "0x01");
         expect(transferEvents.map((e) => [e.user, e.eventType, e.transactionAmount, e.scaledBalance, e.liquidityIndex])).toEqual([
             [ALICE, 'transfer_out', -400n, 600n, index],
@@ -66,8 +67,8 @@ describe("hUSDC BalanceTransfer", () => {
         const {context, positions} = makeStore();
         await updateUserPosition(context, ALICE, USDC_ADDRESS, 1_000n, 'deposit', 1_600_000_000, "0x00", 1n, 0, RAY);
         await applyHTokenBalanceTransfer(context, {from: ALICE, to: BOB, value: 1_000n, index: RAY}, meta);
-        expect(positions.has(`${ALICE}_${USDC_ADDRESS}`)).toBe(false);
-        expect(positions.get(`${BOB}_${USDC_ADDRESS}`).scaledBalance).toBe(1_000n);
+        expect(positions.has(positionId(ALICE))).toBe(false);
+        expect(positions.get(positionId(BOB)).scaledBalance).toBe(1_000n);
     });
 
     it("skips transfers to or from a withdraw adapter, which the Withdraw handler already attributes", async () => {
@@ -77,8 +78,24 @@ describe("hUSDC BalanceTransfer", () => {
             expect(await applyHTokenBalanceTransfer(context, {from: ALICE, to: adapter, value: 100n, index: RAY}, meta)).toBe('skipped:adapter');
             expect(await applyHTokenBalanceTransfer(context, {from: adapter.toLowerCase(), to: ALICE, value: 100n, index: RAY}, meta)).toBe('skipped:adapter');
         }
-        expect(positions.get(`${ALICE}_${USDC_ADDRESS}`).scaledBalance).toBe(1_000n);
+        expect(positions.get(positionId(ALICE)).scaledBalance).toBe(1_000n);
         expect(events.filter((e) => e.txHash === "0x01")).toHaveLength(0);
+    });
+
+    it("keys the position identically whether addresses arrive lowercased (event args) or checksummed (constants)", async () => {
+        const {context, positions, events} = makeStore();
+        // Supply handler: Ponder passes event.args.onBehalfOf / event.args.reserve lowercased.
+        await updateUserPosition(context, ALICE.toLowerCase(), USDC_ADDRESS.toLowerCase(), 1_000n, 'deposit', 1_600_000_000, "0x00", 1n, 0, RAY);
+        // Transfer handler: checksummed `from` and the checksummed USDC_ADDRESS constant.
+        const checksummedAlice = "0xAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAa";
+        await applyHTokenBalanceTransfer(context, {from: checksummedAlice, to: BOB, value: 400n, index: RAY}, meta);
+
+        expect(positions.size).toBe(2);
+        expect(positions.get(positionId(ALICE)).scaledBalance).toBe(600n);
+        expect(positions.get(positionId(BOB)).scaledBalance).toBe(400n);
+        const out = events.find((e) => e.eventType === 'transfer_out');
+        expect(out.scaledBalance).toBe(600n);
+        expect(out.id).toBe(`0x01_3_${ALICE}_${USDC_ADDRESS.toLowerCase()}`);
     });
 
     it("skips zero-value and self transfers", () => {

@@ -41,8 +41,10 @@ function ceilToMidnight(timestamp: number): number {
 }
 
 async function writeDailyAnchor(db: any, reserve: `0x${string}`, day: number, base: ReserveState): Promise<void> {
+    // Text id: normalize casing since callers pass either event.args.reserve (lowercase)
+    // or the checksummed USDC_ADDRESS constant.
     await db.insert(DailyReserveIndex).values({
-        id: `${reserve}-${day}`,
+        id: `${reserve.toLowerCase()}-${day}`,
         reserve,
         day,
         eventTimestamp: base.timestamp,
